@@ -1,0 +1,44 @@
+# Data pipeline configuration
+# Usage: DataConfig.from_yaml("configs/data_config.yaml")
+
+train_source_dir: /home/keti/factory_safety/data/aihub/datasets/extracted/Training/원천데이터
+train_label_dir: /home/keti/factory_safety/data/aihub/datasets/extracted/Training/라벨링데이터
+val_source_dir: /home/keti/factory_safety/data/aihub/datasets/extracted/Validation/원천데이터
+val_label_dir: /home/keti/factory_safety/data/aihub/datasets/extracted/Validation/라벨링데이터
+cache_dir: /home/keti/factory_safety/cache
+
+# Sliding window
+window_size: 30
+step_size: 10
+
+# Normalization (from training set analysis)
+sensor_stats:
+  mean: [32.49, 15.70, 20.79, 36.32, 6.23, 42.73, 24.49, 11.21]
+  std: [9.27, 10.39, 12.15, 22.27, 18.61, 46.43, 29.74, 18.99]
+thermal_stats:
+  global_min: 30.98
+  global_max: 146.10
+thermal_norm_mode: global
+
+# Label strategy
+label_strategy: majority
+
+# Augmentation (disabled by default)
+augmentation_enabled: false
+sensor_noise_std: 0.01
+thermal_flip_prob: 0.5
+
+# DataLoader
+batch_size: 16
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+
+# Sampling
+use_weighted_sampler: true
+
+# Session detection
+session_gap_threshold: 120
+
+# Reproducibility
+seed: 42

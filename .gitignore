@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Local data and generated results
+/data/
+/cache/
+/results/
+/logs/
+*.log
+
+# Deployment/generated outputs
+jetson_deploy/results/
+jetson_deploy/reference/*.npz
+jetson_deploy/model/*.onnx
+jetson_deploy/model/*.trt
+jetson_deploy/model/*.engine
+
+# Archives and large transfer bundles
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+*~

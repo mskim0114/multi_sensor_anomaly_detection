@@ -1,0 +1,14 @@
+# Jetson Orin Nano user-space Python packages verified on L4T R36.5.0.
+#
+# TensorRT/CUDA themselves should come from JetPack/NVIDIA packages.
+# ONNX Runtime GPU may need a Jetson-specific wheel if PyPI does not match
+# the target JetPack/Python version.
+numpy==2.2.6
+onnxruntime-gpu==1.24.0
+sensirion-i2c-sps30==1.0.0
+sensirion-i2c-driver==1.0.2
+sensirion-driver-adapters==2.3.1
+sensirion-driver-support-types==1.2.1
+sensirion-shdlc-driver==0.1.5
+sensirion-shdlc-sensorbridge==0.2.0
+pyserial==3.5

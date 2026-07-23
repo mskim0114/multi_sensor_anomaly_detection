@@ -363,3 +363,31 @@ git add docs/Jetson_Orin_Nano_초기세팅_가이드.md \
 git commit -m "docs: document Jetson sensor setup"
 git push
 ```
+
+## 12. GitHub 인증 방식
+
+Jetson에서 매번 GitHub token을 입력하지 않도록 SSH key 방식을 기본으로 사용한다. Personal Access Token은 채팅이나 문서에 남기지 않는다. 토큰이 노출되면 즉시 GitHub에서 revoke하고 새로 발급한다.
+
+새 Jetson에서 SSH key를 만드는 예:
+
+```bash
+ssh-keygen -t ed25519 -C "jetson-orin-nano"
+cat ~/.ssh/id_ed25519.pub
+```
+
+`cat`으로 출력된 공개키를 GitHub 웹에서 등록한다.
+
+```text
+GitHub -> Settings -> SSH and GPG keys -> New SSH key
+```
+
+등록 후 프로젝트 remote를 SSH 주소로 바꾼다.
+
+```bash
+cd ~/projects/factory_safety
+git remote set-url origin git@github.com:mskim0114/multi_sensor_anomaly_detection.git
+ssh -T git@github.com
+git push
+```
+
+여러 Jetson 보드에 같은 개인 token을 복사해서 쓰지 않는다. 여러 대에 배포할 때는 보드별 SSH key를 만들고, 필요하면 저장소 단위 deploy key 또는 별도 machine account를 사용한다.

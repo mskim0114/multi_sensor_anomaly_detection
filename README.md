@@ -7,6 +7,12 @@
 - [Jetson Orin Nano 초기 세팅 가이드](docs/Jetson_Orin_Nano_초기세팅_가이드.md)
 - [Jetson Orin Nano 40-pin 핀맵](docs/Jetson_Orin_Nano_40pin_pinmap.md)
 - [SPS30 Jetson I2C 연결 메모](docs/SPS30_Jetson_I2C_연결.md)
+- [NTC 10K + ADS1115 Jetson 연결 메모](docs/NTC10K_ADS1115_Jetson_연결.md)
+- [이상상태 시나리오 및 데이터 수집 전략](docs/이상상태_시나리오_및_데이터수집전략.md)
+
+중요 전제: 실제 설치 환경과 추가 센서 조합에 대응되는 학습 데이터셋은 아직 없다. 현재 ONNX 모델은 Jetson GPU 추론과 파이프라인 검증용 기준 모델로 사용하고, 현장 이상상태 판정 모델은 정상 데이터 수집과 라벨링 이후 재학습한다.
+
+현재 실행 방침: 센서 추가는 보류하고, 기존 모델 입력 구조와 맞는 `PureThermal 열화상`, `NTC 10K + ADS1115`, `SPS30 미세먼지`, `DHS20P400A-CL420 전류` 4종을 먼저 연결/검증/수집한다. BME680, SGP30, SCD30은 1차 현장 데이터 수집이 안정화된 뒤 필요성이 확인되면 추가한다.
 
 ## 환경 설정
 
@@ -97,6 +103,7 @@ factory_safety/
 │   ├── 연구노트/                        #   연구노트 #01~#06
 │   ├── 보고서/                          #   실험결과 보고서
 │   ├── 참고문서/                        #   AI Hub 분석, 로드맵, 센서 가이드
+│   ├── 이상상태_시나리오_및_데이터수집전략.md
 │   ├── figures/                        #   보고서용 이미지
 │   └── 오류_및_해결_로그.md              #   트러블슈팅 기록
 ├── data/aihub/

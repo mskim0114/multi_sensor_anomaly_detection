@@ -7,6 +7,10 @@
 새 Jetson Orin Nano를 처음 세팅할 때는 먼저 상위 문서
 [`../docs/Jetson_Orin_Nano_초기세팅_가이드.md`](../docs/Jetson_Orin_Nano_초기세팅_가이드.md)를 기준으로 OS/권한/GPU/센서 검증을 진행하세요.
 
+현장 설치 센서 조합에 대응되는 학습 데이터셋은 아직 없습니다. 현재 ONNX 모델은 Jetson GPU 추론과 파이프라인 검증용 기준 모델이며, 실제 현장 판정 모델은 센서 로그 수집과 라벨링 이후 재학습해야 합니다. 세부 전략은 [`../docs/이상상태_시나리오_및_데이터수집전략.md`](../docs/이상상태_시나리오_및_데이터수집전략.md)를 기준으로 합니다.
+
+1차 설치에서는 센서를 추가하지 않고 기존 모델 입력과 맞는 `PureThermal`, `NTC/ADS1115`, `SPS30`, `DHS20P400A-CL420` 조합을 우선 검증합니다. BME680, SGP30, SCD30은 후보로만 기록하고 현장 데이터 수집이 안정화된 뒤 2차로 검토합니다.
+
 ## 패키지 구성
 
 ```
@@ -23,7 +27,10 @@ jetson_deploy/
 │   ├── 02_benchmark_latency.py        # 추론 latency 벤치마크
 │   ├── 03_verify_accuracy.py          # PC ↔ Jetson 예측 일치 검증
 │   ├── 04_realtime_pipeline.py        # 실시간 스트리밍 시뮬레이션
-│   └── 05_summary.py                  # 결과 통합 요약
+│   ├── 05_summary.py                  # 결과 통합 요약
+│   ├── 06_capture_purethermal.py      # PureThermal UVC 캡처
+│   ├── 07_read_sps30.py               # SPS30 미세먼지 I2C 읽기
+│   └── 08_read_ntc_ads1115.py         # ADS1115 기반 NTC 온도 읽기
 ├── requirements-jetson.txt             # Jetson 사용자 공간 Python 패키지
 ├── results/                           # 스크립트 실행 결과 JSON 저장됨
 │
@@ -121,7 +128,8 @@ ONNX는 수학적으로 결정론적이므로 Jetson EP가 표준 구현이라�
 1. **TensorRT 엔진 변환** — `trtexec --onnx=model_v2plus.onnx --saveEngine=v2plus.trt --fp16` 으로 < 2ms 달성
 2. **전력/온도 모니터링** — `tegrastats` 백그라운드 측정
 3. **실제 센서 연결** — NTC/PM/CT 센서 → I2C/SPI/ADC 입력 파이프라인
-4. **현장 적용 fine-tuning** — domain adaptation
+4. **현장 데이터 수집** — 정상 운전 로그, 안전 검증 이벤트, 라벨링
+5. **현장 적용 모델 재학습** — 새 센서 feature vector 확정 후 ONNX/TensorRT 재배포
 
 ## Codex CLI 작업
 

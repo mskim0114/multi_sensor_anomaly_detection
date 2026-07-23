@@ -7,6 +7,8 @@
 - Jetson OS/JetPack/CUDA/TensorRT/Python 환경을 확인한다.
 - ONNX/TensorRT 추론 검증 스크립트가 GPU로 통과하게 만든다.
 - PureThermal 열화상 카메라와 SPS30 미세먼지 센서를 실제로 읽는다.
+- 현장 전용 데이터셋이 없다는 전제를 두고, 센서 설치 후 정상 데이터 수집과 라벨링 절차를 시작한다.
+- 1차 설치에서는 센서를 추가하지 않고 기존 모델 입력 구조와 맞는 열화상, NTC, 미세먼지, 전류 센서를 우선한다.
 - 다음 보드에서도 같은 과정을 반복할 수 있도록 GitHub에 문서와 스크립트를 남긴다.
 
 ## 기준 링크
@@ -265,7 +267,7 @@ results/sps30/*.json
 
 ## 9. ADS1115, NTC, 전류 센서 계획
 
-아직 전체 실측 검증 전 단계다. 연결 전 아래 원칙을 지킨다.
+1차 설치 범위는 기존 모델 입력 구조와 맞는 센서로 제한한다. NTC는 ADS1115를 통해 읽는다. 전류 센서는 아직 전체 실측 검증 전 단계다.
 
 - ADS1115는 Jetson I2C에 연결하고 3.3V 구동을 우선한다.
 - ADS1115 2개는 주소를 분리한다. 예: `0x48`, `0x49`.
@@ -278,6 +280,8 @@ results/sps30/*.json
 
 - `docs/센서_보유목록.md`
 - `docs/SPS30_Jetson_I2C_연결.md`
+- `docs/NTC10K_ADS1115_Jetson_연결.md`
+- `docs/이상상태_시나리오_및_데이터수집전략.md`
 - `docs/Jetson_Orin_Nano_40pin_pinmap.md`
 
 ## 10. 새 보드 인수 테스트 체크리스트
@@ -295,7 +299,11 @@ results/sps30/*.json
 [ ] python3 scripts/06_capture_purethermal.py 성공
 [ ] SPS30이 sudo i2cdetect -r -y 1 에서 0x69로 보임
 [ ] python3 scripts/07_read_sps30.py 성공
+[ ] ADS1115가 sudo i2cdetect -r -y 1 에서 0x48로 보임
+[ ] python3 scripts/08_read_ntc_ads1115.py 성공
 [ ] 결과 JSON/CSV를 results/ 아래에 저장
+[ ] 현장 데이터셋이 없으므로 정상 운전 로그 수집 시작
+[ ] BME680, SGP30, SCD30은 1차 설치에서 제외
 [ ] 세팅 중 변경사항을 docs/오류_및_해결_로그.md 또는 관련 센서 문서에 기록
 ```
 

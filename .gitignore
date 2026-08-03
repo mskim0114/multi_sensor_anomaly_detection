@@ -1,35 +1,83 @@
-# Python
+# Compiled and build artifacts
+*.pyc
 __pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.out
+*.a
+*.class
+
+# Dependencies
 .venv/
 venv/
-env/
+.env
+.env.local
+.env.*
 
-# Local data and generated results
-/data/
-/cache/
-/results/
-/logs/
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Coverage reports
+.coverage
+coverage/
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Python specific
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Cache directories
+.mypy_cache/
+.pytest_cache/
+.hypothesis_cache/
+
+# Distribution / packaging
+.pybuild/
+.tox/
+.coverage.xml
+nosetests.xml
+coverage.xml
+*.cover
 *.log
 
-# Deployment/generated outputs
-jetson_deploy/results/
-jetson_deploy/reference/*.npz
-jetson_deploy/model/*.onnx
-jetson_deploy/model/*.trt
-jetson_deploy/model/*.engine
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# Archives and large transfer bundles
-*.tar
-*.tar.gz
-*.tgz
-*.zip
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
 
-# OS/editor
-.DS_Store
-.idea/
-.vscode/
-*~
+# Pyre
+.pyre/

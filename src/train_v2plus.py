@@ -23,36 +23,57 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classifi
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.v2_plus import V2Plus, SupConLoss
 
+# Enable TF32 for faster training on Ampere GPUs
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+# Enable cudnn benchmarking for fixed-size inputs
+torch.backends.cudnn.benchmark = True
+
 logger = logging.getLogger(__name__)
 
 RESULTS_DIR = "/home/keti/factory_safety/results/v2plus"
 
 
 def train_one_epoch(model, loader, ce_criterion, supcon_criterion,
-                    optimizer, device, supcon_weight=0.3):
+                    optimizer, device, supcon_weight=0.3, scaler=None):
+    """Train for one epoch with optional mixed precision."""
     model.train()
     total_loss = 0.0
     all_preds, all_labels = [], []
+    use_amp = scaler is not None
 
     for batch in loader:
-        sensor = batch["sensor"].to(device)
-        thermal = batch["thermal"].to(device)
-        labels = batch["label"].to(device)
+        sensor = batch["sensor"].to(device, non_blocking=True)
+        thermal = batch["thermal"].to(device, non_blocking=True)
+        labels = batch["label"].to(device, non_blocking=True)
 
         optimizer.zero_grad()
 
-        # Get embedding and logits
-        embedding = model.encode(sensor, thermal)
-        logits = model.classifier(model.dropout(embedding))
+        if use_amp:
+            # Mixed precision training
+            with torch.cuda.amp.autocast():
+                embedding = model.encode(sensor, thermal)
+                logits = model.classifier(model.dropout(embedding))
+                ce_loss = ce_criterion(logits, labels)
+                supcon_loss = supcon_criterion(embedding, labels)
+                loss = (1 - supcon_weight) * ce_loss + supcon_weight * supcon_loss
 
-        # Combined loss
-        ce_loss = ce_criterion(logits, labels)
-        supcon_loss = supcon_criterion(embedding, labels)
-        loss = (1 - supcon_weight) * ce_loss + supcon_weight * supcon_loss
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Full precision training
+            embedding = model.encode(sensor, thermal)
+            logits = model.classifier(model.dropout(embedding))
+            ce_loss = ce_criterion(logits, labels)
+            supcon_loss = supcon_criterion(embedding, labels)
+            loss = (1 - supcon_weight) * ce_loss + supcon_weight * supcon_loss
 
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
 
         total_loss += loss.item()
         preds = logits.argmax(dim=-1)
@@ -72,12 +93,14 @@ def evaluate(model, loader, ce_criterion, device):
     all_preds, all_labels = [], []
 
     for batch in loader:
-        sensor = batch["sensor"].to(device)
-        thermal = batch["thermal"].to(device)
-        labels = batch["label"].to(device)
+        sensor = batch["sensor"].to(device, non_blocking=True)
+        thermal = batch["thermal"].to(device, non_blocking=True)
+        labels = batch["label"].to(device, non_blocking=True)
 
-        logits = model(sensor, thermal)
-        loss = ce_criterion(logits, labels)
+        # Use autocast for consistent mixed precision during eval
+        with torch.cuda.amp.autocast():
+            logits = model(sensor, thermal)
+            loss = ce_criterion(logits, labels)
 
         total_loss += loss.item()
         preds = logits.argmax(dim=-1)
@@ -102,6 +125,8 @@ def main():
                         help="Weight for SupCon loss (0=CE only, 1=SupCon only)")
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--gpu", type=int, default=1)
+    parser.add_argument("--amp", action="store_true", 
+                        help="Enable Automatic Mixed Precision for faster training")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -150,6 +175,11 @@ def main():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3,
     )
+    
+    # Mixed precision scaler
+    scaler = torch.cuda.amp.GradScaler() if args.amp else None
+    if args.amp:
+        logger.info("Mixed Precision (AMP) enabled")
 
     # Training
     best_val_f1 = 0.0
@@ -168,7 +198,7 @@ def main():
 
         train_loss, train_acc, train_f1 = train_one_epoch(
             model, train_loader, ce_criterion, supcon_criterion,
-            optimizer, device, args.supcon_weight,
+            optimizer, device, args.supcon_weight, scaler=scaler,
         )
 
         val_loss, val_acc, val_f1, val_preds, val_labels = evaluate(

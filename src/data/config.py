@@ -62,9 +62,9 @@ class DataConfig:
 
     # --- DataLoader ---
     batch_size: int = 16
-    num_workers: int = 4
+    num_workers: int = 8  # Increased from 4 to 8 for better I/O parallelism
     pin_memory: bool = True
-    prefetch_factor: int = 2
+    prefetch_factor: int = 4  # Increased from 2 to 4 for better prefetching
 
     # --- Sampling ---
     use_weighted_sampler: bool = True

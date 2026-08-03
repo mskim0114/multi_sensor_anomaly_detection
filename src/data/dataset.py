@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -46,6 +47,22 @@ class ManufacturingDataset(Dataset):
         self.augmentation = augmentation
 
         self.windows = self._build_windows()
+        # Pre-load all labels into memory (fast lookup)
+        self._all_labels = self.get_all_labels()
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _load_single_sensor(source_dir: str, basename: str) -> np.ndarray:
+        """Load single sensor CSV with LRU caching."""
+        path = os.path.join(source_dir, basename + ".csv")
+        return np.loadtxt(path, delimiter=",", skiprows=1, dtype=np.float32)
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _load_single_thermal(source_dir: str, basename: str) -> np.ndarray:
+        """Load single thermal BIN with LRU caching."""
+        path = os.path.join(source_dir, basename + ".bin")
+        return np.load(path, mmap_mode="r").astype(np.float32)
 
     def _build_windows(self) -> list[WindowSpec]:
         """Pre-compute all valid (session_idx, start_idx) pairs."""
@@ -97,21 +114,13 @@ class ManufacturingDataset(Dataset):
         }
 
     def _load_sensor_window(self, basenames: list[str]) -> np.ndarray:
-        """Read CSV files for sensor data. Each CSV is ~80 bytes."""
-        rows = []
-        for bn in basenames:
-            path = os.path.join(self.source_dir, bn + ".csv")
-            row = np.loadtxt(path, delimiter=",", skiprows=1, dtype=np.float32)
-            rows.append(row)
+        """Read CSV files for sensor data with LRU caching."""
+        rows = [self._load_single_sensor(self.source_dir, bn) for bn in basenames]
         return np.stack(rows)  # (window_size, 8)
 
     def _load_thermal_window(self, basenames: list[str]) -> np.ndarray:
-        """Memory-map BIN files for thermal images."""
-        frames = []
-        for bn in basenames:
-            path = os.path.join(self.source_dir, bn + ".bin")
-            frame = np.load(path, mmap_mode="r").astype(np.float32)
-            frames.append(frame)
+        """Load thermal images with LRU caching."""
+        frames = [self._load_single_thermal(self.source_dir, bn) for bn in basenames]
         return np.stack(frames)  # (window_size, 120, 160)
 
     def _compute_label(self, labels: list[int]) -> int:
@@ -127,4 +136,4 @@ class ManufacturingDataset(Dataset):
             session = self.index.sessions[spec.session_idx]
             window_labels = session.labels[spec.start:spec.start + self.config.window_size]
             labels.append(self._compute_label(window_labels))
-        return np.array(labels)
+        return np.array(labels, dtype=np.int64)

@@ -11,8 +11,10 @@ import logging
 import os
 import pickle
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,24 @@ def _read_label(label_dir: str, basename: str) -> int:
     return int(data["annotations"][0]["tagging"][0]["state"])
 
 
+def _read_labels_batch(label_dir: str, basenames: list[str]) -> list[int]:
+    """Read multiple labels in parallel using thread pool."""
+    results = {}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_bn = {
+            executor.submit(_read_label, label_dir, bn): bn 
+            for bn in basenames
+        }
+        for future in as_completed(future_to_bn):
+            bn = future_to_bn[future]
+            try:
+                results[bn] = future.result()
+            except Exception as e:
+                logger.warning(f"Failed to read label for {bn}: {e}")
+                results[bn] = 0  # default fallback
+    return [results[bn] for bn in basenames]
+
+
 def build_session_index(
     source_dir: str,
     label_dir: str,
@@ -106,8 +126,10 @@ def build_session_index(
     if skipped:
         logger.warning(f"Skipped {skipped} files with unrecognized names")
 
-    # Sort each group by time, then split into sessions by gap
-    sessions: list[SessionInfo] = []
+    # Collect all basenames first for batch label loading
+    all_basenames = []
+    session_boundaries: list[tuple[str, str, int, list[str]]] = []
+    
     for (device_id, date_str), entries in sorted(parsed.items()):
         entries.sort()  # sort by seconds
 
@@ -118,17 +140,9 @@ def build_session_index(
 
         for seconds, bn in entries[1:]:
             if seconds - prev_time > gap_threshold:
-                # Flush current session
-                session_id = f"{device_id}_{date_str}_{current_basenames[0].split('_')[-1][:4]}"
-                labels = [_read_label(label_dir, b) for b in current_basenames]
-                device_type = "agv" if "agv" in device_id else "oht"
-                sessions.append(SessionInfo(
-                    session_id=session_id,
-                    device_id=device_id,
-                    device_type=device_type,
-                    basenames=current_basenames,
-                    labels=labels,
-                ))
+                # Record session boundary
+                session_boundaries.append((device_id, date_str, current_start_time, current_basenames.copy()))
+                all_basenames.extend(current_basenames)
                 # Start new session
                 current_basenames = [bn]
                 current_start_time = seconds
@@ -138,16 +152,29 @@ def build_session_index(
 
         # Flush last session
         if current_basenames:
-            session_id = f"{device_id}_{date_str}_{current_basenames[0].split('_')[-1][:4]}"
-            labels = [_read_label(label_dir, b) for b in current_basenames]
-            device_type = "agv" if "agv" in device_id else "oht"
-            sessions.append(SessionInfo(
-                session_id=session_id,
-                device_id=device_id,
-                device_type=device_type,
-                basenames=current_basenames,
-                labels=labels,
-            ))
+            session_boundaries.append((device_id, date_str, current_start_time, current_basenames.copy()))
+            all_basenames.extend(current_basenames)
+
+    # Load all labels in parallel (major speedup!)
+    logger.info(f"Loading {len(all_basenames)} labels in parallel...")
+    all_labels = _read_labels_batch(label_dir, all_basenames)
+    
+    # Build session index from pre-loaded labels
+    sessions: list[SessionInfo] = []
+    label_idx = 0
+    for device_id, date_str, start_time, basenames in session_boundaries:
+        n = len(basenames)
+        labels = all_labels[label_idx:label_idx + n]
+        label_idx += n
+        session_id = f"{device_id}_{date_str}_{basenames[0].split('_')[-1][:4]}"
+        device_type = "agv" if "agv" in device_id else "oht"
+        sessions.append(SessionInfo(
+            session_id=session_id,
+            device_id=device_id,
+            device_type=device_type,
+            basenames=basenames,
+            labels=labels,
+        ))
 
     sessions.sort(key=lambda s: s.session_id)
     index = DatasetIndex(sessions=sessions, split=split)

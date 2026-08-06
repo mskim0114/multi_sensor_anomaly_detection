@@ -75,11 +75,17 @@ def _read_label(label_dir: str, basename: str) -> int:
 
 
 def _read_labels_batch(label_dir: str, basenames: list[str]) -> list[int]:
-    """Read multiple labels in parallel using thread pool."""
+    """Read multiple labels in parallel using thread pool.
+
+    Raises RuntimeError if any label fails to load. Silently defaulting to
+    label 0 (as an earlier version did) risks training on corrupted labels
+    without the operator noticing.
+    """
     results = {}
+    failures: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=8) as executor:
         future_to_bn = {
-            executor.submit(_read_label, label_dir, bn): bn 
+            executor.submit(_read_label, label_dir, bn): bn
             for bn in basenames
         }
         for future in as_completed(future_to_bn):
@@ -87,8 +93,15 @@ def _read_labels_batch(label_dir: str, basenames: list[str]) -> list[int]:
             try:
                 results[bn] = future.result()
             except Exception as e:
-                logger.warning(f"Failed to read label for {bn}: {e}")
-                results[bn] = 0  # default fallback
+                failures.append((bn, str(e)))
+
+    if failures:
+        summary = "; ".join(f"{bn}: {err}" for bn, err in failures[:5])
+        raise RuntimeError(
+            f"Failed to read {len(failures)} label file(s). "
+            f"First few: {summary}"
+        )
+
     return [results[bn] for bn in basenames]
 
 

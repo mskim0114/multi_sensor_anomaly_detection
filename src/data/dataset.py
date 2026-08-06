@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from functools import lru_cache
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -26,6 +25,14 @@ class ManufacturingDataset(Dataset):
 
     Windows never cross session boundaries. Each __getitem__ returns
     a dict with sensor, thermal, label, and metadata.
+
+    Note on caching (2026-08-06): a previous version used
+    @lru_cache(maxsize=128) on the per-file loaders. This was measured
+    to be ineffective because (a) the dataset has ~90k files against a
+    128-entry cache, and (b) DataLoader num_workers>1 gives each worker
+    its own process-local cache. Reverted to the plain inline loader.
+    Labels are still pre-loaded into memory in __init__ (see
+    self._all_labels), which is where the real speedup lives.
     """
 
     def __init__(
@@ -47,22 +54,8 @@ class ManufacturingDataset(Dataset):
         self.augmentation = augmentation
 
         self.windows = self._build_windows()
-        # Pre-load all labels into memory (fast lookup)
+        # Pre-load all labels into memory (fast lookup for WeightedRandomSampler)
         self._all_labels = self.get_all_labels()
-
-    @staticmethod
-    @lru_cache(maxsize=128)
-    def _load_single_sensor(source_dir: str, basename: str) -> np.ndarray:
-        """Load single sensor CSV with LRU caching."""
-        path = os.path.join(source_dir, basename + ".csv")
-        return np.loadtxt(path, delimiter=",", skiprows=1, dtype=np.float32)
-
-    @staticmethod
-    @lru_cache(maxsize=128)
-    def _load_single_thermal(source_dir: str, basename: str) -> np.ndarray:
-        """Load single thermal BIN with LRU caching."""
-        path = os.path.join(source_dir, basename + ".bin")
-        return np.load(path, mmap_mode="r").astype(np.float32)
 
     def _build_windows(self) -> list[WindowSpec]:
         """Pre-compute all valid (session_idx, start_idx) pairs."""
@@ -88,7 +81,7 @@ class ManufacturingDataset(Dataset):
         # Load sensor data: 30 CSV files
         sensor_seq = self._load_sensor_window(basenames)
 
-        # Load thermal data: 30 BIN files
+        # Load thermal data: 30 BIN (npy) files
         thermal_seq = self._load_thermal_window(basenames)
 
         # Determine label
@@ -114,13 +107,26 @@ class ManufacturingDataset(Dataset):
         }
 
     def _load_sensor_window(self, basenames: list[str]) -> np.ndarray:
-        """Read CSV files for sensor data with LRU caching."""
-        rows = [self._load_single_sensor(self.source_dir, bn) for bn in basenames]
+        """Read CSV files for sensor data. Each CSV is ~80 bytes."""
+        rows = []
+        for bn in basenames:
+            path = os.path.join(self.source_dir, bn + ".csv")
+            row = np.loadtxt(path, delimiter=",", skiprows=1, dtype=np.float32)
+            rows.append(row)
         return np.stack(rows)  # (window_size, 8)
 
     def _load_thermal_window(self, basenames: list[str]) -> np.ndarray:
-        """Load thermal images with LRU caching."""
-        frames = [self._load_single_thermal(self.source_dir, bn) for bn in basenames]
+        """Memory-map BIN (npy-format) files for thermal images.
+
+        The .bin extension is a misnomer: files are actually numpy .npy
+        format (magic bytes \\x93NUMPY), so np.load with mmap_mode='r'
+        is the correct loader.
+        """
+        frames = []
+        for bn in basenames:
+            path = os.path.join(self.source_dir, bn + ".bin")
+            frame = np.load(path, mmap_mode="r").astype(np.float32)
+            frames.append(frame)
         return np.stack(frames)  # (window_size, 120, 160)
 
     def _compute_label(self, labels: list[int]) -> int:

@@ -23,13 +23,20 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classifi
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.v2_plus import V2Plus, SupConLoss
 
-# Enable TF32 for faster training on Ampere GPUs
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-# Enable cudnn benchmarking for fixed-size inputs
-torch.backends.cudnn.benchmark = True
-
 logger = logging.getLogger(__name__)
+
+
+def enable_fast_math():
+    """Enable TF32 + cuDNN benchmark for faster training on Ampere+ GPUs.
+
+    Both settings introduce non-determinism / minor numeric drift, so they
+    are opt-in via --fast rather than always on. Reproducibility runs that
+    must match paper numbers (F1 = 0.9557 +/- 0.0006) should leave them off.
+    """
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    logger.info("Fast math enabled: TF32 matmul, TF32 cudnn, cudnn benchmark=True")
 
 RESULTS_DIR = "/home/keti/factory_safety/results/v2plus"
 
@@ -50,8 +57,8 @@ def train_one_epoch(model, loader, ce_criterion, supcon_criterion,
         optimizer.zero_grad()
 
         if use_amp:
-            # Mixed precision training
-            with torch.cuda.amp.autocast():
+            # Mixed precision training (fp16 forward/loss, fp32 optimizer)
+            with torch.amp.autocast("cuda"):
                 embedding = model.encode(sensor, thermal)
                 logits = model.classifier(model.dropout(embedding))
                 ce_loss = ce_criterion(logits, labels)
@@ -98,7 +105,8 @@ def evaluate(model, loader, ce_criterion, device):
         labels = batch["label"].to(device, non_blocking=True)
 
         # Use autocast for consistent mixed precision during eval
-        with torch.cuda.amp.autocast():
+        # (harmless in fp32 mode; keeps AMP-trained + fp32-trained eval symmetric)
+        with torch.amp.autocast("cuda"):
             logits = model(sensor, thermal)
             loss = ce_criterion(logits, labels)
 
@@ -125,8 +133,11 @@ def main():
                         help="Weight for SupCon loss (0=CE only, 1=SupCon only)")
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--gpu", type=int, default=1)
-    parser.add_argument("--amp", action="store_true", 
+    parser.add_argument("--amp", action="store_true",
                         help="Enable Automatic Mixed Precision for faster training")
+    parser.add_argument("--fast", action="store_true",
+                        help="Enable TF32 matmul + cudnn.benchmark. Introduces "
+                             "non-determinism; do not use for paper-reproducibility runs.")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -134,6 +145,9 @@ def main():
         format="%(asctime)s %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    if args.fast:
+        enable_fast_math()
 
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -177,7 +191,7 @@ def main():
     )
     
     # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler() if args.amp else None
+    scaler = torch.amp.GradScaler("cuda") if args.amp else None
     if args.amp:
         logger.info("Mixed Precision (AMP) enabled")
 

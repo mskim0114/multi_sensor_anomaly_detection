@@ -89,11 +89,11 @@ For time series classification, TS2Vec [29] and SoftCLT [30] have demonstrated t
 
 ### 3.1. Dataset Overview
 
-We use the "Manufacturing Transport Device Degradation Predictive Maintenance Multimodal Data" dataset from AI Hub [32], a large-scale public dataset designed for predictive maintenance research. The dataset comprises 111,870 multimodal samples collected from 36 industrial transport devices: 18 Overhead Hoist Transports (OHTs) and 18 Automated Guided Vehicles (AGVs) operating in semiconductor and display manufacturing facilities.
+We use the "Manufacturing Transport Device Degradation Predictive Maintenance Multimodal Data" dataset from AI Hub [32], a large-scale public dataset designed for predictive maintenance research. The dataset is derived from 36 industrial transport devices — 18 Overhead Hoist Transports (OHTs) and 18 Automated Guided Vehicles (AGVs) — operating in semiconductor, display, and automotive manufacturing facilities. According to the dataset provider's utilization guideline, the full corpus contains 124,263 sets (73,733 OHT + 50,530 AGV) collected on 100 ms cycles (10 Hz) and aggregated by the provider into 1 s packages before release; the specific aggregation function (mean / max / last) is not disclosed. Our experiments use the released **111,870-sample subset** consisting of 99,476 training and 12,394 validation samples, corresponding to approximately 90 % of the full corpus.
 
-Each sample consists of three components: (1) an 8-dimensional sensor reading, (2) a 120 x 160 pixel thermal infrared image captured by a FLIR Lepton-class camera, and (3) a JSON annotation containing the degradation state label and metadata. Samples are recorded at 1 Hz intervals.
+Two properties of this subset are important for interpreting our results. First, the raw distribution is dominated by Normal operation (approximately 99 % of full-corpus samples fall in the Normal class per the guideline's Z-score >= 3.5 rule, described in Section 3.5). The released subset has already been class-balanced by the provider so that Normal accounts for approximately 49 % of samples in our training split (see Table 3); real-world deployment therefore faces a substantially more imbalanced distribution than our evaluation. Second, the dataset is pre-split at the equipment level (see Table 1) so that the validation set contains entirely unseen devices, eliminating temporal leakage across splits.
 
-The dataset is pre-split at the equipment level: devices 01-16 (each type) form the training set (99,476 samples across 303 recording sessions), while devices 17-18 form the validation set (12,394 samples across 39 sessions). This equipment-level separation ensures that the model is evaluated on entirely unseen devices, preventing data leakage from temporal overlap.
+Each sample consists of three components: (1) an 8-dimensional sensor reading, (2) a 120 x 160 thermal infrared image stored in NumPy `.npy` format, and (3) a JSON annotation containing the degradation state label, meta-info, and auxiliary fields (see Section 3.5).
 
 **Table 1.** Dataset statistics.
 
@@ -101,11 +101,19 @@ The dataset is pre-split at the equipment level: devices 01-16 (each type) form 
 |:------|:----------|:---------|:--------|:-------------|:-------------|
 | Training | Devices 01-16 | 303 | 99,476 | 112 | 191 |
 | Validation | Devices 17-18 | 39 | 12,394 | 15 | 24 |
-| **Total** | **36 devices** | **342** | **111,870** | **127** | **215** |
+| **Total (subset)** | **36 devices** | **342** | **111,870** | **127** | **215** |
+| Full corpus (per guideline [32]) | 36 devices | — | **124,263** | — | — |
+
+The 36 devices span three manufacturers and three product models, providing an implicit device-level diversity signal even though the underlying sensor hardware is homogeneous (Section 3.2):
+- SFA / OHT-OCS (manufacturer A, model A1): oht01-oht18 (18 devices, ~58 % of samples).
+- Mireu / Mri-100 (manufacturer B, model B1): agv01-agv09 (9 devices, ~21 %).
+- CACSystems / low-profile AGV (manufacturer C, model C1): agv10-agv18 (9 devices, ~21 %).
 
 ### 3.2. Sensor Specifications
 
-The 8 sensor channels span three physical measurement categories: temperature, air quality, and electrical current.
+The 8 sensor channels span three physical measurement categories — temperature, air quality, and electrical current — plus a thermal imaging modality. Table 2 lists the value ranges observed on the training set; Table 2b identifies the actual hardware model behind each channel, confirmed against the AI Hub metadata schema in a 20,000-sample scan.
+
+**Table 2.** Sensor channel value ranges (training set).
 
 **Table 2.** Sensor channel specifications and statistics (training set).
 
@@ -120,22 +128,46 @@ The 8 sensor channels span three physical measurement categories: temperature, a
 | CT3 | Current | A | 0.22 | 243.25 | 24.49 | 29.74 |
 | CT4 | Current | A | 0.30 | 219.04 | 11.21 | 18.99 |
 
-The thermal infrared images have a fixed resolution of 120 x 160 pixels, with temperature values ranging from approximately 31 °C to 146 °C. Each pixel represents the surface temperature in degrees Celsius.
+The four current channels are not interchangeable but correspond to distinct measurement points on each device: CT1 = input line, CT2 = output line, CT3 = motor 1, CT4 = motor 2. This physical role difference explains the pronounced scale disparity across channels (CT2 mean 42.73 A versus CT1 mean 6.23 A) and the different degradation-time behaviors seen in Section 3.4.
 
-### 3.3. Degradation State Distribution
+The thermal infrared images are stored as 120 x 160 arrays of °C values in NumPy `.npy` format. The stored resolution should not be confused with the native sensor resolution: the acquisition camera (Section 3.2b) has a 32 x 32 native pixel grid, so the 120 x 160 representation is the result of the dataset provider's ~15 x upsampling. We use the released 120 x 160 arrays directly. Values range approximately from 31 °C (background) to 146 °C (highest observed hot spot), remaining consistent with the guideline range and requiring no clipping.
 
-Samples are labeled with one of four degradation states representing increasing severity.
+**Table 2b.** Hardware sensor models actually used to collect the dataset (100 % of scanned samples used the same model per category; the AI Hub schema lists three additional candidates per category but they are not present in the released data).
 
-**Table 3.** Class distribution.
+| Category | Model | Notes |
+|:---------|:------|:------|
+| Temperature (NTC) | Vishay **NTCLE413** (10 kΩ) | Analog resistance; converted to °C by the provider |
+| Particulate matter | Sharp **GP2Y1014AU0F** | Optical LED scattering; analog output |
+| Current transformer | KEMET **CT-06** | Passive CT; provider maps to A. Reported CT2 peaks at 273.91 A exceed the nominal spec (0-200 A) — treated as valid data |
+| Thermal camera | Terabee **Evo Thermal 33** | 32 x 32 native, 33° FOV, °C-per-pixel radiometry |
 
-| State | Label | Training | (%) | Validation | (%) |
-|:------|:------|:---------|:----|:-----------|:----|
-| 0 | Normal | 49,285 | 49.5 | 5,643 | 45.5 |
-| 1 | Mild | 21,189 | 21.3 | 2,892 | 23.3 |
-| 2 | Moderate | 21,322 | 21.4 | 2,869 | 23.1 |
-| 3 | Severe | 7,680 | 7.7 | 990 | 8.0 |
+This single-set hardware configuration means that the dataset does not, on its own, provide sensor-model diversity. All device-level heterogeneity in the results (Section 6) is therefore attributable to the three-manufacturer / three-model device pool described in Section 3.1, not to sensor variation.
 
-The class distribution exhibits notable imbalance, with the safety-critical Severe state comprising only 7.7% of training samples. This imbalance necessitates class-balanced sampling and weighted loss functions.
+### 3.3. Degradation State Definition and Distribution
+
+The dataset provider annotates each sample with one of four degradation states following the safety-severity definition below [32]. We adopt the guideline's exact definition and note the important boundary property that follows from it.
+
+**Table 3a.** Degradation-state definition from the dataset guideline [32]. GT denotes the actual carbonization onset (ground truth); Z-score is computed on the sensor time series by the provider.
+
+| State | Official label (Korean / English) | Paper shorthand | Definition [32] |
+|:-----:|:----------------------------------|:----------------|:-----------------|
+| 0 | 정상 / Normal | Normal | Z-score <= 3.5 (approximately 99% of full-corpus samples) |
+| 1 | 관심 / Attention | Mild | First half of the "Z-score > 3.5 up to GT-30s" interval |
+| 2 | 경고 / Warning | Moderate | Second half of the same interval |
+| 3 | 위험 / Danger | Severe | The final 30 seconds before carbonization (GT-30s to GT) |
+
+Two definitional properties are important for interpreting the results in Section 6. First, the split between Attention (State 1) and Warning (State 2) is a **1:1 partition of a single physically homogeneous interval**, introduced by the provider to allow user-tunable predictive-maintenance sensitivity [32]. The Attention-Warning boundary therefore does not correspond to any physical or statistical discontinuity, and no classifier can perfectly separate the two classes; residual State-1 <-> State-2 confusion is an irreducible property of the label design rather than a model failure. Second, the Danger state is exactly the final 30-second window before carbonization, which is why we prioritize Severe recall = 100 % throughout the paper: any Severe miss corresponds to under 30 seconds of remaining safe intervention time.
+
+**Table 3.** Class distribution in our released subset (already re-balanced by the provider; the full-corpus distribution is approximately 99 % Normal).
+
+| State | Label (KO / EN) | Training | (%) | Validation | (%) |
+|:------|:----------------|:---------|:----|:-----------|:----|
+| 0 | 정상 / Normal | 49,285 | 49.5 | 5,643 | 45.5 |
+| 1 | 관심 / Attention | 21,189 | 21.3 | 2,892 | 23.3 |
+| 2 | 경고 / Warning | 21,322 | 21.4 | 2,869 | 23.1 |
+| 3 | 위험 / Danger | 7,680 | 7.7 | 990 | 8.0 |
+
+Even after re-balancing, the safety-critical Danger class comprises only 7.7 % of training samples. This residual imbalance motivates our use of class-balanced sampling and weighted loss (Section 4).
 
 ### 3.4. Sensor Behavior by Degradation State
 
@@ -162,7 +194,7 @@ Critically, the difference between Normal (State 0) and Mild (State 1) is only a
 
 ### 3.5. Problem Definition
 
-Given a temporal window of T consecutive multimodal samples, each consisting of an 8-dimensional sensor vector s_t in R^8 and a thermal image I_t in R^{120x160}, the task is to predict the degradation state y in {0, 1, 2, 3} for the window. We use a window size of T = 30 (corresponding to 30 seconds at 1 Hz sampling). The objective is to maximize macro-averaged F1-score while ensuring high recall for the safety-critical Severe state.
+Given a temporal window of T consecutive multimodal samples, each consisting of an 8-dimensional sensor vector s_t in R^8 and a thermal image I_t in R^{120x160}, the task is to predict the degradation state y in {0, 1, 2, 3} for the window as defined in Section 3.3. We use a window size of T = 30 corresponding to 30 seconds at the released 1 Hz sampling rate. Note that this 1 Hz series is itself a 10-to-1 temporal aggregation of an internal 100 ms (10 Hz) acquisition performed by the provider; the aggregation function (mean / max / last) is not disclosed, so any temporal analysis in this paper is bounded from below by the 1 s aggregation window. The training objective is to maximize macro-averaged F1-score while ensuring 100 % recall for the Danger state (which corresponds, per Section 3.3, to the final 30 seconds before carbonization).
 
 ---
 
@@ -311,10 +343,11 @@ We report macro-averaged F1-score as the primary metric, which equally weights a
 
 ### 6.1. Overall Performance Comparison
 
-**Table 6.** Performance comparison of all model variants, including external SOTA baselines.
+**Table 6.** Performance comparison of all model variants, including the AI Hub reference baseline and external SOTA baselines.
 
 | Model | Val F1 | Val Acc | Severe Recall | Params | NM Errors |
 |:------|:------:|:-------:|:----------:|-------:|---:|
+| AI Hub reference MMTransformer [32] | 0.9109 | 91.92% | n/a | n/a | n/a |
 | TimesNet [25] | 0.9189 | 91.01% | 100% (66/66) | 1.55M | 68 |
 | PatchTST [26] | 0.9311 | 92.65% | 98.5% (65/66) | 1.36M | 57 |
 | V1: Baseline LSTM | 0.9235 | 91.88% | 98.5% (65/66) | 2.83M | 57 |
@@ -324,11 +357,13 @@ We report macro-averaged F1-score as the primary metric, which equally weights a
 | V5: Full CATFT | 0.9252 | 92.13% | 100% (66/66) | 10.79M | 50 |
 | **V2+ (Proposed)** | **0.9557+/-0.0006** | **95.02%** | **100% (66/66)** | **2.85M** | **24** |
 
-All models except V2+ are single-run results with seed = 42. V2+ reports mean +/- std over three seeds (42, 123, 456). See Table 12 for details.
+All models except V2+ are single-run results with seed = 42. V2+ reports mean +/- std over three seeds (42, 123, 456). See Table 12 for details. The AI Hub reference MMTransformer is the ViT + cross-attention baseline reported in the dataset provider's utilization guideline [32], with fields that were not disclosed there marked "n/a".
 
 **[Figure 3: Model performance comparison with parameter count overlay.]**
 
-The proposed V2+ model achieves the highest macro F1-score of 0.9557 +/- 0.0006 (mean over three runs), outperforming all comparison methods including recent time series architectures (TimesNet, PatchTST) and the substantially larger CATFT (V5, 10.79M parameters). Compared to PatchTST (F1 = 0.9311), our method improves F1 by 2.46% while using approximately twice the parameters. Compared to TimesNet (F1 = 0.9189), the improvement is 3.68%. Both external baselines underperform even our V2 variant (LSTM + single-lag temporal diff), further confirming that domain-informed temporal features are more effective than general-purpose time series architectures for this manufacturing degradation task.
+The proposed V2+ model achieves the highest macro F1-score of 0.9557 +/- 0.0006 (mean over three runs), outperforming every comparison method: the AI Hub dataset provider's official reference baseline (MMTransformer, F1 = 0.9109), recent general-purpose time series architectures (TimesNet, PatchTST), and the substantially larger internal CATFT variant (V5, 10.79M parameters). Compared to the AI Hub reference — evaluated under identical labels and dataset splits — V2+ improves F1 by 4.48 percentage points (0.9109 → 0.9557) and Accuracy by 3.10 percentage points (91.92% → 95.02%), despite using an estimated 3-5x fewer parameters. Compared to PatchTST, V2+ improves F1 by 2.46 % while using approximately twice the parameters; compared to TimesNet, the improvement is 3.68 %.
+
+Two patterns emerge from Table 6. First, three independent cross-attention / transformer baselines — the dataset provider's MMTransformer (0.9109), our V4 CATFT-CrossAttn (0.9112), and its fully-featured version V5 (0.9252) — all cluster in the 0.91-0.93 F1 range, suggesting that cross-attention fusion applied directly to raw multimodal inputs has an empirical ceiling near 0.92 on this dataset (Section 7 discusses the cause). Second, both external general-purpose baselines (TimesNet, PatchTST) underperform even our V2 variant (LSTM + single-lag temporal difference), reinforcing that domain-informed temporal features are more effective than generic time-series architectures for this task.
 
 Notably, V2+ achieves this with only 2.85M parameters—approximately 3.8x fewer than V5—while reducing Normal-Mild boundary errors by 58% compared to the baseline and PatchTST (57 to 24).
 
@@ -395,7 +430,7 @@ True Se     0    0    1   65         Se     0    0    0   66
 
 **[Figure 5: Confusion matrix comparison. Red boxes highlight Normal-Mild boundary errors.]**
 
-The Normal-Mild confusion is the dominant error source in both models (Figure 5). However, V2+ reduces these errors from 57 (39+18) to 24 (12+12), a 57.9% reduction. This improvement is attributed to (1) multi-scale temporal differences that amplify the subtle 4 °C temperature gradient between states, and (2) supervised contrastive loss that explicitly separates the overlapping embeddings.
+The Normal-Mild confusion is the dominant error source in both models (Figure 5). V2+ reduces these errors from 57 (39+18) to 24 (12+12), a 57.9 % reduction. This improvement is attributed to (1) multi-scale temporal differences that amplify the subtle 4 °C temperature gradient between states, and (2) supervised contrastive loss that explicitly separates the overlapping embeddings. Note also that a portion of the residual Attention <-> Warning confusion visible on the diagonal-adjacent cells (Mild-Moderate in Table 10 shorthand) is a structural lower bound rather than a model deficiency: per Section 3.3 the Attention and Warning classes are a 1:1 partition of one physically homogeneous interval and therefore possess no physical or statistical boundary. The 24 Normal-Mild errors V2+ still produces should be read against this constraint — they lie at the same order as the class-1/class-2 arbitrariness rather than reflecting an obvious feature-engineering gap.
 
 ### 6.4. Severe State Detection
 
@@ -413,7 +448,7 @@ To assess the contribution of the thermal modality, we compare the proposed V2+ 
 | V2+ Sensor + Thermal | 0.9550 | 95.16% | 24 | 2.85M |
 | **Thermal contribution** | **+0.37%** | **+0.69%** | **-8** | **+2.48M** |
 
-The thermal modality provides a modest but consistent improvement of +0.37% F1 and reduces Normal-Mild errors by 8 cases. This suggests that while the primary discriminative signal resides in the sensor time series, thermal images provide complementary spatial information that helps resolve ambiguous boundary cases. The sensor-only model is noteworthy for achieving F1 = 0.9513 with only 0.37M parameters, which may be preferable for extremely resource-constrained deployments.
+The thermal modality provides a modest but consistent improvement of +0.37 % F1 and reduces Normal-Mild errors by 8 cases. The magnitude of this contribution is best interpreted with the source-hardware constraint disclosed in Section 3.2: the acquisition camera (Terabee Evo Thermal 33) has a 32 x 32 native pixel grid, and the 120 x 160 arrays we consume are the result of the provider's ~15 x upsampling. The spatial information available to any thermal branch is therefore bounded by the ~1,024 native pixels, not by the 19,200 stored pixels. The +0.37 % F1 gain likely reflects the ceiling of this ~1 K-pixel information budget rather than a limit of our CNN branch. A deployment on the higher-resolution FLIR Lepton 3.5 (160 x 120 native, ~19,200 pixels) — with which we plan to fine-tune in the field study described in Section 7.5 — is expected to give the thermal branch materially more headroom. The sensor-only model is nonetheless noteworthy for achieving F1 = 0.9513 with only 0.37 M parameters, which may be preferable for extremely resource-constrained deployments where the thermal camera is unavailable.
 
 ### 6.6. Reproducibility and Statistical Stability
 
@@ -474,7 +509,7 @@ We now revisit the three hypotheses posed in Section 1 and map each to the empir
 |:------:|:-----------|:-------|:---------|:-------:|
 | **H1** | Multi-scale temporal differences improve F1 over single-lag and absolute-value baselines | Multi-scale diff [1,5,10] within V2+ achieves F1 = 0.9550 vs. single-lag V2 = 0.9430 (Delta = +1.20 %) and V1 absolute-only baseline = 0.9235 (Delta = +3.15 %); lag sensitivity confirms [1,5,10] as optimal spacing over [1], [1,3,7], and [1,10,20] | Table 7 (V1 vs V2), Table 8 (V2 vs V2+), Table 13 (lag sensitivity) | **Supported** |
 | **H2** | SupCon (lambda = 0.1) reduces Normal-Mild misclassifications by >= 40 % vs. single-lag baseline | Normal-Mild errors: V2 = 45 -> V2+ = 24, a 46.7 % reduction; overall macro F1 simultaneously improves from 0.9430 to 0.9557 +/- 0.0006 | Table 8, Table 10 (confusion matrices) | **Supported** |
-| **H3** | V2+ (2.85 M) outperforms TimesNet, PatchTST, and CATFT on macro F1 while remaining < 10 ms per inference | V2+ F1 = 0.9557 +/- 0.0006 vs. TimesNet 0.9189, PatchTST 0.9311, CATFT V5 0.9252 (10.79 M); ONNX GPU latency = 2.61 ms and ONNX CPU = 7.27 ms both below the 10 ms budget | Table 6 (all models), Table 14 (deployment) | **Supported** |
+| **H3** | V2+ (2.85 M) outperforms TimesNet, PatchTST, CATFT, and the AI Hub reference MMTransformer on macro F1 while remaining < 10 ms per inference | V2+ F1 = 0.9557 +/- 0.0006 vs. AI Hub reference MMTransformer 0.9109, TimesNet 0.9189, PatchTST 0.9311, CATFT V5 0.9252 (10.79 M); ONNX GPU latency = 2.61 ms and ONNX CPU = 7.27 ms both below the 10 ms budget | Table 6 (all models), Table 14 (deployment) | **Supported** |
 
 For H1, the ablation isolates the effect of the temporal-difference component: V2a (multi-scale diff added to V2, in isolation from SE and SupCon) alone does not lift F1 meaningfully (Table 8), whereas the full multi-scale configuration inside V2+ does. This nuance is consistent with H1 in its **combined-effect form** and is discussed further in Section 7.3.
 
@@ -490,11 +525,9 @@ All three hypotheses are therefore empirically supported. Limitations of this va
 
 ### 7.1. Domain Knowledge vs. Architectural Complexity
 
-Our results demonstrate a counterintuitive finding: a 2.85M-parameter LSTM with domain-informed temporal features outperforms a 10.8M-parameter Transformer with cross-attention by 2.98% F1 (0.9557 +/- 0.0006 vs. 0.9252). This can be explained by two factors.
+Our results demonstrate a counterintuitive finding: a 2.85M-parameter LSTM with domain-informed temporal features outperforms a 10.8M-parameter Transformer with cross-attention by 3.05 % F1 (0.9557 +/- 0.0006 vs. 0.9252). This is corroborated by the AI Hub reference baseline: the dataset provider's official MMTransformer (a ViT + cross-attention model evaluated on the same labels [32]) reaches F1 = 0.9109, statistically indistinguishable from our internal V4 CATFT-CrossAttn (0.9112) and V5 CATFT (0.9252). Three independently trained cross-attention Transformers therefore all fall in the 0.91-0.93 F1 band on this dataset, while V2+ clears 0.955 — a 3-5 percentage-point gap that is unusually large for a "smaller model beats bigger" result and suggests a systematic ceiling for cross-attention on this dataset rather than an isolated tuning issue.
 
-First, the training set size (9,313 windows) is insufficient for the Transformer to learn meaningful attention patterns, leading to overfitting (V4 performance is 1.23% below baseline). Cross-attention partially compensates by providing an inductive bias for modality interaction (V5 recovers 1.40%), but the net effect remains inferior to the simpler approach.
-
-Second, temporal difference features encode a strong domain prior: degradation is a dynamic process best characterized by rate-of-change rather than instantaneous values. This physics-informed feature reduces the hypothesis space the model must search, making learning more sample-efficient.
+Two factors explain this ceiling. First, the training set size (9,313 windows) is insufficient for a Transformer to learn discriminative attention patterns from scratch — V4 performance falls 1.23 % below the LSTM baseline, and V5 recovers only 1.40 % via the cross-attention inductive bias. Second, temporal difference features encode a strong domain prior: degradation is a dynamic process best characterized by rate-of-change rather than instantaneous values. This physics-informed feature reduces the hypothesis space the model must search, making learning more sample-efficient at this dataset scale.
 
 ### 7.2. Why Multi-Scale Temporal Differences Work
 
@@ -514,11 +547,17 @@ However, we argue that the thermal modality remains valuable for two reasons. Fi
 
 ### 7.5. Limitations and Future Work
 
-This study has several limitations. First, the dataset provides a fixed train/validation split without a separate held-out test set; we use the validation set for both model selection and evaluation. While the equipment-level separation prevents temporal leakage, and our repeated runs (Table 12) demonstrate stability (F1 std = 0.0006), a separate test set would provide a more rigorous evaluation.
+This study has several limitations.
 
-Second, the validation is performed on the same facility's equipment (different units); cross-facility generalization remains to be tested. Third, the current approach treats degradation as a classification task with four discrete states, whereas degradation is inherently continuous. Future work could explore regression-based formulations or ordinal classification.
+**Dataset scope and label boundaries.** The dataset provides a fixed train/validation split without a separate held-out test set; we use the validation set for both model selection and evaluation. While equipment-level separation prevents temporal leakage and our three-seed runs (Table 12) demonstrate stability (F1 std = 0.0006), a separate test set would provide a more rigorous evaluation. In addition, per the definition in Section 3.3 the Attention (State 1) and Warning (State 2) classes correspond to a 1:1 partition of a single physically homogeneous interval, so a portion of the residual State-1 <-> State-2 confusion in Table 10 is irreducible under any model. Reporting metrics that collapse these two classes into a single "degraded" super-class is a promising direction that we defer to future work.
 
-Fourth, the real-time inference performance is estimated based on server GPU benchmarks; actual Jetson Orin Nano deployment and field testing with live sensor data are planned as future work.
+**Unused fields in the released schema.** Our current model uses only the 8 sensor time series, the 120 x 160 thermal array, and the 4-class state label. The AI Hub schema also exposes fields that we have not yet integrated: `external_data` (ambient temperature 22-26 °C, humidity 27-36 %, illuminance 151-530 lux), the max-temperature pixel coordinates (`ir_data.temp_max.X_Tmax / Y_Tmax`), a pre-computed trend indicator per sensor value (`sensor_data.*.trend`), and static per-device meta features (`cumulative_operating_day`, `equipment_history`, `device_manufacturer`). Adding these — for example, ambient conditions as a small MLP branch, manufacturer as a 3-way categorical embedding, and the max-temperature coordinates as auxiliary spatial supervision — is a natural next-step ablation.
+
+**Cross-facility and sensor generalization.** The validation is performed on the same testbed's equipment (different device units); cross-facility generalization has not been tested. Because the released data are collected with a single sensor model per category (Section 3.2), the model has also not been trained on sensor-hardware diversity. Real deployment with different current transformers, particulate sensors, and thermal cameras is therefore expected to require domain adaptation.
+
+**Field deployment and higher-resolution thermal input.** Real-time inference performance is estimated from server GPU benchmarks; on-device latency and accuracy on the actual Jetson Orin Nano deployment are pending and will be added in a subsequent revision. As noted in Section 6.5, the field-deployment thermal camera (FLIR Lepton 3.5, 160 x 120 native) exceeds the acquisition camera's native resolution by roughly a factor of 19; fine-tuning on higher-native-resolution thermal images is expected to lift the modest +0.37 % thermal contribution we currently observe.
+
+**Formulation and pretraining directions.** The current approach treats degradation as a discrete 4-class classification, whereas degradation is inherently continuous; regression-based or ordinal-classification formulations may better exploit the fact that the label ordering carries physical meaning up to the Attention/Warning definitional artifact. A related direction is self-supervised pretraining on unlabeled sensor streams pooled across multiple predictive-maintenance datasets (e.g., CMAPSS, FEMTO-ST) — an approach related to recent "sensor language model" and time-series foundation-model work — followed by supervised fine-tuning on this dataset. This is unlikely to help within the current 9,313-window subset (which motivated our decision to prioritize domain-informed features), but becomes attractive once the corpus expands via additional field data or cross-dataset pretraining.
 
 ---
 

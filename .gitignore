@@ -3,12 +3,16 @@
 __pycache__/
 *.o
 *.obj
-*.so
 *.dll
 *.exe
 *.out
 *.a
 *.class
+
+# NOTE: the generic template's 'lib/', 'lib64/' and '*.so' rules were removed
+# on 2026-08-31. They matched nothing in the working tree, git history or the
+# tracked file list, venvs live outside the repository by policy, and '*.so'
+# would silently hide a compiled extension or a TensorRT plugin.
 
 # Dependencies
 .venv/
@@ -39,7 +43,6 @@ Thumbs.db
 # Python specific
 *.py[cod]
 *$py.class
-*.so
 .Python
 build/
 develop-eggs/
@@ -47,8 +50,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -81,3 +82,41 @@ dmypy.json
 
 # Pyre
 .pyre/
+
+# ============================================================================
+# Project-specific rules.
+#
+# RESTORED 2026-08-31. Commit 5a0e117 replaced .gitignore with a generic Python
+# template that dropped every rule below, which left ~26 GB of datasets, model
+# artifacts and transfer tarballs untracked-but-not-ignored. A single `git add -A`
+# would have staged all of it. Do not remove this section.
+# ============================================================================
+
+# Local datasets and generated results (large, never committed)
+/data/
+/cache/
+/results/
+/logs/
+
+# Deployment/generated outputs
+jetson_deploy/results/
+jetson_deploy/reference/*.npz
+jetson_deploy/model/*.onnx
+jetson_deploy/model/*.trt
+jetson_deploy/model/*.engine
+
+# Archives and large transfer bundles
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Virtual environments are NEVER committed and NEVER live inside the repository.
+# See docs/ENVIRONMENT_POLICY.md - they belong in $HOME/venvs/.
+.venv/
+venv/
+env/
+ENV/
+
+# Editor backups
+*~

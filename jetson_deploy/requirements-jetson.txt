@@ -1,14 +1,94 @@
-# Jetson Orin Nano user-space Python packages verified on L4T R36.5.0.
+# JETSON-RUNTIME direct dependencies.
 #
-# TensorRT/CUDA themselves should come from JetPack/NVIDIA packages.
-# ONNX Runtime GPU may need a Jetson-specific wheel if PyPI does not match
-# the target JetPack/Python version.
-numpy==2.2.6
-onnxruntime-gpu==1.24.0
+# Install ONLY into $HOME/venvs/factory_runtime, created with
+# --system-site-packages, and ALWAYS with PYTHONNOUSERSITE=1 so that packages in
+# $HOME/.local are never used as runtime dependencies.
+# Use jetson_deploy/setup_jetson_env.sh - do not pip install by hand.
+#
+#   env PYTHONNOUSERSITE=1 "$HOME/venvs/factory_runtime/bin/python" -m pip install \
+#       -r jetson_deploy/requirements-jetson.txt \
+#       -c jetson_deploy/constraints-jetson.txt
+#
+# This file lists DIRECT dependencies only. Verified transitive versions live in
+# constraints-jetson.txt. Never paste `pip freeze` output here.
+#
+# NOT listed here on purpose - these come from JetPack/APT and must never be
+# installed from PyPI (see docs/JETSON_ENVIRONMENT.md):
+#   tensorrt, cv2 (OpenCV), Jetson.GPIO, CUDA runtime, pycuda
+#
+# Verified on: L4T R36.5.0 (JetPack 6.x), Ubuntu 22.04.5, Python 3.10.12,
+#              Jetson Orin Nano 8GB Super DevKit.
+
+# --- numpy: pinned to the last 1.x release ON PURPOSE -----------------------
+# Two hard constraints bracket this version:
+#   * onnxruntime-gpu 1.24.0 declares numpy>=1.21.6, so APT numpy 1.21.5 is too old.
+#   * JetPack OpenCV 4.8.0, APT pandas 1.3.5 and APT PIL 9.0.1 are compiled
+#     against the numpy 1.x C ABI. numpy 2.x breaks them at import with
+#     "ImportError: numpy.core.multiarray failed to import".
+# Verified: numpy 1.26.4 imports cleanly together with onnxruntime-gpu 1.24.0
+# (TensorRT/CUDA/CPU providers all present) and with JetPack cv2 4.8.0.
+# Do NOT raise this to 2.x without re-verifying cv2 and re-running
+# jetson_deploy/scripts/03_verify_accuracy.py --small.
+numpy==1.26.4
+
+# --- ONNX Runtime with TensorRT + CUDA execution providers ------------------
+# onnxruntime-gpu does NOT exist on PyPI for aarch64. `pip index versions
+# onnxruntime-gpu` against PyPI returns "from versions: none", and the wheel this
+# board runs is tagged cp310-cp310-linux_aarch64 - a Jetson build. The
+# reproducible source is the jetson-ai-lab index for JetPack 6 / CUDA 12.6.
+#
+# It is pinned as a direct URL with a hash instead of via --extra-index-url on
+# purpose. A global --extra-index-url would make pip consider that third-party
+# index a candidate for EVERY package in this file, which is the
+# dependency-confusion pattern. A hashed direct URL scopes the third-party index
+# to this one artifact, and pip verifies the digest before installing.
+#
+# Verified on this board 2026-08-31:
+#   filename : onnxruntime_gpu-1.24.0-cp310-cp310-linux_aarch64.whl
+#   size     : 73617978 bytes
+#   sha256   : d980b934b9a29c1a9d6f39751edd7662b69fadd75556a10ff363773a58ce0950
+#   WHEEL    : Tag cp310-cp310-linux_aarch64, Requires-Python >=3.10
+#   contents : 322 entries, 4 .so incl. libonnxruntime_providers_tensorrt.so
+#              and libonnxruntime_providers_cuda.so
+#   identity : all 4 .so files are byte-identical to the copy already installed
+#              and running in $HOME/venvs/factory_runtime, and the wheel RECORD
+#              matches the installed RECORD on all 321 shared entries.
+#
+# If the index or the URL layout ever changes, download the wheel manually from
+# https://elinux.org/Jetson_Zoo#ONNX_Runtime, check it against the sha256 above,
+# and install the local file. Never relax the hash check.
+onnxruntime-gpu @ https://pypi.jetson-ai-lab.io/jp6/cu126/+f/d98/0b934b9a29c1a/onnxruntime_gpu-1.24.0-cp310-cp310-linux_aarch64.whl#sha256=d980b934b9a29c1a9d6f39751edd7662b69fadd75556a10ff363773a58ce0950
+
+# --- Sensirion sensor drivers (hardware-verified on this board) -------------
+# SPS30  particulate matter, /dev/i2c-1 @0x69 - PASS 2026-08-31
+# SCD30  CO2/temp/humidity,  /dev/i2c-1 @0x61 - PASS 2026-08-31
 sensirion-i2c-sps30==1.0.0
-sensirion-i2c-driver==1.0.2
-sensirion-driver-adapters==2.3.1
-sensirion-driver-support-types==1.2.1
-sensirion-shdlc-driver==0.1.5
-sensirion-shdlc-sensorbridge==0.2.0
-pyserial==3.5
+sensirion-i2c-scd30==1.1.1
+
+# --- SGP30 eCO2/TVOC, /dev/i2c-7 @0x58 ------------------------------------
+# Communication verified 2026-08-31: serial 000001B9391C, feature set accepted,
+# iaq_init OK, 20 consecutive iaq_measure reads with zero I2C errors.
+# The 20 readings were the fixed warm-up values (eCO2 400 ppm / TVOC 0 ppb),
+# which is documented SGP30 behaviour for roughly the first 15-20 s after
+# iaq_init - not a fault. Sustained varying output is still to be observed.
+#
+# adafruit-extended-bus is required to bind CircuitPython to an explicit Linux
+# I2C bus number (ExtendedI2C(7)); plain board.I2C() would guess the bus.
+# Adafruit-Blinka comes in as a dependency and uses the APT Jetson.GPIO -
+# verified that pip did NOT pull Jetson.GPIO from PyPI.
+adafruit-circuitpython-sgp30==3.0.16
+adafruit-extended-bus==1.0.2
+
+# --- Pending hardware verification, do not add until measured --------------
+# BME680 (SPI, /dev/spidev0.0)
+#   SPI mapping is PROVEN (4 independent sources, docs/JETSON_ENVIRONMENT.md §5),
+#   but hardware communication FAILED on 2026-08-31: the chip id register returned
+#   0x0 instead of 0x61, i.e. MISO reads all zeros. Candidates are listed in
+#   docs/JETSON_ENVIRONMENT.md §11 - the unresolved one is whether physical pins
+#   19/21/23/24 are actually pinmuxed to SPI (debugfs pinctrl needs root).
+#
+#   adafruit-circuitpython-bme680==3.7.16 IS currently installed in
+#   $HOME/venvs/factory_runtime for that diagnostic, but is deliberately NOT
+#   listed here because the hardware test did not pass. A fresh venv built from
+#   this file therefore will NOT contain it - that difference is intentional.
+#   Add the pin only after a real measurement succeeds.

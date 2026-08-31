@@ -1,0 +1,66 @@
+# JETSON-RUNTIME version constraints.
+#
+# Purpose: pin the dependency versions that were actually verified on this
+# Jetson, including transitive ones, so that a rebuild resolves to the same
+# tree. Pair it with requirements-jetson.txt:
+#
+#   -r jetson_deploy/requirements-jetson.txt
+#   -c jetson_deploy/constraints-jetson.txt
+#
+# A constraints file does NOT install anything by itself. It only bounds
+# versions that the requirements pull in.
+#
+# Only pin what has been verified. An unverified pin is worse than no pin,
+# because it turns a working resolution into a hard failure.
+#
+# Verified on: L4T R36.5.0, Ubuntu 22.04.5, Python 3.10.12, aarch64.
+
+# --- The critical constraint -------------------------------------------------
+# numpy MUST stay on 1.x: JetPack OpenCV / APT pandas / APT PIL are built
+# against the numpy 1.x C ABI. See requirements-jetson.txt for the full reason.
+numpy==1.26.4
+
+# --- Inference runtime ------------------------------------------------------
+# onnxruntime-gpu is intentionally NOT pinned here. It is supplied by
+# requirements-jetson.txt as a hashed direct URL, and pip rejects a version
+# constraint applied to a direct-URL requirement. The digest in that file is the
+# stronger guarantee:
+#   onnxruntime_gpu-1.24.0-cp310-cp310-linux_aarch64.whl
+#   sha256 d980b934b9a29c1a9d6f39751edd7662b69fadd75556a10ff363773a58ce0950
+
+# --- Sensirion driver stack (versions from the verified factory_sensors lab
+#     environment, where SPS30 and SCD30 both measured successfully) ---------
+sensirion-i2c-sps30==1.0.0
+sensirion-i2c-scd30==1.1.1
+sensirion-i2c-driver==1.0.2
+sensirion-driver-adapters==2.3.1
+sensirion-driver-support-types==1.2.1
+sensirion-shdlc-driver==0.1.5
+sensirion-shdlc-sensorbridge==0.2.0
+pyserial==3.5
+intelhex==2.3.0
+
+# --- Adafruit / CircuitPython stack for SGP30 (installed 2026-08-31) --------
+# Blinka deliberately relies on the APT-provided Jetson.GPIO. Confirmed that the
+# resolver did not fetch Jetson.GPIO, numpy, tensorrt, opencv or onnxruntime.
+adafruit-circuitpython-sgp30==3.0.16
+adafruit-extended-bus==1.0.2
+Adafruit-Blinka==9.2.0
+Adafruit-PlatformDetect==3.89.1
+Adafruit-PureIO==1.1.11
+adafruit-circuitpython-busdevice==5.2.17
+adafruit-circuitpython-typing==1.12.3
+adafruit-circuitpython-requests==4.1.17
+Adafruit-Circuitpython-ConnectionManager==3.1.8
+binho-host-adapter==0.1.6
+pyftdi==0.57.2
+pyusb==1.3.1
+sysv_ipc==1.2.0
+toml==0.10.2
+typing_extensions==4.16.0
+
+# --- Deliberately NOT pinned ------------------------------------------------
+# onnxruntime's remaining transitive dependencies (flatbuffers, protobuf,
+# packaging, sympy, coloredlogs, humanfriendly) are left to the resolver.
+# They carry no native ABI coupling to the JetPack stack, and over-pinning
+# unverified versions would only create avoidable resolution failures.

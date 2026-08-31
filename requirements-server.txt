@@ -1,0 +1,20 @@
+# SERVER-TRAINING direct dependencies.
+#
+# PENDING: populate only after server environment audit.
+#
+# This file is intentionally empty of actual pins.
+#
+# The environment that produced it was a Jetson Orin Nano (aarch64, L4T R36.5.0).
+# Guessing server-side versions from a Jetson would be wrong on every axis that
+# matters: CPU architecture and wheel tags, CUDA version, the PyTorch build
+# channel (Jetson uses NVIDIA-specific wheels, servers use PyPI/conda), cuDNN,
+# NCCL and GPU topology.
+#
+# Audit procedure and the fields to fill in: docs/SERVER_ENVIRONMENT.md
+# Environment policy: docs/ENVIRONMENT_POLICY.md
+#
+# Target venv: $HOME/venvs/factory_training
+# Code area  : src/
+#
+# Do NOT install Jetson sensor packages here
+# (sensirion-*, onnxruntime-gpu Jetson wheel, Jetson.GPIO).

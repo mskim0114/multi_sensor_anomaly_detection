@@ -189,8 +189,8 @@ sudo usermod -aG i2c,gpio,video "$USER"
 | SPS30 | I2C | `/dev/i2c-1` | `0x69` | **PASS** | PM1.0 5.23 / PM2.5 6.77 / PM10 8.29 µg/m³ |
 | SCD30 | I2C | `/dev/i2c-1` | `0x61` | **PASS** | CO2 702 ppm / 28.67 °C / 48.0 % |
 | FLIR Lepton 3.5 | USB UVC | `/dev/video0` | — | **PASS** | 27.34–35.93 °C, mean 29.07 |
-| SGP30 | I2C | `/dev/i2c-7` | `0x58` | **communication PASS / dynamic response YES** | eCO2 413 ppm / TVOC 4 ppb (65샘플, 68.4 s) |
-| BME680 | SPI | **`/dev/spidev0.0`** | — | **SPI mapping PASS / hardware communication FAIL** | chip ID `0x0` (기대 `0x61`) |
+| SGP30 | I2C | `/dev/i2c-7` | `0x58` | **PASS** (communication PASS / dynamic response YES) | eCO2 413 ppm / TVOC 4 ppb (65샘플, 68.4 s) |
+| BME680 | SPI | **`/dev/spidev0.0`** | — | **FAIL — `spi1` 활성화 후에도 무응답** (pinmux 원인 배제됨) | chip ID `0x00` (기대 `0x61`) |
 
 ### 센서 식별 정보
 
@@ -378,8 +378,10 @@ stream 0 activate notification 0,1,2 / stream 1 wait on Notification 2,1,0
 
 TensorRT 가 `ScatterND` 3개를 처리하지 못해 그래프가 **TRT 서브그래프 + CPU 노드로 분할**되고,
 cross-device memcpy 와 multi-stream 동기화가 삽입된다. crash 는 그 실행 경로에서 발생한다.
-TensorRT 가 `thermal` 입력을 "사용되지 않음"으로 보고하는 것도 서브그래프 분할이
-thermal 분기를 잘못 다루고 있음을 시사한다.
+
+`[RemoveDeadLayers] Input Tensor thermal is unused...` 경고는 crash 직전에 관측된
+**정황 기록**이다. 이것을 근거로 "thermal 분기가 잘못 처리된다"고 원인을 확정하지 않는다.
+확정할 수 있는 것은 아래 §10-6 의 failure boundary 까지이며, **정확한 root cause 는 미해결**이다.
 
 ### 10-5. trtexec 독립 검증 — TensorRT 자체는 정상
 
@@ -409,8 +411,14 @@ ONNX Runtime TensorRT EP    FAIL  <- 분할 서브그래프 실행 시 libnvinfe
   (ScatterND 3개가 CPU 로 빠지면서 생기는 TRT/CPU 혼합 실행 + dynamic shape 경로)
 ```
 
+정확한 표현: **failure is isolated to the ORT TensorRT EP partition/execution
+integration path; the exact root cause remains unresolved.**
+
 **운영 규칙**: `TensorRT = BROKEN/EXPERIMENTAL`, `CUDA = VERIFIED`.
-모든 정상 추론은 `--provider cuda` 를 명시한다.
+`auto` provider 는 CUDA 를 우선 선택하며 TensorRT 를 후보에 넣지 않는다 (§12 참조).
+
+TensorRT provider option (`trt_min_subgraph_size`, `trt_max_partition_iterations` 등)으로
+production 코드를 실험하지 않았다. 그 실험은 별도 승인 사항이다.
 
 참고: FP16 3.33 ms 는 README 의 "TensorRT FP16 < 2 ms" 목표에 도달하지 못한다.
 다만 CUDA EP 의 16.27 ms 보다는 크게 빠르므로, EP 통합 문제가 해결되면 얻을 이득은 있다.
@@ -477,3 +485,657 @@ MISO 가 어딘가에 로우로 묶여 있거나 클럭/CS 가 센서에 도달�
 `adafruit-circuitpython-bme680` 은 실측 PASS 전이므로 `requirements-jetson.txt` /
 `constraints-jetson.txt` 에 **추가하지 않았다**. 따라서 현재 `factory_runtime` 에는
 requirements 에 없는 패키지가 하나 존재한다 (아래 재현성 주의 참조).
+
+---
+
+## 12. Provider 정책 (2026-08-31 적용)
+
+`jetson_deploy/scripts/02_benchmark_latency.py`, `03_verify_accuracy.py`,
+`04_realtime_pipeline.py` 의 provider 선택을 다음과 같이 변경했다.
+(03/04 는 동일한 `pick_provider` 를 각각 중복 보유하며 공통 helper 는 없다. 같은 패치를 양쪽에 적용했다.)
+
+```
+AUTO 우선순위 : CUDAExecutionProvider -> CPUExecutionProvider
+                TensorrtExecutionProvider 는 AUTO 후보에 포함하지 않는다.
+
+명시 요청     : --provider tensorrt 는 계속 지원하되 경고를 출력한다.
+                요청 자체를 막지는 않는다.
+```
+
+변경 이유: segfault 는 파이썬에서 잡을 수 없다. 기존 `auto` 는 TensorRT 를 최우선
+선택했으므로 기본 실행이 프로세스 전체를 죽였다.
+
+`02_benchmark_latency.py` 는 `--provider` 옵션이 없고 사용 가능한 provider 를 모두
+벤치마킹하는 구조였다. 기본 후보에서 TensorRT 를 제거하고 `--include-tensorrt` opt-in
+플래그를 추가했다. 기존 코드의 `except Exception` 은 segfault 를 잡을 수 없어
+CUDA/CPU 결과까지 함께 사라졌다.
+
+검증 (`--provider auto`):
+
+| 항목 | 값 |
+|---|---|
+| auto 가 선택한 provider | **CUDAExecutionProvider** |
+| n_samples | 100 |
+| accuracy | 0.96 |
+| macro_f1 | **0.9601262674881273** |
+| match_rate_vs_pc_onnx | 1.0 |
+| per-class F1 / confusion matrix | 기존과 전부 동일 |
+
+`pick_provider` 단위 확인 (session 생성 없이): `auto`→CUDA, `cuda`→CUDA, `cpu`→CPU,
+`tensorrt`→TensorRT + 경고 출력. TensorRT 추론은 재실행하지 않았다.
+
+---
+
+## 13. BME680 RAW hardware-CS SPI 재검증 (2026-08-31) — FAIL
+
+Adafruit CircuitPython 경로가 Linux 하드웨어 CE0 와 `DigitalInOut(board.CE0)` 를 동시에
+사용하는 구조일 가능성이 있었으므로, **software-CS layer 를 완전히 우회한** RAW 테스트를
+먼저 수행했다.
+
+사용하지 않은 것: `board.SPI()`, `busio.SPI()`, `digitalio.DigitalInOut()`,
+`adafruit_bme680.Adafruit_BME680_SPI`, `adafruit_bus_device.SPIDevice`.
+
+backend 는 이미 설치된 **`Adafruit_PureIO.spi.SPI`** 를 사용했다 (`spidev` 모듈은 미설치이며
+설치하지 않았다). 이 backend 는 `/dev/spidev<bus>.<dev>` 를 직접 열고 `SPI_IOC_MESSAGE`
+ioctl 로 full-duplex 전송하며, CS 는 커널이 관리한다 (`no_cs = False`).
+
+커널에서 읽어온 실제 설정:
+```
+device        /dev/spidev0.0     (bus 0, CS 0 = 물리 핀 24, 하드웨어 CS)
+max_speed_hz  100000
+bits_per_word 8
+mode          0     (phase False, polarity False)
+lsb_first     False (MSB first)
+cs_high       False   no_cs False   three_wire False   loop False
+```
+
+BME680 SPI 레지스터는 7비트 주소 + bit7 = read 플래그다.
+page 0 chip-id 레지스터 `0x50` → read control byte `0x50 | 0x80 = 0xD0`.
+
+| # | TX | RX | chip-id 후보 |
+|---|---|---|---|
+| 1 | `[0xD0, 0x00]` | `[0x00, 0x00]` | `0x00` |
+| 2 | `[0xD0, 0x00]` | `[0x00, 0x00]` | `0x00` |
+| 3 | `[0xD0, 0x00]` | `[0x00, 0x00]` | `0x00` |
+
+3회 모두 안정적으로 `0x00`. 기대값은 `0x61`.
+
+```
+BME680_RAW_SPI = FAIL
+```
+
+**중요**: `0x00` 이라는 값만으로 "MISO 가 GND 에 short" 라고 판정하지 않는다.
+floating MISO 의 읽힘값은 플랫폼과 풀 상태에 따라 `0x00` 또는 `0xFF` 로 달라질 수 있다.
+
+**해석**: RAW 하드웨어 CS 경로도 동일하게 실패하므로 **Adafruit software-CS 경합은
+단독 원인이 아니다.** 소프트웨어 계층 변경을 중단한다.
+
+미검증으로 남은 항목:
+- 물리 핀 19/21/23/24 의 실제 pinmux (`/sys/kernel/debug/pinctrl` 은 root 전용, sudo 미사용)
+- 앞선 Blinka 실행이 핀 24 를 GPIO 로 남겼는지 (`/sys/class/gpio` 접근 불가로 확인 불가.
+  단 CS 가 고정되어도 MOSI/SCLK/MISO 는 영향받지 않으므로 유일한 원인은 아니다)
+
+### 필요한 사용자 물리 점검
+
+**전원 OFF 상태에서 도통 확인**
+```
+BME680 VCC  <-> Jetson Pin 17
+BME680 GND  <-> Jetson Pin 20
+BME680 MOSI <-> Jetson Pin 19
+BME680 MISO <-> Jetson Pin 21
+BME680 SCLK <-> Jetson Pin 23
+BME680 CS   <-> Jetson Pin 24
+```
+
+**전원 ON 상태에서 전압만 측정**
+```
+BME680 VCC - GND 실제 DC 전압 (3.15 ~ 3.45 V 기대)
+```
+
+전원이 인가된 상태에서 도통 측정이나 배선 흔들기는 하지 않는다.
+
+### 패키지 정책
+
+`adafruit-circuitpython-bme680 3.7.16` 은 `factory_runtime` 에 설치되어 있으나
+**diagnostic-only installed package** 이며 canonical 하지 않다.
+이번 디버깅 동안 uninstall 하지 않는다. `requirements-jetson.txt` 에는
+**hardware PASS + 최종 software transport PASS** 가 모두 확인된 뒤에만 추가한다.
+
+따라서 `setup_jetson_env.sh` 로 새로 만든 venv 에는 이 패키지가 없다. 의도된 차이다.
+
+---
+
+## 14. BME680 page-0 명시 선택 재검증 (2026-09-02) — mode 0 · mode 3 모두 FAIL
+
+§13 의 RAW 테스트는 read 형식(`[0xD0, 0x00]`)은 맞았으나 **SPI memory page 를 명시적으로
+page 0 으로 선택하지 않았다.** Bosch BME680 은 register access 전에 page 선택이 필요하고
+Adafruit 드라이버도 이를 수행한다. 배선을 변경하기 전에 이 절차를 포함해 다시 측정했다.
+
+Bosch BME680 SPI memory map:
+```
+status register SPI address = 0x73,  spi_mem_page = bit 4
+page 0 선택      : bit4 = 0
+chip id (page 0) : SPI address 0x50
+read  control byte : 0x50 | 0x80 = 0xD0     (bit7 = 1 -> read)
+write control byte : 0x73                   (bit7 = 0 -> write)
+expected chip id   : 0x61
+```
+
+각 iteration 마다 **분리된 두 SPI transaction** 을 정확한 순서로 수행했다.
+고정 3회 diagnostic 이며 retry loop 가 아니다. 다른 register write 없음, soft reset 없음,
+속도 변경 없음. Adafruit CS abstraction 은 전부 우회 (backend = `Adafruit_PureIO.spi.SPI`,
+`/dev/spidev0.0`, 커널 하드웨어 CS0).
+
+### mode 0 (CPOL=0, CPHA=0)
+
+커널 readback: `max_speed_hz=100000, bits_per_word=8, mode=0, phase=False, polarity=False, lsb_first=False, cs_high=False, no_cs=False`
+
+| iter | 1. page0 select TX → RX | 2. chip id read TX → RX | chip id |
+|---|---|---|---|
+| 1 | `[0x73 0x00]` → `[0x00 0x00]` | `[0xD0 0x00]` → `[0x00 0x00]` | `0x00` |
+| 2 | `[0x73 0x00]` → `[0x00 0x00]` | `[0xD0 0x00]` → `[0x00 0x00]` | `0x00` |
+| 3 | `[0x73 0x00]` → `[0x00 0x00]` | `[0xD0 0x00]` → `[0x00 0x00]` | `0x00` |
+
+**FAIL** (stable `0x00`, 기대 `0x61`)
+
+### mode 3 (CPOL=1, CPHA=1)
+
+Bosch BME680 은 mode 0 과 mode 3 만 공식 지원한다. 그 외 mode 는 시도하지 않았고 속도도 그대로 두었다.
+
+커널 readback: `mode=3, phase=True, polarity=True` (나머지 동일)
+
+| iter | 1. page0 select TX → RX | 2. chip id read TX → RX | chip id |
+|---|---|---|---|
+| 1 | `[0x73 0x00]` → `[0x00 0x00]` | `[0xD0 0x00]` → `[0x00 0x00]` | `0x00` |
+| 2 | `[0x73 0x00]` → `[0x00 0x00]` | `[0xD0 0x00]` → `[0x00 0x00]` | `0x00` |
+| 3 | `[0x73 0x00]` → `[0x00 0x00]` | `[0xD0 0x00]` → `[0x00 0x00]` | `0x00` |
+
+**FAIL** (stable `0x00`)
+
+### pinmux 확인 — UNVERIFIABLE (debugfs 로는 판정 불가)
+
+Blinka 매핑을 소스에서 재확인했다 (추측 아님):
+
+```
+adafruit_blinka/board/nvidia/jetson_orin_nx.py
+    D11 = pin.Z03   SCK/SCLK      D10 = pin.Z05   MOSI
+    D9  = pin.Z04   MISO          D8  = pin.Z06   CE0
+adafruit_blinka/microcontroller/tegra/t234/pin.py
+    Z03 = Pin("GP47_SPI1_CLK")    Z05 = Pin("GP49_SPI1_MOSI")
+    Z04 = Pin("GP48_SPI1_MISO")   Z06 = Pin("GP50_SPI1_CS0_N")
+    spiPorts = ((0, Z03, Z05, Z04),)
+```
+
+BCM 규약상 D11/D10/D9/D8 = 물리 핀 23/19/21/24 이다.
+
+| 물리 핀 | 신호 | Blinka pin | 판정 |
+|---|---|---|---|
+| 19 | MOSI | `Z05` `GP49_SPI1_MOSI` | **UNKNOWN** |
+| 21 | MISO | `Z04` `GP48_SPI1_MISO` | **UNKNOWN** |
+| 23 | SCK | `Z03` `GP47_SPI1_CLK` | **UNKNOWN** |
+| 24 | CS0 | `Z06` `GP50_SPI1_CS0_N` | **UNKNOWN** |
+
+판정할 수 없었던 이유:
+
+1. `/sys/kernel/debug/pinctrl` 은 root 전용이라 사용자가 직접 read-only sudo 로 조회했다.
+   조회는 성공했으나 **결과가 판정 근거가 되지 못했다** (아래 반증 참조).
+   debugfs 를 새로 mount 하지 않았고 `pinmux-select` 등 write 인터페이스는 건드리지 않았다.
+2. runtime device-tree 에도 헤더 SPI 핀의 pinmux 정보가 없다. 확인한 내용:
+   - `spi@3210000` 노드에 `pinctrl-*` 속성이 **없다**
+   - `pinmux@2430000` 의 자식은 `eqos_rx_enable/disable`, `pex_rst_c{4,5,6,7,10}_in` 뿐이다
+   - `pinmux@c300000` 은 자식 노드가 없다
+   - DT 전체에 `pz3`~`pz6` 문자열도 `nvidia,function` 속성도 존재하지 않는다
+
+   즉 Orin 계열은 40핀 pinmux 를 MB1/부트로더 단계에서 적용하며 runtime DT 에 노출하지 않는다.
+   `jetson-io` 가 reboot 을 요구하는 이유와 같다.
+
+### 현재 확정 상태
+
+```
+BME680 = RAW SPI FAIL (mode 0, mode 3) / PINMUX UNVERIFIED
+```
+
+`HARDWARE PATH BLOCKED` 로도, `SPI HEADER PINMUX NOT CONFIGURED` 로도 아직 판정할 수 없다.
+두 판정 모두 pinmux 확인을 전제로 하는데 그 확인이 불가능했기 때문이다.
+
+확정된 것과 배제된 것:
+
+| 항목 | 상태 |
+|---|---|
+| `/dev/spidev0.0` open 및 ioctl 전송 | 성공 (오류 없음) |
+| 커널 SPI 설정 적용 (mode/speed/bits/CS) | readback 으로 확인 |
+| logical SPI mapping (핀 19/21/23/24 → `/dev/spidev0.0`) | 근거 4개 일치 |
+| Adafruit software-CS 경합이 단독 원인 | **배제됨** — RAW 하드웨어 CS 경로도 동일 실패 |
+| SPI mode 불일치가 원인 | **배제됨** — mode 0·3 모두 동일 실패 |
+| SPI memory page 미선택이 원인 | **배제됨** — page 0 명시 선택 후에도 동일 실패 |
+| 물리 핀 pinmux 기능 | **UNVERIFIED** |
+| 배선 / 센서 응답 | **UNVERIFIED** |
+
+`chip ID 0x00` 을 근거로 "MISO 가 GND 에 short" 같은 원인을 적지 않는다.
+floating MISO 의 읽힘값은 플랫폼과 풀 상태에 따라 달라진다.
+
+### 다음에 필요한 것 (둘 다 아직 수행하지 않음)
+
+**(a) pinmux 확인** — 사용자가 직접 실행해야 하는 read-only sudo 명령:
+```bash
+sudo ls -la /sys/kernel/debug/pinctrl
+sudo cat  /sys/kernel/debug/pinctrl/*/pinmux-pins  | grep -iE 'pz3|pz4|pz5|pz6|spi1'
+sudo cat  /sys/kernel/debug/pinctrl/*/pinconf-pins | grep -iE 'pz3|pz4|pz5|pz6'
+sudo grep -iE 'spi1|pz[3-6]' /sys/kernel/debug/pinctrl/*/pins
+```
+mount, devmem, jetson-io, device-tree 수정, pinmux write, GPIO export/write, reboot 은 하지 않는다.
+
+**(b) 물리 점검** — 전원 OFF 상태에서 end-to-end 도통:
+```
+BME680 VCC  <-> Jetson Pin 17      BME680 GND  <-> Jetson Pin 20
+BME680 MOSI <-> Jetson Pin 19      BME680 MISO <-> Jetson Pin 21
+BME680 SCLK <-> Jetson Pin 23      BME680 CS   <-> Jetson Pin 24
+```
+그리고 breakout board 에 **실제 인쇄된 핀 이름과 순서**를 다시 확인해 기록.
+
+전원 ON 상태에서는 **BME680 모듈 자체의 VCC-GND DC 전압만** 측정한다.
+전원 인가 상태에서 도통 측정이나 배선 흔들기는 하지 않는다.
+
+### pinmux debugfs 실측과 반증 (2026-09-02)
+
+사용자가 read-only sudo 로 `/sys/kernel/debug/pinctrl` 을 조회했다.
+(`sudo cat /path/*` 형태는 실패했는데, glob 을 확장하는 것은 sudo 가 아니라 사용자 셸이고
+`/sys/kernel/debug` 가 `drwx------ root root` 여서 확장되지 못하기 때문이다. `sudo sh -c '...'`
+로 root 셸 안에서 확장시켜 해결했다.)
+
+BME680 이 쓰는 네 핀의 상태:
+
+```
+pin 133 (SPI1_SCK_PZ3):  (MUX UNCLAIMED) (GPIO UNCLAIMED)     물리 핀 23
+pin 134 (SPI1_MISO_PZ4): (MUX UNCLAIMED) (GPIO UNCLAIMED)     물리 핀 21
+pin 135 (SPI1_MOSI_PZ5): (MUX UNCLAIMED) (GPIO UNCLAIMED)     물리 핀 19
+pin 136 (SPI1_CS0_PZ6):  (MUX UNCLAIMED) (GPIO UNCLAIMED)     물리 핀 24
+```
+
+`spi1` function 과 그룹은 정의되어 있다:
+`function 38: spi1, groups = [ spi1_cs0_pz6 spi1_miso_pz4 spi1_sck_pz3 spi1_cs1_pz7 spi1_mosi_pz5 ]`
+
+**여기서 "SPI 로 mux 되지 않았다" 고 결론내리려 했으나, 반증 테스트가 그 가설을 뒤집었다.**
+
+대조군: 이 보드에서 **실제로 통신 중인** I2C 핀들의 상태를 같은 인터페이스로 확인했다.
+
+```
+pin 54 (GEN1_I2C_SCL_PI3): (MUX UNCLAIMED) (GPIO UNCLAIMED)
+pin 55 (GEN1_I2C_SDA_PI4): (MUX UNCLAIMED) (GPIO UNCLAIMED)
+pin 19 (GEN2_I2C_SCL_PCC7): (MUX UNCLAIMED) (GPIO UNCLAIMED)
+pin 20 (GEN2_I2C_SDA_PDD0): (MUX UNCLAIMED) (GPIO UNCLAIMED)
+```
+
+전체 집계: `pinmux-pins` 203줄 (2430000.pinmux 169 + c300000.pinmux 34) 중
+**claim 된 핀은 단 하나도 없다** (헤더 2줄을 제외하면 `MUX UNCLAIMED` 가 아닌 줄이 0개).
+
+SGP30(0x58), ADS1115(0x48), SPS30(0x69), SCD30(0x61) 이 모두 정상 통신하는 상태에서도
+그 핀들이 `MUX UNCLAIMED` 로 보인다. 따라서 이 플랫폼에서 **`MUX UNCLAIMED` 는 pad 라우팅
+여부에 대해 아무 정보도 담지 않는다.** Tegra 는 pinmux 를 MB1 부트로더 단계에서 적용하고
+Linux pinctrl 은 아무것도 claim 하지 않기 때문이다.
+
+**결론: `SPI HEADER PINMUX NOT CONFIGURED` 가설 철회.**
+debugfs pinctrl 인터페이스로는 이 질문에 답할 수 없다.
+
+| 물리 핀 | 신호 | Blinka pin | Tegra pin | 판정 |
+|---|---|---|---|---|
+| 19 | MOSI | `Z05` | `pin 135 SPI1_MOSI_PZ5` | **UNVERIFIABLE** (이 인터페이스로 판정 불가) |
+| 21 | MISO | `Z04` | `pin 134 SPI1_MISO_PZ4` | **UNVERIFIABLE** |
+| 23 | SCK | `Z03` | `pin 133 SPI1_SCK_PZ3` | **UNVERIFIABLE** |
+| 24 | CS0 | `Z06` | `pin 136 SPI1_CS0_PZ6` | **UNVERIFIABLE** |
+
+### 최종 상태
+
+```
+BME680 = RAW SPI FAIL (mode 0, mode 3) / PINMUX UNVERIFIABLE
+```
+
+`HARDWARE PATH BLOCKED` 도 `SPI HEADER PINMUX NOT CONFIGURED` 도 주장하지 않는다.
+전자는 pinmux 가 SPI 임이 확인되어야 하고 후자는 SPI 가 아님이 확인되어야 하는데,
+둘 다 확인할 수 없었다.
+
+남은 미검증 항목은 **물리 배선** 과 **부트 단계 pinmux 설정** 두 가지이며,
+소프트웨어로는 더 좁힐 수 없다.
+
+---
+
+## 15. 40핀 헤더 `spi1` function 조회 (2026-09-02) — `NOT_ENABLED`
+
+> **정정 (2026-09-02).** 이 섹션은 원래 "BME680 원인 확정" 으로 작성되었다. 그 판정은
+> **§16 에서 반증되었다** — `spi1` 을 활성화한 뒤에도 BME680 은 동일하게 무응답이었다.
+> 아래 내용은 조회 당시의 사실 기록으로만 유효하다. 최종 canonical 절차는 §17 과
+> `docs/JETSON_SPI_BME680_SETUP.md` 를 본다.
+
+debugfs `pinmux-pins` 로는 판정이 불가능했으므로(§14) NVIDIA 공식 Jetson-IO 의
+**read-only 조회 기능**으로 확인했다. 설정 변경은 하지 않았다.
+
+도구는 `Board()` 생성자의 `fio.is_rw(bootdir)` 사전 검사 때문에 `/boot` 에 대한 read/write
+권한을 요구한다. 따라서 조회에도 root 가 필요하다 (조회 자체가 쓰기를 하는 것은 아니다.
+`config-by-pin.py` 는 `print` 만 하고, `config-by-function.py -l` 은 출력 후 `sys.exit(0)`
+하며 변경 코드는 `-o` 또는 function 인자를 줄 때만 도달한다).
+
+### 조회 결과
+
+`config-by-pin.py -p <pin>`:
+
+```
+Pin 19 : unused
+Pin 21 : unused
+Pin 23 : unused
+Pin 24 : unused
+```
+
+`config-by-pin.py` 전체 출력 중 40핀 헤더에서 기능이 배정된 핀은 다음뿐이다:
+
+```
+  3: i2c8     5: i2c8          <- MAIN I2C  (실측: /dev/i2c-7)
+  8: uarta   10: uarta
+ 27: i2c2    28: i2c2          <- SLOW I2C  (실측: /dev/i2c-1)
+```
+그 외 `unused` 또는 전원/GND. 핀 19/21/23/24/26 은 전부 `unused`.
+
+`config-by-function.py -l enabled`:
+
+```
+Header 1 [default]: Jetson 40pin Header
+  Enabled functions (pins):
+   1. i2c2 (27,28)
+   2. i2c8 (3,5)
+   3. uarta (8,10)
+```
+
+`config-by-function.py -l all`:
+
+```
+Header 1 [default]: Jetson 40pin Header
+  Supported functions (pins):
+   1. aud (7)                    7. pwm1 (15)
+   2. extperiph3_clk (29)        8. pwm5 (33)
+   3. extperiph4_clk (31)        9. pwm7 (32)
+   4. i2c2 (27,28)              10. spi1 (19,21,23,24,26)     <-- 지원되지만 미활성
+   5. i8c8 (3,5)                11. spi3 (13,16,18,22,37)
+   6. i2s2 (12,35,38,40)        12. uarta (8,10)
+                                13. uarta-cts/rts (11,36)
+```
+
+### 판정
+
+```
+JETSON_IO_SPI_HEADER_CONFIG = NOT_ENABLED
+BME680 = BLOCKED (40-pin header spi1 function not enabled)
+```
+
+`spi1` 은 **지원 목록에 있고 그 핀 집합이 `(19,21,23,24,26)` 으로 이 프로젝트의 배선과 정확히
+일치**한다 (19 MOSI / 21 MISO / 23 SCK / 24 CS0 / 26 CS1). 그러나 enabled 목록에 없고
+네 핀 모두 `unused` 다. 즉 **패드가 헤더로 라우팅되어 있지 않다.**
+
+이 시점에는 이것이 `chip ID 0x00` 을 설명한다고 판정했다. **그 판정은 §16 에서 반증되었다** —
+`spi1` 활성화 후에도 동일하게 실패했으므로 `NOT_ENABLED` 는 원인이 아니었다(필요조건이었을
+뿐이다). `/dev/spidev0.0` 이 열리고 ioctl 이 성공하는 것은 spidev 가 컨트롤러 레벨에서
+동작하기 때문이며 패드 라우팅 여부와 무관하다 — 이 부분은 여전히 유효하다.
+
+**BME680 배선 문제로 판정하지 않는다.** 배선은 여전히 미검증이지만, 현재 상태에서는
+배선이 완벽해도 동일하게 실패한다.
+
+### function label 주의
+
+Jetson-IO 의 function 이름은 **carrier-board function label** 이며 Linux `/dev/i2c-N`,
+`/dev/spidevX.Y` 번호와 대응하지 않는다. 실제로 Jetson-IO 는 핀 3/5 를 `i2c8`, 핀 27/28 을
+`i2c2` 로 부르지만, 이 보드에서 실측 확인된 Linux 매핑은 핀 3/5 → `/dev/i2c-7`,
+핀 27/28 → `/dev/i2c-1` 이다 (센서 실제 응답으로 확인, §4). 숫자 label 만으로 다른 버스라고
+판정하지 않는다. **물리 핀 집합으로 판단해야 한다** — `spi1 (19,21,23,24,26)` 이 우리 SPI 다.
+
+### §14 의 debugfs 관측에 대한 정정된 위치
+
+debugfs 의 `(MUX UNCLAIMED)` 는 이 플랫폼에서 **판정 근거가 될 수 없다** (동작 중인 I2C 핀도
+동일하게 표시됨, §14). 결과적으로 결론 방향은 맞았지만 그 근거로는 아무것도 증명할 수 없었다.
+**실제 판정 근거는 Jetson-IO 조회이며 debugfs 관측이 아니다.**
+
+### 다음 단계 (별도 승인 필요, 이번에 수행하지 않음)
+
+`spi1` 을 활성화하려면 Jetson-IO 로 DTBO 를 생성하고 **reboot** 이 필요하다.
+이번 단계에서는 조회만 했고 다음을 전부 하지 않았다:
+Jetson-IO 대화형 실행, `config-by-function.py -o dt|dtbo`, DTBO 생성, device-tree 변경,
+pinmux write, reboot, 배선 변경, MOSI-MISO 점퍼, BME680 재측정.
+
+활성화 시 고려사항:
+- 핀 19/21/23/24/26 은 현재 전부 `unused` 이므로 다른 기능과 충돌하지 않는다
+- 이미 활성화된 `i2c2 (27,28)`, `i2c8 (3,5)`, `uarta (8,10)` 는 핀이 겹치지 않는다.
+  즉 SPS30/SCD30(핀 27/28) 과 ADS1115/SGP30(핀 3/5) 는 영향받지 않아야 한다
+- reboot 이 필요하므로 진행 시점을 사용자가 정해야 한다
+- 활성화 후 `/dev/spidev*` 노드 번호가 바뀔 수 있으므로 재확인이 필요하다
+
+---
+
+## 16. 40핀 헤더 `spi1` 활성화 및 재부팅 후 검증 (2026-09-02)
+
+### Jetson-IO 변경 내역
+
+```
+적용 명령 : config-by-function.py -o dt 1="i2c2 i2c8 uarta spi1"     exit 0
+생성 DTBO : /boot/jetson-io-hdr40-user-custom.dtbo   (2126 bytes)
+rollback  : /boot/extlinux/extlinux.conf.pre_spi1_20260902_145420  (892 bytes, pristine)
+            /boot/extlinux/extlinux.conf.jetson-io-backup          (892 bytes, Jetson-IO 자체 백업)
+```
+
+`extlinux.conf` 변경은 두 곳뿐이다: `DEFAULT primary` → `DEFAULT JetsonIO`, 그리고
+`LABEL JetsonIO` 블록 추가 (`FDT`, `OVERLAYS` 포함). `LABEL primary` fallback 은 온전하며
+kernel/initrd 는 변경되지 않았다.
+
+> `extlinux.conf.pre_spi1_20260902_145922` (1322 bytes) 는 pristine 이 아니다 —
+> 이미 JetsonIO 항목이 포함된 상태의 백업이다. 롤백에는 `_145420` 을 쓴다.
+
+### 재부팅 후 확인 — `spi1 = ENABLED`
+
+부팅 정상 (uptime 4분, kernel `5.15.185-tegra` 동일, `/proc/cmdline` 의 rootfs/console 인자 동일).
+`DEFAULT JetsonIO` 로 부팅되었고 오버레이가 적용되었다.
+
+**근거는 라이브 device-tree 다** (sudo 불필요, Jetson-IO 조회보다 직접적):
+재부팅 전 `pinmux@2430000` 의 자식은 `eqos_*`, `pex_rst_*` 뿐이었으나, 이제
+`exp-header-pinmux`, `pinctrl-0`, `pinctrl-names` 가 존재한다.
+
+```
+/proc/device-tree/bus@0/pinmux@2430000/exp-header-pinmux/
+  hdr40-pin19   pins=spi1_mosi_pz5   function=spi1   gpio-mode=0 tristate=1 enable-input=1
+  hdr40-pin21   pins=spi1_miso_pz4   function=spi1   gpio-mode=0 tristate=1 enable-input=1
+  hdr40-pin23   pins=spi1_sck_pz3    function=spi1   gpio-mode=0 tristate=1 enable-input=1
+  hdr40-pin24   pins=spi1_cs0_pz6    function=spi1   gpio-mode=0 tristate=1 enable-input=1
+  hdr40-pin26   pins=spi1_cs1_pz7    function=spi1   gpio-mode=0 tristate=1 enable-input=1
+```
+AON 쪽(`pinmux@c300000`)에도 `exp-header-pinmux` 가 추가되었다 (오버레이의 fragment@1).
+
+| 물리 핀 | 신호 | function | 판정 |
+|---|---|---|---|
+| 19 | MOSI | `spi1` | **ENABLED** |
+| 21 | MISO | `spi1` | **ENABLED** |
+| 23 | SCK | `spi1` | **ENABLED** |
+| 24 | CS0 | `spi1` | **ENABLED** |
+| 26 | CS1 | `spi1` | **ENABLED** |
+
+### SPI 노드 매핑 — 재부팅 전과 동일
+
+```
+/dev/spidev0.0, 0.1  ->  3210000.spi (spi_master spi0)   <- 핀 19/21/23/24/26
+/dev/spidev1.0, 1.1  ->  3230000.spi (spi_master spi1)
+```
+노드 번호가 바뀌지 않았으므로 `/dev/spidev0.0` (CS0 = 핀 24) 을 계속 사용한다.
+
+### 기존 기능 보존 — 전부 유지
+
+I2C 장치 노드 목록 변화 없음 (`/dev/i2c-{0,1,2,4,5,7,9}`).
+핀 3/5 = `i2c8`, 핀 27/28 = `i2c2`, 핀 8/10 = `uarta` 유지.
+
+**센서 회귀 (재부팅 후, 순차 실행)**
+
+| 센서 | 버스 | 결과 | 실측값 |
+|---|---|---|---|
+| ADS1115 / NTC | `/dev/i2c-7` `0x48` A2 | **PASS** | 24.69 °C (R 10,139 Ω), exit 0 |
+| SGP30 | `/dev/i2c-7` `0x58` | **PASS** | serial `000001B9391C`, 8샘플 오류 0건 |
+| SPS30 | `/dev/i2c-1` `0x69` | **PASS** | serial `E95C50BEF297082A`, fw `(2,3)`, status 0 |
+| SCD30 | `/dev/i2c-1` `0x61` | **PASS** | serial `3115957-3117121-204041148`, fw `(3,66)` |
+
+SGP30 은 부팅 8초 후 측정이라 `eCO2 400 / TVOC 0` 고정값이었다 — warm-up 구간이며 실패가 아니다.
+SCD30 첫 샘플 `CO2 0.00 ppm` 은 `start_periodic_measurement` 직후의 알려진 거동이고,
+2·3번째 샘플에서 631 / 781 ppm 으로 정상화되었다.
+SPS30 과 SCD30 은 공유 버스이므로 순차 실행했고, 사이에 버스 점유 프로세스가 없음을 확인했다.
+
+FLIR / CT 는 SPI1 DTBO 와 독립적이므로 이번 회귀에서 재검증하지 않았다.
+
+### BME680 — `spi1` 활성화 후에도 **FAIL**
+
+`spi1` 이 확실히 활성화된 상태에서 동일한 RAW hardware-CS 진단을 재실행했다.
+배선은 변경하지 않았다.
+
+커널 readback: `mode=0, max_speed_hz=100000, bits_per_word=8, lsb_first=False, cs_high=False, no_cs=False`
+
+| iter | 1. page0 select | 2. chip id read | chip id |
+|---|---|---|---|
+| 1 | TX `[0x73 0x00]` → RX `[0x00 0x00]` | TX `[0xD0 0x00]` → RX `[0x00 0x00]` | `0x00` |
+| 2 | TX `[0x73 0x00]` → RX `[0x00 0x00]` | TX `[0xD0 0x00]` → RX `[0x00 0x00]` | `0x00` |
+| 3 | TX `[0x73 0x00]` → RX `[0x00 0x00]` | TX `[0xD0 0x00]` → RX `[0x00 0x00]` | `0x00` |
+
+```
+BME680_RAW_SPI = FAIL   (stable 0x00, 기대 0x61)
+```
+
+RAW 가 실패했으므로 Adafruit high-level test 는 수행하지 않았고,
+`adafruit-circuitpython-bme680` 의 requirements 승격도 하지 않았다 (diagnostic-only 유지).
+mode 3 재시도, 배선 변경, retry loop 모두 하지 않았다.
+
+### 원인 후보 갱신 — pinmux 가설 배제
+
+> **정정 (2026-09-02).** 이 시점의 후보 목록은 §17 에서 모두 해소되었다.
+> 확정 원인은 **SPI1 프레임 시작 시 MOSI 선두비트 소실**이며 센서와 배선은 무죄다.
+> 아래는 당시의 후보 기록이다.
+
+```
+BME680 = FAIL (spi1 ENABLED 상태에서도 무응답)
+```
+
+| 가설 | 상태 |
+|---|---|
+| Adafruit software-CS 경합 | 배제 (§13) |
+| SPI mode 불일치 (0/3) | 배제 (§14) |
+| SPI memory page 미선택 | 배제 (§14) |
+| spidev 노드 / 논리 매핑 오류 | 배제 |
+| **40핀 헤더 `spi1` 미활성** | **배제 — 활성화 후에도 동일 실패** |
+| 물리 배선 / 브레이크아웃 핀 순서 | **제거 (§17)** — 모듈 자리 SDI-SDO 점퍼로 배선 왕복 loopback PASS |
+| 센서 전원 | **제거 (§17)** — 모듈 VCC-GND 전압 정상 |
+| BME680 모듈 자체 불량 | **제거 (§17)** — BME680 ×2 + BMP388 ×1 이 동일 실패 |
+| 패드 tristate 설정 | **반증됨 — 아래 참조** |
+
+**tristate 가설과 그 반증 (2026-09-02).** 당시 관찰: `config-by-function.py -o dt` 로 생성된
+오버레이가 5개 핀 모두에 `nvidia,tristate = <1>` 을 설정하고 있었고, tristate=1 은 패드를
+high-Z 로 두므로 SPI master 출력(SCK/MOSI/CS)에는 부적합해 보였다.
+
+**이 가설은 A/B 시험으로 반증되었다.** 출력 3핀(19/23/24)만 `tristate=0` 으로 바꾼 별도 오버레이를
+만들어 부팅한 뒤 라이브 `pinconf-pins` 로 `tristate=0` 을 확인했으나, 물리 Pin19↔Pin21 loopback
+결과는 **변화 없이 동일하게 실패**했다. 즉 tristate 는 root cause 가 아니었다.
+
+이 수동 DTBO 경로 전체가 최단 경로가 아니었다. 최종적으로 문제를 해소한 것은 §17 의
+**공식 `jetson-io.py` 메뉴 경로**다. 수동 DTBO/DTS/tristate 편집은 앞으로 일반 설정 경로로
+쓰지 않는다 (`AGENTS.md` §4).
+
+### 필요한 사용자 물리 점검
+
+**전원 OFF 상태 — end-to-end 도통**
+```
+BME680 VCC  <-> Jetson Pin 17        BME680 GND  <-> Jetson Pin 20
+BME680 MOSI <-> Jetson Pin 19        BME680 MISO <-> Jetson Pin 21
+BME680 SCLK <-> Jetson Pin 23        BME680 CS   <-> Jetson Pin 24
+```
+
+**브레이크아웃 보드에 실제 인쇄된 핀 이름과 순서를 그대로 기록** — 알려주신 순서
+(MISO/SCLK/CS/MOSI/GND/VCC)와 실크스크린이 다르면 MOSI↔MISO 가 바뀌어 정확히 이 증상이 난다.
+
+**전원 ON 상태 — BME680 모듈 자체의 VCC-GND DC 전압만** 측정 (3.15 ~ 3.45 V 기대).
+전원 인가 상태에서 도통 측정이나 배선 흔들기는 하지 않는다.
+
+`0x00` 이라는 값만으로 MISO short 같은 원인을 단정하지 않는다.
+floating MISO 의 읽힘값은 플랫폼과 풀 상태에 따라 달라진다.
+
+---
+
+## 17. SPI1 canonical setup 확정 (2026-09-02)
+
+**상세 절차는 [`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md) 를 본다.**
+여기에는 요약과 최종 상태만 기록한다.
+
+### canonical 설정 경로
+
+40핀 헤더 기능 설정은 **NVIDIA 공식 `jetson-io.py` 대화형 메뉴가 FIRST CHOICE** 다.
+
+```
+sudo /opt/nvidia/jetson-io/jetson-io.py
+  -> Configure Jetson 40pin Header -> Configure header pins manually
+  -> spi1 (19,21,23,24,26) -> Back -> Save pin changes
+  -> Save and reboot to reconfigure pins
+```
+
+수동 DTBO/DTS/pinmux/tristate 편집은 **공식 절차와 공식 loopback 이 실제로 실패한 경우에만**
+한다 (`AGENTS.md` §4). §15/§16 의 수동 DTBO 경로는 최단 경로가 아니었다.
+
+### 확정된 매핑
+
+```
+Jetson header function : spi1        물리 핀 19 MOSI / 21 MISO / 23 SCK / 24 CS0 / 26 CS1
+SPI controller         : spi@3210000
+Linux master           : spi0
+CS0 / CS1              : /dev/spidev0.0  /  /dev/spidev0.1
+```
+
+`spi1` 이라는 function 이름은 `/dev/spidev1.x` 를 뜻하지 않는다. `/dev/spidev1.x` 는
+`spi@3230000` (SPI3, 물리 핀 13/16/18/22/37) 이다.
+
+### 검증 결과 (2026-09-02)
+
+| 항목 | 상태 |
+|---|---|
+| 공식 Jetson-IO `spi1` 설정 | **PASS** — 적용 DT 5핀 `func=spi1`, `tristate=0` |
+| `/dev/spidev0.0` | **PASS** |
+| Pin19↔Pin21 물리 loopback, **첫 바이트 MSB=0 패턴** | **PASS** — TX == RX, 500 kHz·100 kHz 각 3/3 |
+| Pin19↔Pin21 물리 loopback, **첫 바이트 MSB=1 패턴** | **FAIL** — 선두 최대 2비트 소실 (아래) |
+| SCK / MOSI / CS 실제 구동, CS assert | **PASS** — 전송 ON/OFF DC 전압차로 확인 |
+| 실측 SPI 클럭 | 요청 100 kHz → **실제 약 3.12 MHz** (BME680 상한 10 MHz 이내) |
+| **BME680 / BMP388 chip ID** | **FAIL — 원인은 아래 SPI1 결함** |
+
+### 확정된 원인 — SPI1 선두비트 소실
+
+```
+spi@3210000 (/dev/spidev0.0) 는 프레임 시작 시 MOSI 선두 최대 2비트를 전송하지 않는다.
+  TX D0 00  ->  RX 10 00        (BME680 chip ID read 명령이 reg 0x10 write 로 나감)
+  TX 80 00  ->  RX 00 00        (BMP388 chip ID read 명령이 reg 0x00 write 로 나감)
+  TX FF FF FF FF  ->  RX 3F FF FF FF
+  TX 7F FF  ->  RX 7F FF        (선두가 0 이면 정상)
+```
+
+SPI read 명령의 첫 바이트 bit7 은 **R/W 비트**다. 그것이 0 으로 떨어지면 센서는 read 를
+write 로 해석하고 SDO 를 구동하지 않는다. **이 결함이 있으면 어떤 SPI 센서도 응답하지 않는다.**
+
+배선 길이(짧은 헤더 점퍼도 동일)·요청 속도(50 kHz~10 MHz)·전송 길이(2~64 B, PIO/DMA 모두)·
+SPI mode·센서 종류(BME680 ×2, BMP388 ×1) 모두 무관하게 재현된다. 재현율 4/5 로 경계선
+타이밍이며, 드라이버가 참조하는 `nvidia,tx-clk-tap-delay` / `nvidia,rx-clk-tap-delay` 는
+현재 DT 에 **둘 다 미설정**이다.
+
+### 센서 상태
+
+```
+BME680 / BMP388   = 무죄 (센서 3개, 각 정규 프로토콜로 동일 실패)
+배선              = 무죄 (모듈 자리 SDI-SDO 점퍼로 배선 왕복 loopback PASS)
+SPI1 컨트롤러     = 선두비트 소실 결함
+```
+
+제거된 가설 전체, 결함의 상세 특성, 대응 선택지(SPI3 이설 / DT tap-delay / L4T 업데이트) 는
+[`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md) §10-3, §10-6 에 있다.
+
+**loopback 검증 시 반드시 첫 바이트 MSB=1 패턴을 포함해야 한다.** `"HelloWorld..."`
+(첫 바이트 `0x48`) 만으로는 이 결함이 드러나지 않는다.
+
+### 이 플랫폼에서 통하지 않는 진단 방법 (기록)
+
+- `spidev_test -l` (`SPI_LOOP`, 컨트롤러 내부 loopback) — Tegra 드라이버 미지원, `EINVAL`
+- `spidev_test.c` master 브랜치 — 5.15 헤더에 없는 매크로로 컴파일 실패. **v5.15 태그**를 쓴다
+- debugfs `MUX UNCLAIMED` — 정상 I2C 핀도 동일 표시. 판정 근거 불가 (§14)
+- `gpioinfo` 의 input/output 표시 — SPI pad direction 근거로 사용 불가
+- `/proc/cmdline` — 세 boot entry 가 동일하므로 부팅 entry 판별에 사용 불가.
+  적용된 DT (`exp-header-pinmux`) 를 본다

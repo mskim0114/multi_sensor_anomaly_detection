@@ -77,6 +77,34 @@ env PYTHONNOUSERSITE=1 "$HOME/venvs/factory_runtime/bin/python" <script.py>
 
 I2C bus 번호를 하드코딩으로 추측하지 않는다. 위 표 또는 CLI 옵션을 쓴다.
 
+**확장 헤더(40-pin) 기능 설정 — 공식 경로만 사용한다.**
+
+Jetson expansion-header configuration must use the official `jetson-io.py`
+*Save pin changes* / *Save and reboot to reconfigure pins* workflow first.
+Do not manually generate or patch DTBO/DTS unless the official workflow has
+demonstrably failed.
+
+FIRST CHOICE (사용자가 대화형으로 실행):
+```
+sudo /opt/nvidia/jetson-io/jetson-io.py
+  -> Configure Jetson 40pin Header
+  -> Configure header pins manually
+  -> spi1 (19,21,23,24,26)
+  -> Back -> Save pin changes -> Save and reboot to reconfigure pins
+```
+
+일반 설정 경로로 쓰지 않는다: `config-by-function.py -o dt`, *Export as Device-Tree
+Overlay*, 수동 DTS/DTBO 편집, tristate 직접 수정, devmem write, pinmux 저수준 분석부터
+시작하기. 저수준 분석은 **공식 Jetson-IO 절차와 공식 loopback 이 모두 실패한 경우에만**
+수행한다. 근거는 `docs/JETSON_SPI_BME680_SETUP.md`.
+
+**진단 순서** — 아래 순서를 지키고 역순으로 하지 않는다.
+```
+L1 전원/GND/배선  ->  L2 공식 Jetson 설정 도구  ->  L3 공식 device node
+->  L4 공식/표준 loopback·bus test  ->  L5 실제 sensor chip-id
+->  L6 high-level Python driver  ->  L7 그 이후에만 pinmux / DT / register debugging
+```
+
 **절대 금지**
 ```
 device-tree 수정 / pinmux 수정 / /opt/nvidia/jetson-io 자동 실행

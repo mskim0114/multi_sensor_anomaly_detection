@@ -45,6 +45,9 @@ Python 실행은 런처를 쓴다. plain `python3` 를 쓰지 않는다.
 - `tensorrt`, `cv2`, `Jetson.GPIO`, CUDA 는 JetPack 제공 — requirements에 넣지 않는다
 - I2C 버스: Pin 3/5 = `/dev/i2c-7` (400 kHz), Pin 27/28 = `/dev/i2c-1` (100 kHz)
 - device-tree / pinmux / jetson-io / reboot 자동 실행 금지
+- 40-pin 확장 헤더 기능 설정은 **공식 `jetson-io.py` 메뉴 경로가 FIRST CHOICE**다
+  (*Save pin changes* → *Save and reboot*). 공식 절차와 공식 loopback 이 모두 실패하기
+  전에는 DTBO/DTS 를 수동 생성/수정하지 않는다 — `docs/JETSON_SPI_BME680_SETUP.md`
 - `i2cset` / `i2cdump` / `devmem` 금지
 - 센서 오류 시 자동 retry나 workaround를 만들지 말고 첫 오류를 보존해 보고한다
 - 측정값에 calibration / offset correction / threshold 를 자동 적용하지 않는다

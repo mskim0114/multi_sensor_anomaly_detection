@@ -14,6 +14,7 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import time
 
 import numpy as np
@@ -28,17 +29,56 @@ RESULTS_DIR = os.path.join(ROOT, "results")
 CLASS_NAMES = ["Normal", "Mild", "Moderate", "Severe"]
 
 
+# ---------------------------------------------------------------------------
+# Provider policy (2026-08-31)
+#
+#   auto -> CUDAExecutionProvider, else CPUExecutionProvider.
+#           TensorrtExecutionProvider is NEVER an auto candidate.
+#
+# Measured failure boundary on this board:
+#     ONNX model                    PASS  (trtexec parses, builds and runs it)
+#     native TensorRT via trtexec   PASS  (FP32 4.88 ms, FP16 3.33 ms mean)
+#     ORT CUDA EP                   PASS  (16.27 ms/sample, bit-identical acc)
+#     ORT CPU EP                    PASS  (46.45 ms/sample)
+#     ORT TensorRT EP               FAIL  (SIGSEGV, exit 139, in libnvinfer.so.10)
+#
+# Session creation succeeds and every requested provider registers, but the
+# first sess.run() dies. ldd reports no unresolved libraries. The failure is
+# isolated to the ORT TensorRT EP partition/execution integration path; the
+# exact root cause remains unresolved. See docs/JETSON_ENVIRONMENT.md §10.
+#
+# A segfault cannot be caught in Python, so TensorRT must not be reachable by
+# default - it would take down the whole process. --provider tensorrt still
+# works when asked for explicitly, with a warning.
+# ---------------------------------------------------------------------------
+AUTO_PROVIDER_PRIORITY = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+TENSORRT_WARNING = (
+    "WARNING: TensorRT EP is experimental on this Jetson runtime.\n"
+    "         Known issue: ORT TensorRT EP crashes with SIGSEGV on the current\n"
+    "         V2+ model. Use --provider cuda for the verified runtime path.\n"
+    "         Details: docs/JETSON_ENVIRONMENT.md section 10."
+)
+
+
 def pick_provider(arg):
     available = ort.get_available_providers()
     if arg == "auto":
-        for p in ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]:
+        for p in AUTO_PROVIDER_PRIORITY:
             if p in available:
                 return p
+        raise SystemExit(
+            f"No auto-selectable provider available. Available: {available}. "
+            "TensorRT is excluded from auto on purpose; request it with "
+            "--provider tensorrt if you really want it."
+        )
     mapping = {"cpu": "CPUExecutionProvider", "cuda": "CUDAExecutionProvider",
                "tensorrt": "TensorrtExecutionProvider"}
     name = mapping.get(arg, arg)
     if name not in available:
         raise SystemExit(f"Provider {name} not available. Available: {available}")
+    if name == "TensorrtExecutionProvider":
+        print(TENSORRT_WARNING, file=sys.stderr)
     return name
 
 

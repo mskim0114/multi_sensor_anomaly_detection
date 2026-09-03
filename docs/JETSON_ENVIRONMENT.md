@@ -190,7 +190,7 @@ sudo usermod -aG i2c,gpio,video "$USER"
 | SCD30 | I2C | `/dev/i2c-1` | `0x61` | **PASS** | CO2 702 ppm / 28.67 °C / 48.0 % |
 | FLIR Lepton 3.5 | USB UVC | `/dev/video0` | — | **PASS** | 27.34–35.93 °C, mean 29.07 |
 | SGP30 | I2C | `/dev/i2c-7` | `0x58` | **PASS** (communication PASS / dynamic response YES) | eCO2 413 ppm / TVOC 4 ppb (65샘플, 68.4 s) |
-| BME680 | SPI | **`/dev/spidev0.0`** | — | **FAIL — `spi1` 활성화 후에도 무응답** (pinmux 원인 배제됨) | chip ID `0x00` (기대 `0x61`) |
+| BME680 | **I2C** | `/dev/i2c-7` | **`0x77`** | **PASS** (2026-09-03) | chip ID `0x61`, variant `0x00`, 26.3–26.6 °C / 54.4–55.4 % / 999.4 hPa / gas 6.9k–27k Ω |
 
 ### 센서 식별 정보
 
@@ -198,8 +198,8 @@ sudo usermod -aG i2c,gpio,video "$USER"
 |---|---|---|
 | SPS30 | `E95C50BEF297082A` (product type `00080000`) | `(2, 3)` |
 | SCD30 | `3115957-3117121-204041148` | `(3, 66)` |
+| BME680 | chip ID `0x61`, variant ID `0x00` | — |
 | SGP30 | `000001B9391C` (48-bit) | feature set 검증 통과 |
-| BME680 | chip ID `0x0` 반환 (BME680 은 `0x61`) | 통신 미확립 |
 | PureThermal | `0003001d-5101-3133-3332-3733...` | `v1.3.0` |
 
 ### CT front-end 회로 및 zero-current baseline
@@ -1022,7 +1022,7 @@ BME680 = FAIL (spi1 ENABLED 상태에서도 무응답)
 | **40핀 헤더 `spi1` 미활성** | **배제 — 활성화 후에도 동일 실패** |
 | 물리 배선 / 브레이크아웃 핀 순서 | **제거 (§17)** — 모듈 자리 SDI-SDO 점퍼로 배선 왕복 loopback PASS |
 | 센서 전원 | **제거 (§17)** — 모듈 VCC-GND 전압 정상 |
-| BME680 모듈 자체 불량 | **제거 (§17)** — BME680 ×2 + BMP388 ×1 이 동일 실패 |
+| BME680 모듈 자체 불량 | **확정 (§17)** — 당시 모듈 3개는 실제로 손상 상태였다. 네 번째 새 모듈은 I2C 에서 즉시 `0x61` 응답 |
 | 패드 tristate 설정 | **반증됨 — 아래 참조** |
 
 **tristate 가설과 그 반증 (2026-09-02).** 당시 관찰: `config-by-function.py -o dt` 로 생성된
@@ -1098,7 +1098,7 @@ CS0 / CS1              : /dev/spidev0.0  /  /dev/spidev0.1
 | **Pin37↔Pin22 물리 loopback (SPI3)** | **PASS** — 동일 조건 10/10 |
 | SCK / MOSI / CS 실제 구동, CS assert | **PASS** — 전송 ON/OFF DC 전압차로 확인 |
 | 실측 SPI 클럭 | 요청 100 kHz → **실제 약 3.12 MHz** (BME680 상한 10 MHz 이내) |
-| **BME680 / BMP388 chip ID** | **FAIL** — 모듈 손상 추정 (아래) |
+| **BME680 chip ID** | **PASS** — 단 인터페이스는 SPI 가 아니라 **I2C** (아래) |
 
 ### SPI 컨트롤러 상태 (2026-09-03 최종)
 
@@ -1112,19 +1112,30 @@ SPI3  spi@3230000  /dev/spidev1.0   정상
 증상과 오진 과정, 재발 방지 절차는
 [`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md) §10-6 에 실패 기록으로 남겼다.
 
-### 센서 상태
+### 센서 상태 (2026-09-03 실측)
 
 ```
-BME680 (모듈 3개)   SPI · I2C 양쪽 모두 무응답 — 사망 추정, 신규 구매 진행
-BMP388              SPI 무응답
-ADS1115 0x48        정상 (i2c-7)
-SCD30   0x61        정상 (i2c-1)
-SPS30   0x69        정상 (i2c-1)
-FLIR Lepton         정상 — PureThermal 보드, USB(UVC). SPI 와 무관
+BME680   /dev/i2c-7 0x77   PASS  chip_id 0x61, variant 0x00
+                            T 26.3~26.6 C, RH 54.4~55.4 %, P 999.4 hPa, gas 6.9k~27k ohm
+                            10/10 read 성공, I2C exception 없음
+ADS1115  /dev/i2c-7 0x48   PASS  NTC A2: 24.67~24.70 C, R 10135~10146 ohm
+SGP30    /dev/i2c-7 0x58   PASS  serial 000001B9391C
+SCD30    /dev/i2c-1 0x61   PASS  serial 3115957-3117121-204041148, fw (3,66)
+SPS30    /dev/i2c-1 0x69   PASS  serial E95C50BEF297082A, fw (2,3)
+FLIR     USB (UVC)          PASS  PureThermal fw v1.3.0, 25.94~37.12 C
 ```
 
-BME680 모듈들은 초기에 **역방향 삽입 이력**이 있다. 대조군(ADS1115)을 둔 I2C 생존 확인에서도
-어떤 주소에도 나타나지 않았다. 절차는 `JETSON_SPI_BME680_SETUP.md` §10-7.
+**BME680 의 인터페이스는 I2C 다.** BME680 은 SPI/I2C 를 모두 지원하며, bring-up 에서 SPI 를
+먼저 시도했으나 모듈 3개를 **역삽입으로 잃은 뒤** I2C 로 전환했다. 네 번째 새 모듈은 I2C 에서
+즉시 `0x61` 로 응답했다. 두 SPI 컨트롤러는 loopback 으로 정상이 증명되었으므로 SPI 는 여전히
+유효한 선택지다.
+
+배선·절차·의존성은 [`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md) §9,
+읽기 스크립트는 `jetson_deploy/scripts/10_read_bme680_i2c.py`.
+
+BME680 은 gas 히터 자체 발열로 온도가 주변 기온보다 높게 읽힌다. **모델의 온도 입력은
+NTC 이며 BME680 은 수집/컨텍스트 센서로만 쓴다** — 모델 입력 벡터
+`[NTC, PM1.0, PM2.5, PM10, CT1..CT4]` 는 변경하지 않는다.
 
 **loopback 검증 시 반드시 첫 바이트 MSB=1 패턴(`FF FF FF FF`, `D0 00`)을 포함해야 한다.**
 `"HelloWorld..."`(첫 바이트 `0x48`)만으로는 선두비트 이상이 드러나지 않는다. 그리고 이상이

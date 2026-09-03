@@ -1,11 +1,26 @@
-# Jetson Orin Nano — 40핀 SPI1 + BME680 설정 가이드
+# Jetson Orin Nano — 40핀 SPI 설정 + BME680 가이드
 
-새 Jetson을 받았거나 SPI1 을 다시 설정해야 할 때 **이 문서 하나만 순서대로** 따라간다.
+새 Jetson을 받았거나 SPI 를 다시 설정해야 할 때 **이 문서 하나만 순서대로** 따라간다.
 목표 소요시간 10~20분.
 
-이 문서는 2026-09-02 실제 bring-up 에서 측정으로 확인된 내용만 담는다. 추측은 담지 않는다.
-관련 규칙은 [`AGENTS.md`](../AGENTS.md) §4, 환경 전반은
+이 문서는 2026-09-02 ~ 09-03 실제 bring-up 에서 측정으로 확인된 내용만 담는다.
+추측은 담지 않는다. 관련 규칙은 [`AGENTS.md`](../AGENTS.md) §4, 환경 전반은
 [`JETSON_ENVIRONMENT.md`](JETSON_ENVIRONMENT.md) 를 본다.
+
+> ## 현재 확정 구성 (2026-09-03)
+>
+> | 항목 | 상태 |
+> |---|---|
+> | **BME680** | **PASS — interface `I2C`, bus `/dev/i2c-7`, address `0x77`, chip_id `0x61`, variant `0x00`** |
+> | Jetson SPI1 `/dev/spidev0.0` | 정상 (loopback 10/10, 모든 선두비트 패턴, 100 kHz~5 MHz) |
+> | Jetson SPI3 `/dev/spidev1.0` | 정상 (동일 조건 10/10) |
+>
+> **BME680 의 운영 인터페이스는 SPI 가 아니라 I2C 다.** BME680 은 둘 다 지원하며,
+> bring-up 에서 SPI 를 먼저 시도했으나 모듈 3개를 역삽입으로 잃은 뒤 I2C 로 전환했다.
+> 두 SPI 컨트롤러는 loopback 으로 정상이 증명되었으므로 SPI 는 여전히 유효한 선택지이고,
+> §2~§8 의 SPI 절차는 그대로 재사용 가능하다.
+>
+> **BME680 을 지금 바로 쓰려면 §9 만 보면 된다.** §2~§8 은 SPI 를 쓸 때 필요하다.
 
 ---
 
@@ -240,7 +255,9 @@ Tegra SPI 드라이버가 `SPI_LOOP` (컨트롤러 내부 loopback) 를 지원�
 
 ---
 
-## 7. BME680 배선
+## 7. BME680 배선 — SPI 경로
+
+> SPI 로 붙이는 경우의 절차다. **현재 운영 구성은 I2C 이며 §9 를 본다.**
 
 ### 7-1. 반드시 먼저 — loopback 점퍼를 제거한다
 
@@ -306,7 +323,9 @@ Jetson Pin17 에서 재는 것이 아니라 모듈 쪽에서 잰다.
 
 ---
 
-## 8. chip ID 확인 — `0x61`
+## 8. chip ID 확인 — `0x61` (SPI 경로)
+
+> SPI 로 붙이는 경우의 절차다. **현재 운영 구성은 I2C 이며 §9 를 본다.**
 
 BME680 의 chip ID 레지스터는 **SPI 주소 `0x50`, page 0** 이고, read control byte 는
 주소 7비트 + bit7=RW=1 → **`0xD0`** 이다. page 0 은 power-on 기본 상태이므로 별도 설정이
@@ -350,29 +369,89 @@ python3 -c "open('/tmp/p2.bin','wb').write(b'\xaa'*2); open('/tmp/p4k.bin','wb')
 
 ---
 
-## 9. high-level 측정 (chip ID PASS 이후에만)
+## 9. BME680 — canonical 구성 (I2C)
 
-`$HOME/venvs/factory_runtime` 의 Adafruit BME680 driver 로 10 samples 를 읽는다.
-새 패키지를 설치하지 않는다.
+**이것이 현재 검증된 운영 구성이다.** SPI 를 쓰지 않는 경우 §2~§8 은 건너뛰어도 된다.
 
-```bash
-./jetson_deploy/run_python.sh <BME680 diagnostic script>
+### 9-1. 배선
+
+브레이크아웃 실크 `MISO  SCLK  CS  MOSI  GND  VCC` 기준.
+
+| 모듈 핀 | 연결 | 비고 |
+|---|---|---|
+| `SCLK` | Jetson **Pin 5** (SCL) | |
+| `MOSI` | Jetson **Pin 3** (SDA) | BME680 은 SDI 가 I2C SDA 겸용 |
+| `CS` | **3.3 V** | **I2C 모드 선택. 필수** |
+| `MISO` | **3.3 V** → 주소 `0x77` | GND → 주소 `0x76` |
+| `GND` | GND | |
+| `VCC` | 3.3 V | |
+
+```
+MISO/SDO -> GND   =  0x76
+MISO/SDO -> 3.3V  =  0x77      <- 이 프로젝트의 확정 주소
 ```
 
-temperature / humidity / pressure / gas resistance 가 연속적으로 정상 read 되고
-exception / chip-id error / SPI error 가 없으면 `BME680_FINAL = PASS`.
+반드시 지킬 것 세 가지.
 
-> **현재 상태 (2026-09-03)**
-> ```
-> Jetson SPI1 (/dev/spidev0.0)   정상 — loopback 10/10, 모든 선두비트 패턴, 100 kHz~5 MHz
-> Jetson SPI3 (/dev/spidev1.0)   정상 — 동일 조건 10/10
-> BME680 (모듈 3개)               SPI · I2C 양쪽 모두 무응답 — 사망 추정
-> BMP388                          SPI 무응답
-> 다른 센서 (ADS1115/SCD30/SPS30) 정상 동작 확인
-> ```
-> BME680 모듈들은 초기에 **역방향으로 삽입된 이력**이 있다(§7-2 경고). 대조군을 둔 I2C 생존
-> 확인(§10-7)에서도 응답이 없어 모듈 손상으로 판단하고 신규 구매로 진행한다.
-> 진단 과정에서 한때 "SPI1 컨트롤러 결함" 으로 판정했으나 **점퍼 접촉 불량이었다** — §10-6.
+1. **`CS` 는 HIGH(VDDIO) 여야 한다.** 데이터시트 §6.1 — CSB 가 VDDIO 면 I2C, LOW 로 내려가면
+   SPI 가 활성화된다. `CS` 를 띄워두거나 LOW 로 두면 부품은 SPI 모드에 머물러 **I2C 에 절대
+   응답하지 않는다.**
+2. **CSB 가 한 번이라도 LOW 였다면 진짜 power-on reset 이 필요하다.** 그 전까지 I2C 는
+   비활성이다. bring-up 에서 확인된 신뢰할 수 있는 방법은 **Jetson 전원 어댑터를 뽑고
+   10초 이상 기다리는 것**이다. 소프트웨어 `reboot` 은 3.3 V 레일 강하가 보장되지 않아
+   충분하지 않다.
+3. **I2C 풀업이 있어야 한다.** Jetson 40핀 헤더는 풀업을 제공하지 않는다. 같은 버스에
+   다른 I2C 모듈이 함께 붙어 있어야 통신이 성립한다. BME680 만 단독으로 붙이면 정상
+   모듈이어도 `errno 121` 이 난다.
+
+**역삽입 주의**: §7-2 의 경고가 그대로 적용된다. bring-up 에서 이 실수로 모듈 3개를 잃었다.
+
+### 9-2. 읽기
+
+```bash
+PYTHONNOUSERSITE=1 ./jetson_deploy/run_python.sh \
+    jetson_deploy/scripts/10_read_bme680_i2c.py --samples 10
+```
+
+기본값은 `--i2c-port /dev/i2c-7 --address 0x77 --samples 10 --interval 1.0` 이다.
+CSV/JSON 은 `jetson_deploy/results/bme680/` 에 남는다 (`.gitignore` 대상).
+
+실측 (2026-09-03):
+
+```
+chip id: 0x61 (expected 0x61)
+variant id: 0x00 (BME680)
+   #   temperature    humidity      pressure           gas
+   1      26.28 C     55.43 %    999.43 hPa     17113 ohm
+  10      26.59 C     54.44 %    999.42 hPa     27072 ohm
+Reads: 10/10 successful
+Physical sanity: PASS
+```
+
+판정: chip id `0x61`, 10/10 read 성공, I2C exception 없음, T/RH/P/gas 가 유한하고 물리적으로
+타당하면 `BME680 = PASS`. **환경값 자체에 좁은 임계를 걸지 않는다.**
+
+### 9-3. 측정값 해석 시 주의
+
+- **gas resistance 는 히터가 안정되기까지 수 분간 표류한다.** 위 실측에서도 첫 샘플 이후
+  단조 증가한다. 초기 변동은 고장이 아니다.
+- **BME680 온도는 자체 gas 히터 발열 때문에 주변 기온보다 높게 읽힌다.**
+  실내 기온 채널로 쓰지 않는다. **모델의 온도 입력은 NTC 다.**
+- BME680 은 **수집/컨텍스트 센서**이며 모델 입력 벡터
+  `[NTC, PM1.0, PM2.5, PM10, CT1..CT4]` 에 포함되지 않는다.
+
+### 9-4. 의존성
+
+`jetson_deploy/requirements-jetson.txt` 에 canonical 로 등재되어 있다.
+
+```
+adafruit-circuitpython-bme680==3.7.16
+adafruit-extended-bus==1.0.2
+```
+
+`adafruit-extended-bus` 가 `ExtendedI2C(7)` 로 명시적 버스 번호에 바인딩한다.
+Adafruit 드라이버는 생성자에서 **soft reset(`0xE0 <- 0xB6`)** 을 수행한다. 휘발성 레지스터만
+초기화되며 공장 calibration NVM(read-only)은 건드리지 않는다.
 
 ---
 
@@ -444,7 +523,7 @@ Pin 21 이 ON/OFF 모두 3.3 V 면 **센서가 SDO 를 전혀 구동하지 않�
 | 명령 형식 오류 | 제거 | BME680 `0xD0`(reg 0x50), BMP388 `0x80`+dummy byte 각각 데이터시트대로 |
 | MOSI/MISO 배선 | 제거 | 모듈 자리에서 SDI-SDO 를 점퍼로 물려 배선 왕복 loopback PASS |
 | 선두비트 소실 (§10-6) | **오진 — 점퍼 접촉 불량** | 점퍼 재삽입 후 10/10 정상. SPI1·SPI3 모두 정상 |
-| **모듈 손상 (역삽입 이력)** | **현재 가장 유력** | SPI·I2C 양쪽 무응답, 대조군 정상, 모듈 3개 동일 |
+| **모듈 손상 (역삽입)** | **확정** | 모듈 3개는 SPI·I2C 양쪽 무응답(대조군 정상), 네 번째 새 모듈은 I2C 에서 즉시 `0x61` |
 
 ### 10-4. `RX` 가 전부 `FF` 또는 전부 `00` 일 때
 
@@ -509,33 +588,18 @@ SPI3 (spi@3230000, /dev/spidev1.0)   정상 — 동일 조건 10/10
 - MISO 읽힘값이 `FF` 와 `00` 사이를 오감 (떠 있는 노드의 전형)
 - SPI3 가 5/5 정상에서 0/10 으로 바뀜 (점퍼가 빠져 있었다)
 
-### 10-7. 센서 생존 여부를 I2C 로 확인하는 방법
+### 10-7. BME680 이 응답하지 않을 때 — 생존 확인
 
-BME680 은 SPI 와 I2C 를 모두 지원한다. SPI 로 응답이 없을 때 **칩 자체가 살아 있는지** 판정할 수
-있다. 이것은 SPI 문제를 우회하는 것이 아니라 사망 여부 판정이다.
+canonical 배선과 절차는 §9 를 본다. 여기서는 판정에 필요한 진단 요령만 적는다.
 
-**배선** (실크 `MISO SCLK CS MOSI GND VCC` 기준)
+**대조군 없이는 판정하지 않는다.** 같은 버스에 응답이 확인된 다른 장치(예: ADS1115 `0x48`)를
+두고, 그 장치가 응답하는데 BME680 만 무응답일 때에만 모듈 문제로 판정한다. 풀업을 제공하던
+모듈을 함께 빼버리면 정상 모듈도 `errno 121` 이 난다.
 
-```
-모듈 SCLK  ->  Pin 5   (SCL)
-모듈 MOSI  ->  Pin 3   (SDA)        BME680 은 SDI 가 I2C SDA 겸용
-모듈 CS    ->  3.3 V                I2C 모드 선택. 없으면 SPI 모드에 머물러 절대 응답 안 함
-모듈 MISO  ->  GND                  주소 선택. GND=0x76, 3.3V=0x77
-모듈 GND   ->  GND
-모듈 VCC   ->  3.3 V
-```
+**확인 순서**: ① `CS` 가 3.3 V 인가 → ② `MISO/SDO` 가 주소에 맞게 묶였는가 →
+③ 어댑터를 뽑는 진짜 POR 을 했는가 → ④ 같은 버스 대조군이 응답하는가.
 
-**반드시 지킬 것 세 가지**
-
-1. **풀업이 있어야 한다.** Jetson 40핀은 I2C 풀업을 제공하지 않는다. 다른 I2C 센서 모듈이
-   버스에 함께 붙어 있어야 통신이 성립한다. BME680 만 단독으로 붙이면 살아 있어도 `errno 121` 이다.
-2. **대조군을 같은 버스에 둔다.** 예: ADS1115(`0x48`). 대조군이 응답하는데 BME680 만 무응답이어야
-   비로소 판정이 성립한다.
-3. **power-on-reset 을 한다.** 데이터시트 §6.1 — CSB 가 한 번이라도 LOW 로 내려간 뒤에는
-   다음 POR 전까지 I2C 가 비활성이다. SPI 시험을 했다면 반드시 겪은 상태다.
-   `reboot` 으로는 3.3 V 레일이 내려간다는 보장이 없으므로 **어댑터를 뽑고 10초 이상** 기다린다.
-
-**스캔** (쓰기 없이 read 만 하므로 다른 장치의 상태를 바꾸지 않는다)
+**안전한 스캔** (쓰기 없이 read 만 하므로 다른 장치의 상태를 바꾸지 않는다):
 
 ```bash
 python3 -c "
@@ -552,12 +616,13 @@ print(' '.join('0x%02X'%a for a in found))
 "
 ```
 
-`0x76` 에서 chip_id `0x61` 이 나오면 칩 생존이다. 대조군 정상 + 올바른 배선 + POR 을 모두
-만족한 상태에서 무응답이면 **사망으로 판정한다.**
+**`i2cdetect` 는 이 플랫폼에서 판정 근거가 되지 않는다.** Tegra I2C 어댑터가 SMBus Quick
+Command 를 지원하지 않아 대부분의 주소를 probe 조차 하지 않는다 (`i2cdetect -F` 로 확인).
+위처럼 직접 통신해서 chip id 를 읽는 것이 유일한 신뢰 가능한 확인이다.
 
-**주의**: `i2cdetect` 는 이 플랫폼에서 신뢰할 수 없다. Tegra I2C 어댑터가 SMBus Quick Command 를
-지원하지 않아 대부분의 주소를 probe 조차 하지 않는다 (`i2cdetect -F` 로 확인 가능).
-위처럼 직접 read 로 확인한다.
+**단일 `0x00` 또는 `FF` 응답만으로 모듈 불량을 단정하지 않는다.** 떠 있는 라인의 읽힘값은
+플랫폼과 잔류 전하에 따라 달라지고 세션마다 바뀐다 (§10-4).
+
 ## 11. 하지 말아야 할 접근
 
 2026-09-02 작업에서 실제로 시간을 잃은 경로들이다.

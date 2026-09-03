@@ -79,16 +79,27 @@ sensirion-i2c-scd30==1.1.1
 adafruit-circuitpython-sgp30==3.0.16
 adafruit-extended-bus==1.0.2
 
-# --- Pending hardware verification, do not add until measured --------------
-# BME680 (SPI, /dev/spidev0.0)
-#   SPI mapping is PROVEN (4 independent sources, docs/JETSON_ENVIRONMENT.md §5),
-#   but hardware communication FAILED on 2026-08-31: the chip id register returned
-#   0x0 instead of 0x61, i.e. MISO reads all zeros. Candidates are listed in
-#   docs/JETSON_ENVIRONMENT.md §11 - the unresolved one is whether physical pins
-#   19/21/23/24 are actually pinmuxed to SPI (debugfs pinctrl needs root).
+# --- BME680 gas/temp/humidity/pressure, I2C /dev/i2c-7 @0x77 ---------------
+# Hardware-verified 2026-09-03 on this board:
+#   chip_id 0x61, variant_id 0x00 (BME680, not BME688)
+#   10/10 reads with no I2C exception, via
+#   jetson_deploy/scripts/10_read_bme680_i2c.py --samples 10:
+#   T 26.28-26.59 C, RH 54.44-55.43 %, P 999.41-999.43 hPa,
+#   gas 6882-27072 ohm (rising while the heater settles - expected)
 #
-#   adafruit-circuitpython-bme680==3.7.16 IS currently installed in
-#   $HOME/venvs/factory_runtime for that diagnostic, but is deliberately NOT
-#   listed here because the hardware test did not pass. A fresh venv built from
-#   this file therefore will NOT contain it - that difference is intentional.
-#   Add the pin only after a real measurement succeeds.
+# The interface is I2C, NOT SPI. The BME680 supports both; SPI was attempted
+# first and abandoned after three modules were destroyed by reverse insertion
+# (see docs/JETSON_SPI_BME680_SETUP.md). Both Jetson SPI controllers were proven
+# healthy by loopback, so SPI remains a valid future option - but the validated,
+# currently deployed configuration is I2C.
+#
+# I2C-specific wiring requirements (breakout silk MISO/SCLK/CS/MOSI/GND/VCC):
+#   CS   -> 3.3V   selects I2C mode. Without this the part stays in SPI mode
+#                  and never answers on I2C.
+#   MISO -> 3.3V   address 0x77 (tie to GND for 0x76).
+# After CSB has ever been driven low, I2C stays disabled until a true
+# power-on reset - a warm `reboot` is not sufficient.
+#
+# adafruit-extended-bus (already required for SGP30 above) is what binds this to
+# the explicit bus number: ExtendedI2C(7).
+adafruit-circuitpython-bme680==3.7.16

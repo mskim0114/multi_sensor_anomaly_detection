@@ -40,10 +40,14 @@ sensirion-shdlc-sensorbridge==0.2.0
 pyserial==3.5
 intelhex==2.3.0
 
-# --- Adafruit / CircuitPython stack for SGP30 (installed 2026-08-31) --------
+# --- Adafruit / CircuitPython stack for SGP30 and BME680 --------------------
+# SGP30 installed 2026-08-31, BME680 hardware-verified 2026-09-03.
 # Blinka deliberately relies on the APT-provided Jetson.GPIO. Confirmed that the
 # resolver did not fetch Jetson.GPIO, numpy, tensorrt, opencv or onnxruntime.
+# Versions below are what `pip show` reports in $HOME/venvs/factory_runtime,
+# where the BME680 10-sample hardware run passed.
 adafruit-circuitpython-sgp30==3.0.16
+adafruit-circuitpython-bme680==3.7.16
 adafruit-extended-bus==1.0.2
 Adafruit-Blinka==9.2.0
 Adafruit-PlatformDetect==3.89.1

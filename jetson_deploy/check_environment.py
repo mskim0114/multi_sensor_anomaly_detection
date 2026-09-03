@@ -50,11 +50,13 @@ MODULES = [
     ("sensirion_i2c_scd30",       True,  "SCD30 CO2/temp/humidity"),
     ("sensirion_i2c_driver",      True,  "Sensirion base driver"),
     ("sensirion_driver_adapters", True,  "Sensirion I2C adapter"),
+    ("adafruit_bme680",           True,  "BME680 gas/temp/humidity/pressure, I2C 0x77"),
+    ("adafruit_extended_bus",     True,  "binds CircuitPython to an explicit /dev/i2c-N"),
 ]
 
 # Devices this project's confirmed wiring depends on.
 EXPECTED_I2C = {
-    "/dev/i2c-7": "MAIN  400 kHz  pin 3/5    ADS1115 0x48, SGP30 0x58",
+    "/dev/i2c-7": "MAIN  400 kHz  pin 3/5    ADS1115 0x48, SGP30 0x58, BME680 0x77",
     "/dev/i2c-1": "SLOW  100 kHz  pin 27/28  SPS30 0x69, SCD30 0x61",
 }
 
@@ -235,10 +237,12 @@ def check_devices() -> None:
     if spidevs:
         for path in spidevs:
             print(f"    OK    {path}")
-        print("    note: node existence does NOT prove routing to header pins 19/21/23/24.")
-        print("          BME680 stays PENDING until that mapping is verified.")
+        print("    note: node existence does NOT prove routing to the header pins.")
+        print("          Verify with a physical loopback that includes a leading-1")
+        print("          pattern (FF FF FF FF) - see docs/JETSON_SPI_BME680_SETUP.md.")
+        print("          BME680 does NOT use SPI on this board; it runs on I2C 0x77.")
     else:
-        print("    none - SPI pinmux not enabled (BME680 unavailable)")
+        print("    none - SPI pinmux not enabled")
         warnings.append("no /dev/spidev* - SPI not enabled")
 
     print("  USB thermal camera:")

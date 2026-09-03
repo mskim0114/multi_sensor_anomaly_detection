@@ -7,8 +7,10 @@ src/data/config.py; BME680, SGP30 and SCD30 are collection/context sensors.
 """
 
 from .snapshot import (  # noqa: F401
+    FLIR_MAX_AGE_MS,
     SCHEMA_VERSION,
     SCALAR_FIELDS,
+    WINDOW_TICKS,
     STATUS_DISABLED,
     STATUS_ERROR,
     STATUS_OK,
@@ -16,4 +18,6 @@ from .snapshot import (  # noqa: F401
     STATUS_WARMING_UP,
     observation,
     scalar_row,
+    tick_quality,
+    window_quality,
 )

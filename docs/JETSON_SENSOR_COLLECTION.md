@@ -73,6 +73,39 @@ seq 7  fresh=True   age= 665 ms  CO2=756.858
 
 `status` 값은 `ok` / `warming_up` / `stale` / `error` / `disabled` 다섯 가지뿐이다.
 
+### 3-1. SGP30 `warming_up` — 값이 아니라 session 경과시간
+
+Sensirion SGP30 은 **성공한 `iaq_init` 이후 첫 15초가 initialization phase** 이고, 그 구간
+`measure_iaq` 는 고정값 `eCO2 = 400 ppm` / `TVOC = 0 ppb` 를 반환한다. 그 구간에도 1초
+cadence 는 유지된다.
+
+**판정은 오직 경과시간으로 한다.**
+
+```
+session_elapsed_s = (now - session_init_monotonic) / 1e9
+warming_up   if session_elapsed_s < 15.0
+ok           otherwise
+```
+
+**값을 판정에 쓰지 않는다.** 15초 이후 실제 측정값이 다시 `400/0` 이 되어도 `ok` 를 유지한다.
+초기 구현은 `eCO2 == 400 and TVOC == 0` 로 판정했는데, 라이브 값이 그 쌍에 걸릴 때마다
+`warming_up ↔ ok` 가 진동했다. 실측 90초 run 에서 15초 이후 `400/0` 인 tick 이 70개 있었고
+전부 `ok` 로 기록되는 것을 확인했다.
+
+`warming_up → ok` 전이는 **initialization session 당 정확히 1회**다. `session_elapsed_s` 는
+단조 증가하므로 같은 session 안에서 되돌아가는 것이 구조적으로 불가능하다.
+
+통신 실패 후 **실제 재초기화에 성공하면 새 session** 이 열려 15초 phase 가 정상적으로 다시
+시작한다. 진동과 구분할 수 있도록 스냅샷과 timing report 에 다음을 남긴다.
+
+```
+session_id            session 번호 (재초기화마다 증가)
+session_init_sequence 그 session 의 iaq_init 이 성공한 tick
+session_elapsed_s     그 session 시작부터의 경과시간
+initialisation_count  전체 실행에서의 iaq_init 성공 횟수
+sessions[]            session 별 init tick / monotonic / serial
+```
+
 ---
 
 ## 4. 버스 중재
@@ -136,7 +169,12 @@ PureThermal 스트림은 **160×122 GRAY16** 이고 **마지막 2행(120–121)�
 (이 보드에서 실측 확인: 해당 행은 0 과 58744 같은 비온도 값). 앞의 120행만 사용하며
 그것이 모델이 기대하는 **120×160** 이다. 온도 변환은 `raw/100 − 273.15`.
 
-프레임은 30장 단위 NPZ 로 저장하고 스냅샷에는 참조만 남긴다.
+프레임은 30장 단위 NPZ 로 저장하고 스냅샷에는 참조만 남긴다. **압축/쓰기는 acquisition
+critical path 밖에서 수행한다** — bounded queue 하나와 background writer 스레드 하나.
+inline 압축은 30 tick 마다 tick_work 를 +176 ms 밀어올려 1000 ms 예산의 여유를 18 ms 까지
+줄였다(1800 tick soak 실측). queue 는 bounded 이며, writer 가 따라오지 못하면 조용히 버리지
+않고 `storage.degraded_events` 와 `dropped_chunks` 로 기록한다. 종료 시 queue drain →
+flush → writer join 을 완료한다.
 
 ```
 thermal_000000.npz   frames (30,120,160) uint16 + sequences
@@ -216,10 +254,16 @@ FLIR          120/120 tick 에 프레임 있음,  age mean 74.9 ms  p95 115.9 ms
 ## 10. 주의
 
 - 이 collector 가 도는 동안 `scripts/08` / `scripts/09` 를 동시에 실행하지 않는다
-- 센서 커넥터 접점이 이 프로젝트의 반복 실패 원인이었다. 수집 전에
-  `/dev/i2c-7` 에 `0x48 0x58 0x77`, `/dev/i2c-1` 에 `0x61 0x69` 가 모두 보이는지 확인한다
+- 센서 커넥터 접점이 이 프로젝트의 반복 실패 원인이었다. 수집 전에 이 스크립트를 5초만
+  돌려 스냅샷의 `status` 로 전 센서를 확인한다. **I2C 전 주소 bare-read 스캔은 쓰지 않는다** —
+  Sensirion 장치(SGP30/SPS30/SCD30)에는 프로토콜 위반이고 상태를 망가뜨릴 수 있다
+  (`JETSON_SPI_BME680_SETUP.md` §10-7)
+
+  ```bash
+  ./jetson_deploy/run_python.sh jetson_deploy/scripts/11_collect_sensors.py --duration 5
+  ```
 - BME680 온도는 gas 히터 자체 발열로 실온보다 높다. 모델 온도 채널은 NTC 다
-- SGP30 첫 약 15–20 초의 `eCO2=400 / TVOC=0` 은 정상 초기화 구간이며 `warming_up` 으로 표시된다
+- SGP30 `warming_up` 은 값이 아니라 **initialization session 경과시간**으로 판정한다 — §3-1
 
 관련 문서: [`JETSON_ENVIRONMENT.md`](JETSON_ENVIRONMENT.md),
 [`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md), [`../AGENTS.md`](../AGENTS.md)

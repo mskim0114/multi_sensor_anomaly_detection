@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 import os
+import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -39,12 +40,15 @@ from typing import Any
 
 from .snapshot import (
     SCHEMA_VERSION,
+    WINDOW_TICKS,
     STATUS_DISABLED,
     STATUS_ERROR,
     STATUS_OK,
     STATUS_STALE,
     STATUS_WARMING_UP,
     observation,
+    tick_quality,
+    window_quality,
 )
 
 # --------------------------------------------------------------------------
@@ -52,6 +56,12 @@ from .snapshot import (
 # --------------------------------------------------------------------------
 MASTER_PERIOD_S = 1.0
 MASTER_PERIOD_NS = 1_000_000_000
+
+# SGP30 initialisation phase. Sensirion: after a successful iaq_init the first
+# 15 s are the initialisation phase, during which measure_iaq returns the fixed
+# 400 ppm CO2eq / 0 ppb TVOC. The phase is defined by ELAPSED TIME since that
+# iaq_init, never by the returned values.
+SGP30_WARMUP_S = 15.0
 
 SGP30_INTERVAL_WARN_LOW_MS = 900.0
 SGP30_INTERVAL_WARN_HIGH_MS = 1100.0
@@ -511,6 +521,94 @@ class ThermalWorker(threading.Thread):
 
 
 # --------------------------------------------------------------------------
+# Chunk writer: keeps NPZ compression off the acquisition critical path
+# --------------------------------------------------------------------------
+class ChunkWriter(threading.Thread):
+    """Single background writer behind a BOUNDED queue.
+
+    np.savez_compressed of a 30-frame thermal chunk costs ~190 ms. Measured on
+    this board over a 1800-tick soak, doing it inline made every 30th tick
+    955.8 ms against a 1000 ms budget (18 ms headroom) while ordinary ticks sat
+    at 779.6 ms. Moving it here removes that periodic spike.
+
+    The queue is bounded on purpose. If the writer cannot keep up, the backlog
+    is NOT silently discarded: the submit is recorded as a storage degradation
+    with the affected chunk name, and `dropped` is counted so the run report
+    shows it. Shutdown drains the queue, flushes and joins the thread.
+    """
+
+    QUEUE_MAXSIZE = 8            # 8 thermal chunks = 240 s of buffer
+    SUBMIT_TIMEOUT_S = 0.05      # absorb transient slowness, never a long stall
+
+    def __init__(self) -> None:
+        super().__init__(name="chunkwriter", daemon=False)
+        self.q: queue.Queue = queue.Queue(maxsize=self.QUEUE_MAXSIZE)
+        self.written = 0
+        self.errors = 0
+        self.dropped = 0
+        self.degraded_events: list[dict] = []
+        self.max_queue_depth = 0
+        self.last_error: str | None = None
+        self._sentinel = object()
+
+    def submit(self, path, arrays: dict) -> bool:
+        """Queue one chunk. Returns False and records degradation if refused."""
+        try:
+            self.q.put((path, arrays), timeout=self.SUBMIT_TIMEOUT_S)
+        except queue.Full:
+            self.dropped += 1
+            self.degraded_events.append({
+                "chunk": str(getattr(path, "name", path)),
+                "reason": "writer_queue_full",
+                "queue_maxsize": self.QUEUE_MAXSIZE,
+            })
+            return False
+        depth = self.q.qsize()
+        if depth > self.max_queue_depth:
+            self.max_queue_depth = depth
+        return True
+
+    def run(self) -> None:
+        import numpy as np
+        while True:
+            item = self.q.get()
+            try:
+                if item is self._sentinel:
+                    return
+                path, arrays = item
+                try:
+                    np.savez_compressed(path, **arrays)
+                    self.written += 1
+                except Exception as exc:
+                    self.errors += 1
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                self.q.task_done()
+
+    def shutdown(self, timeout_s: float = 60.0) -> None:
+        """Drain, flush and join. Anything still queued is reported, not hidden."""
+        self.q.put(self._sentinel)
+        self.join(timeout=timeout_s)
+        if self.is_alive() or not self.q.empty():
+            remaining = self.q.qsize()
+            self.degraded_events.append({
+                "reason": "writer_did_not_drain_before_shutdown",
+                "remaining": remaining,
+            })
+
+    def report(self) -> dict:
+        return {
+            "chunks_written": self.written,
+            "queue_maxsize": self.QUEUE_MAXSIZE,
+            "queue_max_depth": self.max_queue_depth,
+            "dropped_chunks": self.dropped,
+            "write_errors": self.errors,
+            "last_error": self.last_error,
+            "degraded_events": self.degraded_events,
+        }
+
+
+# --------------------------------------------------------------------------
 # Bus 7 readers driven from the master tick thread
 # --------------------------------------------------------------------------
 class Sgp30Reader:
@@ -518,11 +616,21 @@ class Sgp30Reader:
 
     The device is initialised once (iaq_init) and the instance is kept for the
     whole run; re-initialising per tick would restart the IAQ algorithm.
-    The first ~15 s report the fixed eCO2=400 / TVOC=0 initialisation values.
-    That is documented SGP30 behaviour, reported as status=warming_up.
+
+    Warm-up is an INITIALISATION SESSION, not a property of the values. Each
+    successful iaq_init opens a session with its own monotonic start time; for
+    the first SGP30_WARMUP_S of that session the status is warming_up, after
+    which it is ok. The returned values never affect the status: 400/0 is the
+    documented output during initialisation, but a live reading that happens to
+    land on 400/0 later must not push the status back to warming_up.
+
+    warming_up -> ok therefore happens at most once per session. A genuine
+    reinitialisation after a communication failure opens a NEW session and
+    legitimately restarts the 15 s phase; the session id and init timestamp are
+    recorded so that is distinguishable from oscillation.
     """
 
-    RETRY_EVERY_TICKS = 10
+    RETRY_BACKOFF_TICKS = (10, 20, 40, 80, 160, 300)
 
     def __init__(self, bus: int = 7, address: int = SGP30_ADDRESS) -> None:
         self.bus = bus
@@ -533,6 +641,27 @@ class Sgp30Reader:
         self.intervals_ms: list[float] = []
         self.measure_count = 0
         self.serial: str | None = None
+        self._retry_step = 0
+        self._ticks_since_init = 0
+        # initialisation session
+        self._session_id = 0
+        self._session_init_ns: int | None = None
+        self._session_init_sequence: int | None = None
+        self.init_count = 0
+        self.session_log: list[dict] = []
+
+    def _schedule_retry(self, sequence: int) -> None:
+        """Bounded exponential backoff.
+
+        Re-initialising through Blinka issues an I2CDevice probe whose
+        zero-length write is not supported by the Tegra adapter (Errno 95).
+        Hammering an absent or marginal device with that every 10 ticks adds
+        useless traffic to a bus shared with the ADS1115, so the interval
+        backs off and is capped.
+        """
+        step = min(self._retry_step, len(self.RETRY_BACKOFF_TICKS) - 1)
+        self.state._retry_at_seq = sequence + self.RETRY_BACKOFF_TICKS[step]
+        self._retry_step = min(self._retry_step + 1, len(self.RETRY_BACKOFF_TICKS) - 1)
 
     def _init(self) -> None:
         from adafruit_extended_bus import ExtendedI2C
@@ -541,7 +670,15 @@ class Sgp30Reader:
         sensor = adafruit_sgp30.Adafruit_SGP30(i2c, address=self.address)
         self.serial = "".join("%04X" % w for w in sensor.serial)
         sensor.iaq_init()
+        # A new initialisation session starts here, not at first read.
         self._sensor = sensor
+        self._retry_step = 0
+        self._ticks_since_init = 0
+        self._last_measure_ns = None
+        self._session_id += 1
+        self.init_count += 1
+        self._session_init_ns = time.monotonic_ns()
+        self._session_init_sequence = None   # filled by the caller's sequence below
 
     def read(self, sequence: int) -> dict:
         if self._sensor is None:
@@ -550,15 +687,23 @@ class Sgp30Reader:
                                    consecutive_errors=self.state.consecutive_errors)
             try:
                 self._init()
+                self._session_init_sequence = sequence
+                self.session_log.append({
+                    "session_id": self._session_id,
+                    "init_sequence": sequence,
+                    "init_monotonic_ns": self._session_init_ns,
+                    "serial": self.serial,
+                })
             except Exception as exc:
                 self.state.fail(exc)
-                self.state._retry_at_seq = sequence + self.RETRY_EVERY_TICKS
+                self._schedule_retry(sequence)
                 return observation(STATUS_ERROR, error=self.state.last_error,
                                    consecutive_errors=self.state.consecutive_errors)
 
         try:
             now = time.monotonic_ns()
             eco2, tvoc = self._sensor.iaq_measure()
+            self._ticks_since_init += 1
             interval_ms = None
             if self._last_measure_ns is not None:
                 interval_ms = (now - self._last_measure_ns) / 1e6
@@ -567,8 +712,18 @@ class Sgp30Reader:
             self.measure_count += 1
             self.state.ok()
 
-            warmup = (eco2 == 400 and tvoc == 0)
-            extra: dict = {"warmup": warmup, "measure_count": self.measure_count}
+            # Status comes from the elapsed time of the initialisation session,
+            # never from the measured values.
+            session_elapsed_s = (now - self._session_init_ns) / 1e9
+            warmup = session_elapsed_s < SGP30_WARMUP_S
+            extra: dict = {
+                "warmup": warmup,
+                "measure_count": self.measure_count,
+                "ticks_since_init": self._ticks_since_init,
+                "session_id": self._session_id,
+                "session_init_sequence": self._session_init_sequence,
+                "session_elapsed_s": round(session_elapsed_s, 3),
+            }
             if interval_ms is not None:
                 extra["interval_ms"] = round(interval_ms, 3)
                 if interval_ms > SGP30_INTERVAL_FAIL_MS:
@@ -583,7 +738,7 @@ class Sgp30Reader:
         except Exception as exc:
             self.state.fail(exc)
             self._sensor = None
-            self.state._retry_at_seq = sequence + self.RETRY_EVERY_TICKS
+            self._schedule_retry(sequence)
             return observation(STATUS_ERROR, error=self.state.last_error,
                                consecutive_errors=self.state.consecutive_errors)
 
@@ -595,19 +750,26 @@ class Bme680Reader:
     above ambient. The model's temperature channel is the NTC.
     """
 
-    RETRY_EVERY_TICKS = 10
+    RETRY_BACKOFF_TICKS = (10, 20, 40, 80, 160, 300)
 
     def __init__(self, bus: int = 7, address: int = BME680_ADDRESS) -> None:
         self.bus = bus
         self.address = address
         self.state = SensorState("bme680")
         self._sensor = None
+        self._retry_step = 0
+
+    def _schedule_retry(self, sequence: int) -> None:
+        step = min(self._retry_step, len(self.RETRY_BACKOFF_TICKS) - 1)
+        self.state._retry_at_seq = sequence + self.RETRY_BACKOFF_TICKS[step]
+        self._retry_step = min(self._retry_step + 1, len(self.RETRY_BACKOFF_TICKS) - 1)
 
     def _init(self) -> None:
         from adafruit_extended_bus import ExtendedI2C
         import adafruit_bme680
         i2c = ExtendedI2C(self.bus)
         self._sensor = adafruit_bme680.Adafruit_BME680_I2C(i2c, address=self.address)
+        self._retry_step = 0
 
     def read(self, sequence: int) -> dict:
         if self._sensor is None:
@@ -618,7 +780,7 @@ class Bme680Reader:
                 self._init()
             except Exception as exc:
                 self.state.fail(exc)
-                self.state._retry_at_seq = sequence + self.RETRY_EVERY_TICKS
+                self._schedule_retry(sequence)
                 return observation(STATUS_ERROR, error=self.state.last_error,
                                    consecutive_errors=self.state.consecutive_errors)
         try:
@@ -633,7 +795,7 @@ class Bme680Reader:
         except Exception as exc:
             self.state.fail(exc)
             self._sensor = None
-            self.state._retry_at_seq = sequence + self.RETRY_EVERY_TICKS
+            self._schedule_retry(sequence)
             return observation(STATUS_ERROR, error=self.state.last_error,
                                consecutive_errors=self.state.consecutive_errors)
 
@@ -683,6 +845,7 @@ class SensorCollector:
         self.thermal_device = thermal_device
 
         self.ads: Ads1115Owner | None = None
+        self.writer = ChunkWriter()
         self.sgp30 = Sgp30Reader()
         self.bme680 = Bme680Reader()
         self.bus1 = Bus1Worker()
@@ -709,6 +872,10 @@ class SensorCollector:
         self.snapshot_count = 0
         self.expected_ticks = 0
         self.stop_requested = False
+        self.invalid_tick_count = 0
+        self.invalid_reason_counts: dict[str, int] = {}
+        self._window_buffer: list[dict] = []
+        self.window_results: list[dict] = []
 
         self._last_sps30_seq = 0
         self._last_scd30_seq = 0
@@ -725,6 +892,7 @@ class SensorCollector:
         self.ads = Ads1115Owner(ct_burst_s=self.ct_burst_s)
         self.ads.probe()
         self.ads.enter_ct_mode()
+        self.writer.start()
         self.bus1.start()
         self.thermal.start()
         self._await_workers()
@@ -750,6 +918,9 @@ class SensorCollector:
     def shutdown(self) -> None:
         self.bus1.shutdown()
         self.thermal.shutdown()
+        # Chunk writer last: flush_chunks() has already queued the partial
+        # chunks, and shutdown() drains, flushes and joins.
+        self.writer.shutdown()
         if self.ads is not None:
             self.ads.close()
 
@@ -866,16 +1037,16 @@ class SensorCollector:
 
     # -- chunk writers -----------------------------------------------------
     def _flush_thermal(self) -> None:
+        """Hand the chunk to the background writer. No compression here."""
         if not self._thermal_buffer:
             return
         import numpy as np
         path = self.run_dir / f"thermal_{self._thermal_chunk_index:06d}.npz"
-        np.savez_compressed(
-            path,
-            frames=np.stack([f for _, f in self._thermal_buffer]),
-            sequences=np.asarray([s for s, _ in self._thermal_buffer], dtype=np.int64),
-        )
-        self._thermal_buffer.clear()
+        self.writer.submit(path, {
+            "frames": np.stack([f for _, f in self._thermal_buffer]),
+            "sequences": np.asarray([s for s, _ in self._thermal_buffer], dtype=np.int64),
+        })
+        self._thermal_buffer = []
         self._thermal_chunk_index += 1
 
     def _flush_ct_raw(self) -> None:
@@ -883,14 +1054,13 @@ class SensorCollector:
             return
         import numpy as np
         path = self.run_dir / f"ct_raw_{self._ct_raw_chunk_index:06d}.npz"
-        np.savez_compressed(
-            path,
-            sequences=np.asarray([s for s, _ in self._ct_raw_buffer], dtype=np.int64),
-            codes=np.concatenate([c for _, c in self._ct_raw_buffer]),
-            lengths=np.asarray([len(c) for _, c in self._ct_raw_buffer], dtype=np.int64),
-            fsr_volts=np.float64(CT_PGA),
-        )
-        self._ct_raw_buffer.clear()
+        self.writer.submit(path, {
+            "sequences": np.asarray([s for s, _ in self._ct_raw_buffer], dtype=np.int64),
+            "codes": np.concatenate([c for _, c in self._ct_raw_buffer]),
+            "lengths": np.asarray([len(c) for _, c in self._ct_raw_buffer], dtype=np.int64),
+            "fsr_volts": np.float64(CT_PGA),
+        })
+        self._ct_raw_buffer = []
         self._ct_raw_chunk_index += 1
 
     def flush_chunks(self) -> None:
@@ -955,6 +1125,27 @@ class SensorCollector:
             work_ms = (time.monotonic_ns() - actual_ns) / 1e6
             self.work_ms.append(work_ms)
 
+            sensors = {
+                "ntc": ntc_obs,
+                "ct1": ct_obs,
+                # Only one CT front-end exists. CT2-4 are reported as
+                # disabled, never zero-filled and never a copy of CT1.
+                "ct2": observation(STATUS_DISABLED, extra={"reason": "no physical CT connected"}),
+                "ct3": observation(STATUS_DISABLED, extra={"reason": "no physical CT connected"}),
+                "ct4": observation(STATUS_DISABLED, extra={"reason": "no physical CT connected"}),
+                "sps30": sps30_obs,
+                "sgp30": sgp30_obs,
+                "scd30": scd30_obs,
+                "bme680": bme680_obs,
+                "flir": flir_obs,
+            }
+            quality = tick_quality(sensors)
+            if not quality["flir_frame_valid"]:
+                self.invalid_tick_count += 1
+                for reason in quality["invalid_reasons"]:
+                    self.invalid_reason_counts[reason] = \
+                        self.invalid_reason_counts.get(reason, 0) + 1
+
             snapshot = {
                 "schema_version": SCHEMA_VERSION,
                 "sequence": n,
@@ -964,21 +1155,17 @@ class SensorCollector:
                 "actual_monotonic_ns": actual_ns,
                 "tick_jitter_ms": round(jitter_ms, 3),
                 "tick_work_ms": round(work_ms, 3),
-                "sensors": {
-                    "ntc": ntc_obs,
-                    "ct1": ct_obs,
-                    # Only one CT front-end exists. CT2-4 are reported as
-                    # disabled, never zero-filled and never a copy of CT1.
-                    "ct2": observation(STATUS_DISABLED, extra={"reason": "no physical CT connected"}),
-                    "ct3": observation(STATUS_DISABLED, extra={"reason": "no physical CT connected"}),
-                    "ct4": observation(STATUS_DISABLED, extra={"reason": "no physical CT connected"}),
-                    "sps30": sps30_obs,
-                    "sgp30": sgp30_obs,
-                    "scd30": scd30_obs,
-                    "bme680": bme680_obs,
-                    "flir": flir_obs,
-                },
+                "quality": quality,
+                "sensors": sensors,
             }
+
+            # Non-overlapping windows, evaluated as they complete. This is a
+            # quality label only - it does not build model input.
+            self._window_buffer.append(snapshot)
+            if len(self._window_buffer) >= WINDOW_TICKS:
+                self.window_results.append(window_quality(self._window_buffer))
+                self._window_buffer = []
+
             self.snapshot_count += 1
             yield snapshot
             n += 1
@@ -1012,6 +1199,10 @@ class SensorCollector:
                 "violations_gt_1500ms": sum(1 for v in sgp_iv if v > SGP30_INTERVAL_FAIL_MS),
                 "ok_count": self.sgp30.state.total_ok,
                 "error_count": self.sgp30.state.total_errors,
+                "consecutive_errors_at_end": self.sgp30.state.consecutive_errors,
+                "initialisation_count": self.sgp30.init_count,
+                "warmup_seconds": SGP30_WARMUP_S,
+                "sessions": self.sgp30.session_log,
             },
             "sps30": {
                 "fresh_snapshot_count": self.sps30_fresh_ticks,
@@ -1047,6 +1238,19 @@ class SensorCollector:
             "ntc": {
                 "ok_count": self.ntc_state.total_ok,
                 "error_count": self.ntc_state.total_errors,
+            },
+            "storage": self.writer.report(),
+            "quality": {
+                "policy": ("window is training-invalid when any tick has "
+                           "flir status != ok or age_ms > 500 ms; raw data is kept, "
+                           "stale frames are never duplicated or interpolated"),
+                "window_ticks": WINDOW_TICKS,
+                "invalid_tick_count": self.invalid_tick_count,
+                "invalid_tick_reasons": self.invalid_reason_counts,
+                "windows_evaluated": len(self.window_results),
+                "windows_valid": sum(1 for w in self.window_results if w["valid"]),
+                "windows_invalid": sum(1 for w in self.window_results if not w["valid"]),
+                "invalid_window_details": [w for w in self.window_results if not w["valid"]],
             },
             "flir": {
                 "ticks_with_frame": self.flir_ticks_with_frame,

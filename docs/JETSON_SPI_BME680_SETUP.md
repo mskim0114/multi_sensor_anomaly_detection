@@ -599,21 +599,27 @@ canonical 배선과 절차는 §9 를 본다. 여기서는 판정에 필요한 �
 **확인 순서**: ① `CS` 가 3.3 V 인가 → ② `MISO/SDO` 가 주소에 맞게 묶였는가 →
 ③ 어댑터를 뽑는 진짜 POR 을 했는가 → ④ 같은 버스 대조군이 응답하는가.
 
-**안전한 스캔** (쓰기 없이 read 만 하므로 다른 장치의 상태를 바꾸지 않는다):
+**전 주소 bare-read 스캔을 쓰지 않는다.** 초기에는 "쓰기가 없으니 안전"하다고 보고
+`0x08~0x77` 전체에 bare read 를 돌렸으나, 이는 **Sensirion 장치(SGP30 0x58, SPS30, SCD30)에는
+프로토콜 위반**이다. 그 장치들은 명령/CRC 프로토콜을 쓰므로 명령 없는 read 는 규격 밖이고,
+내부 상태가 어긋나면 이후 주소 ACK 자체를 거부할 수 있다. bring-up 중 SGP30 이 버스에서
+사라진 사건이 세 번 반복되었고 이 스캔이 원인 후보다.
+
+**대신 알려진 주소만, 각 장치의 정규 명령으로 확인한다.**
+
+| 장치 | 안전한 확인 방법 |
+|---|---|
+| ADS1115 `0x48` | Config 레지스터(`0x01`) 읽기 — 정규 레지스터 read |
+| BME680 `0x77` | chip_id 레지스터(`0xD0`) 읽기 → `0x61` |
+| SGP30 `0x58` | Adafruit 드라이버의 `serial` 프로퍼티 (정규 `get_serial_id` 명령) |
+| SPS30 `0x69` | Sensirion 드라이버의 `read_serial_number()` |
+| SCD30 `0x61` | Sensirion 드라이버의 `read_firmware_version()` |
+
+가장 간단한 확인은 수집기를 5초만 돌려 스냅샷의 `status` 를 보는 것이다. 추가 버스 트래픽이
+전혀 없다.
 
 ```bash
-python3 -c "
-import os
-from fcntl import ioctl
-found=[]
-for a in range(0x08,0x78):
-    fd=os.open('/dev/i2c-7',os.O_RDWR)
-    try:
-        ioctl(fd,0x0703,a); os.read(fd,1); found.append(a)
-    except OSError: pass
-    finally: os.close(fd)
-print(' '.join('0x%02X'%a for a in found))
-"
+./jetson_deploy/run_python.sh jetson_deploy/scripts/11_collect_sensors.py --duration 5
 ```
 
 **`i2cdetect` 는 이 플랫폼에서 판정 근거가 되지 않는다.** Tegra I2C 어댑터가 SMBus Quick

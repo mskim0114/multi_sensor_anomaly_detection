@@ -23,7 +23,32 @@ STATUS_STALE = "stale"
 STATUS_ERROR = "error"
 STATUS_DISABLED = "disabled"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# --------------------------------------------------------------------------
+# Data-quality policy (fixed 2026-09-03, before dataset collection starts)
+#
+# The model consumes 30 consecutive ticks as one window. A window is marked
+# quality-invalid and EXCLUDED FROM TRAINING when any of its ticks has an
+# unusable thermal frame:
+#
+#     flir status != "ok"          (error, or stale)
+#     flir age_ms > 500            (no fresh frame for that tick)
+#
+# The dominant cause is the Lepton's periodic FFC (flat-field correction)
+# shutter, which stalls the stream for a few hundred ms to ~2 s.
+#
+# Raw data is NEVER deleted for this reason, and a stale frame is NEVER
+# duplicated or interpolated to look like a fresh one. The window is simply
+# labelled unusable for training; the raw record stays for analysis.
+#
+# Model-input channels (NTC / CT1 / SPS30) in a non-ok state are recorded in
+# `quality.model_channel_issues` for visibility but do NOT invalidate a window
+# under the current policy. That is a deliberate, separately revisable choice.
+# --------------------------------------------------------------------------
+WINDOW_TICKS = 30
+FLIR_MAX_AGE_MS = 500.0
+MODEL_INPUT_SENSORS = ("ntc", "ct1", "sps30", "flir")
 
 # Flat per-tick scalar view. The full nested snapshot lives in snapshots.jsonl;
 # this CSV is the convenient form for quick inspection and plotting.
@@ -77,6 +102,9 @@ SCALAR_FIELDS = [
     "flir_mean_c",
     "thermal_chunk",
     "thermal_index",
+    # data-quality policy
+    "flir_frame_valid",
+    "quality_invalid_reasons",
 ]
 
 
@@ -167,4 +195,58 @@ def scalar_row(snapshot: dict) -> dict:
         "flir_mean_c": g(snapshot, "flir", "mean_c"),
         "thermal_chunk": g(snapshot, "flir", "thermal_chunk"),
         "thermal_index": g(snapshot, "flir", "thermal_index"),
+
+        "flir_frame_valid": (snapshot.get("quality") or {}).get("flir_frame_valid"),
+        "quality_invalid_reasons": "|".join(
+            (snapshot.get("quality") or {}).get("invalid_reasons") or []),
+    }
+
+
+def tick_quality(sensors: dict) -> dict:
+    """Per-tick quality block. See the data-quality policy note above."""
+    flir = sensors.get("flir") or {}
+    status = flir.get("status")
+    age_ms = flir.get("age_ms")
+
+    reasons: list[str] = []
+    if status != STATUS_OK:
+        reasons.append(f"flir_{status}")
+    elif age_ms is None:
+        reasons.append("flir_no_age")
+    elif age_ms > FLIR_MAX_AGE_MS:
+        reasons.append("flir_age_gt_500ms")
+
+    issues = {
+        name: sensors[name]["status"]
+        for name in MODEL_INPUT_SENSORS
+        if name in sensors and sensors[name].get("status") != STATUS_OK
+    }
+    return {
+        "flir_frame_valid": not reasons,
+        "invalid_reasons": reasons,
+        "model_channel_issues": issues,
+    }
+
+
+def window_quality(snapshots: list[dict]) -> dict:
+    """Judge one model window (WINDOW_TICKS consecutive snapshots).
+
+    A window is usable for training only when every tick in it has a valid
+    thermal frame. Nothing is repaired here: an invalid window is reported as
+    invalid, never patched by duplicating or interpolating frames.
+    """
+    invalid = [s for s in snapshots
+               if not (s.get("quality") or {}).get("flir_frame_valid", False)]
+    reasons: dict[str, int] = {}
+    for snap in invalid:
+        for reason in (snap.get("quality") or {}).get("invalid_reasons") or []:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    complete = len(snapshots) == WINDOW_TICKS
+    return {
+        "valid": complete and not invalid,
+        "tick_count": len(snapshots),
+        "complete": complete,
+        "invalid_tick_count": len(invalid),
+        "invalid_sequences": [s["sequence"] for s in invalid],
+        "reasons": reasons,
     }

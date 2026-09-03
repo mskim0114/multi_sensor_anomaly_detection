@@ -36,7 +36,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sensors.collector import SensorCollector  # noqa: E402
-from sensors.snapshot import SCALAR_FIELDS, SCHEMA_VERSION, scalar_row  # noqa: E402
+from sensors.snapshot import (  # noqa: E402
+    FLIR_MAX_AGE_MS, SCALAR_FIELDS, SCHEMA_VERSION, WINDOW_TICKS, scalar_row,
+)
 
 DEFAULT_OUT_DIR = ROOT / "results" / "sensor_collection"
 
@@ -79,6 +81,16 @@ def build_metadata(args, run_id: str) -> dict:
         },
         "model_input_channels": ["NTC", "PM1.0", "PM2.5", "PM10",
                                  "CT1", "CT2", "CT3", "CT4"],
+        "quality_policy": {
+            "window_ticks": WINDOW_TICKS,
+            "flir_max_age_ms": FLIR_MAX_AGE_MS,
+            "rule": ("a 30-tick window is training-invalid when any tick has "
+                     "flir status != ok or flir age_ms > 500 ms"),
+            "raw_data": "kept - never deleted because a window is invalid",
+            "repair": "none - stale frames are never duplicated or interpolated",
+            "model_channel_issues": ("recorded for visibility, does not "
+                                     "invalidate a window under this policy"),
+        },
         "note": ("Raw acquisition layer only. SGP30/SCD30/BME680 are context "
                  "sensors and are not part of the model input vector. CT2-4 have "
                  "no physical front-end and are reported as disabled, never "
@@ -145,6 +157,24 @@ def print_report(report: dict) -> None:
     s = report["ntc"]
     print("  NTC (ADS1115 A2)")
     line("ok / error", f'{s["ok_count"]} / {s["error_count"]}')
+
+    s = report["storage"]
+    print("  storage (async chunk writer)")
+    line("chunks written", s["chunks_written"])
+    line("queue max depth / size", f'{s["queue_max_depth"]} / {s["queue_maxsize"]}')
+    line("dropped chunks", s["dropped_chunks"])
+    line("write errors", f'{s["write_errors"]}  {s["last_error"] or ""}')
+    for ev in s["degraded_events"]:
+        line("  DEGRADED", ev)
+
+    q = report["quality"]
+    print("  data quality (training window policy)")
+    line("window ticks", q["window_ticks"])
+    line("invalid ticks", f'{q["invalid_tick_count"]} {q["invalid_tick_reasons"] or ""}')
+    line("windows valid / invalid",
+         f'{q["windows_valid"]} / {q["windows_invalid"]}  (of {q["windows_evaluated"]})')
+    for w in q["invalid_window_details"]:
+        line("  invalid window seqs", f'{w["invalid_sequences"]}  {w["reasons"]}')
 
     s = report["flir"]
     print("  FLIR Lepton")

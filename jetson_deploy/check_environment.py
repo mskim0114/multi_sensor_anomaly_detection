@@ -71,6 +71,26 @@ def header(title: str) -> None:
     print("=" * 74)
 
 
+def module_version(name: str, mod) -> str:
+    """Prefer installed distribution metadata over the module's __version__.
+
+    Some packages carry a placeholder attribute - adafruit_extended_bus reports
+    __version__ = "0.0.0-auto.0" while pip has it as 1.0.2 - so the dist
+    metadata is the accurate answer when it is available.
+    """
+    try:
+        import importlib.metadata as md
+        top = name.split(".")[0]
+        for dist in md.packages_distributions().get(top, []):
+            try:
+                return md.version(dist)
+            except md.PackageNotFoundError:
+                continue
+    except Exception:
+        pass
+    return str(getattr(mod, "__version__", "unknown"))
+
+
 def origin_label(path: str) -> str:
     real = os.path.realpath(path or "")
     if not real:
@@ -152,7 +172,7 @@ def check_modules() -> None:
 
         path = getattr(mod, "__file__", "") or ""
         label = origin_label(path)
-        version = str(getattr(mod, "__version__", "unknown"))
+        version = module_version(name, mod)
         print(f"  {name:28s} {label:13s} {version:12s} {note}")
         if label == "USER-SITE":
             failures.append(f"{name} is loaded from $HOME/.local: {path}")

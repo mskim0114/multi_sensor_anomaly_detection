@@ -1149,3 +1149,25 @@ NTC 이며 BME680 은 수집/컨텍스트 센서로만 쓴다** — 모델 입�
 - `gpioinfo` 의 input/output 표시 — SPI pad direction 근거로 사용 불가
 - `/proc/cmdline` — 세 boot entry 가 동일하므로 부팅 entry 판별에 사용 불가.
   적용된 DT (`exp-header-pinmux`) 를 본다
+
+---
+
+## 18. KNOWN ISSUE — `pip check` 의 pynacl / cffi
+
+```
+$ PYTHONNOUSERSITE=1 ./jetson_deploy/run_python.sh -m pip check
+pynacl 1.5.0 requires cffi, which is not installed.        (exit 1)
+```
+
+**이 프로젝트가 만든 문제가 아니며 조치하지 않는다.**
+
+- `pynacl` 은 `/usr/lib/python3/dist-packages` 에 있는 **APT 패키지**다. venv 를
+  `--system-site-packages` 로 만들었기 때문에 `pip check` 의 시야에 들어온다.
+- 이 저장소의 어떤 requirement 도 `pynacl` 이나 `cffi` 를 요구하지 않는다.
+  (`adafruit-circuitpython-bme680` 은 `Adafruit-Blinka`, `adafruit-circuitpython-busdevice` 만 요구)
+- venv 에 `cffi` 를 설치해 APT 패키지의 의존성을 대신 채우지 않는다. JetPack 이 관리하는
+  system 영역의 의존성을 PyPI 패키지로 덮는 것은 `AGENTS.md` §2 위반이며, 실제로 고장난
+  것도 없다.
+
+따라서 `pip check` 의 exit code 1 은 **이 한 줄이 유일한 원인인 한 정상**으로 취급한다.
+다른 줄이 추가로 나타나면 그때는 조사한다.

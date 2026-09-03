@@ -1004,9 +1004,10 @@ mode 3 재시도, 배선 변경, retry loop 모두 하지 않았다.
 
 ### 원인 후보 갱신 — pinmux 가설 배제
 
-> **정정 (2026-09-02).** 이 시점의 후보 목록은 §17 에서 모두 해소되었다.
-> 확정 원인은 **SPI1 프레임 시작 시 MOSI 선두비트 소실**이며 센서와 배선은 무죄다.
-> 아래는 당시의 후보 기록이다.
+> **정정 (2026-09-03).** 이 시점의 후보 목록은 §17 에서 해소되었다. SPI1·SPI3 컨트롤러는
+> 모두 정상으로 확인되었고, BME680 모듈 손상이 현재 가장 유력한 원인이다.
+> 중간에 "SPI1 선두비트 소실 결함" 으로 판정한 적이 있으나 **점퍼 접촉 불량 오진**이었다
+> (`JETSON_SPI_BME680_SETUP.md` §10-6). 아래는 당시의 후보 기록이다.
 
 ```
 BME680 = FAIL (spi1 ENABLED 상태에서도 무응답)
@@ -1093,43 +1094,41 @@ CS0 / CS1              : /dev/spidev0.0  /  /dev/spidev0.1
 |---|---|
 | 공식 Jetson-IO `spi1` 설정 | **PASS** — 적용 DT 5핀 `func=spi1`, `tristate=0` |
 | `/dev/spidev0.0` | **PASS** |
-| Pin19↔Pin21 물리 loopback, **첫 바이트 MSB=0 패턴** | **PASS** — TX == RX, 500 kHz·100 kHz 각 3/3 |
-| Pin19↔Pin21 물리 loopback, **첫 바이트 MSB=1 패턴** | **FAIL** — 선두 최대 2비트 소실 (아래) |
+| **Pin19↔Pin21 물리 loopback (SPI1)** | **PASS** — 모든 선두비트 패턴, 100 kHz~5 MHz, 10/10 |
+| **Pin37↔Pin22 물리 loopback (SPI3)** | **PASS** — 동일 조건 10/10 |
 | SCK / MOSI / CS 실제 구동, CS assert | **PASS** — 전송 ON/OFF DC 전압차로 확인 |
 | 실측 SPI 클럭 | 요청 100 kHz → **실제 약 3.12 MHz** (BME680 상한 10 MHz 이내) |
-| **BME680 / BMP388 chip ID** | **FAIL — 원인은 아래 SPI1 결함** |
+| **BME680 / BMP388 chip ID** | **FAIL** — 모듈 손상 추정 (아래) |
 
-### 확정된 원인 — SPI1 선두비트 소실
+### SPI 컨트롤러 상태 (2026-09-03 최종)
 
 ```
-spi@3210000 (/dev/spidev0.0) 는 프레임 시작 시 MOSI 선두 최대 2비트를 전송하지 않는다.
-  TX D0 00  ->  RX 10 00        (BME680 chip ID read 명령이 reg 0x10 write 로 나감)
-  TX 80 00  ->  RX 00 00        (BMP388 chip ID read 명령이 reg 0x00 write 로 나감)
-  TX FF FF FF FF  ->  RX 3F FF FF FF
-  TX 7F FF  ->  RX 7F FF        (선두가 0 이면 정상)
+SPI1  spi@3210000  /dev/spidev0.0   정상
+SPI3  spi@3230000  /dev/spidev1.0   정상
 ```
 
-SPI read 명령의 첫 바이트 bit7 은 **R/W 비트**다. 그것이 0 으로 떨어지면 센서는 read 를
-write 로 해석하고 SDO 를 구동하지 않는다. **이 결함이 있으면 어떤 SPI 센서도 응답하지 않는다.**
-
-배선 길이(짧은 헤더 점퍼도 동일)·요청 속도(50 kHz~10 MHz)·전송 길이(2~64 B, PIO/DMA 모두)·
-SPI mode·센서 종류(BME680 ×2, BMP388 ×1) 모두 무관하게 재현된다. 재현율 4/5 로 경계선
-타이밍이며, 드라이버가 참조하는 `nvidia,tx-clk-tap-delay` / `nvidia,rx-clk-tap-delay` 는
-현재 DT 에 **둘 다 미설정**이다.
+**중간에 "SPI1 선두비트 소실 결함" 으로 판정했던 것은 오진이었다.** 원인은 loopback 점퍼의
+접촉 불량이었고, 점퍼를 다시 꽂자 `TX D0 00 -> RX D0 00` 으로 10/10 정상이 되었다.
+증상과 오진 과정, 재발 방지 절차는
+[`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md) §10-6 에 실패 기록으로 남겼다.
 
 ### 센서 상태
 
 ```
-BME680 / BMP388   = 무죄 (센서 3개, 각 정규 프로토콜로 동일 실패)
-배선              = 무죄 (모듈 자리 SDI-SDO 점퍼로 배선 왕복 loopback PASS)
-SPI1 컨트롤러     = 선두비트 소실 결함
+BME680 (모듈 3개)   SPI · I2C 양쪽 모두 무응답 — 사망 추정, 신규 구매 진행
+BMP388              SPI 무응답
+ADS1115 0x48        정상 (i2c-7)
+SCD30   0x61        정상 (i2c-1)
+SPS30   0x69        정상 (i2c-1)
+FLIR Lepton         정상 — PureThermal 보드, USB(UVC). SPI 와 무관
 ```
 
-제거된 가설 전체, 결함의 상세 특성, 대응 선택지(SPI3 이설 / DT tap-delay / L4T 업데이트) 는
-[`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md) §10-3, §10-6 에 있다.
+BME680 모듈들은 초기에 **역방향 삽입 이력**이 있다. 대조군(ADS1115)을 둔 I2C 생존 확인에서도
+어떤 주소에도 나타나지 않았다. 절차는 `JETSON_SPI_BME680_SETUP.md` §10-7.
 
-**loopback 검증 시 반드시 첫 바이트 MSB=1 패턴을 포함해야 한다.** `"HelloWorld..."`
-(첫 바이트 `0x48`) 만으로는 이 결함이 드러나지 않는다.
+**loopback 검증 시 반드시 첫 바이트 MSB=1 패턴(`FF FF FF FF`, `D0 00`)을 포함해야 한다.**
+`"HelloWorld..."`(첫 바이트 `0x48`)만으로는 선두비트 이상이 드러나지 않는다. 그리고 이상이
+보이면 **컨트롤러를 의심하기 전에 점퍼를 다시 꽂고 재현부터 확인한다.**
 
 ### 이 플랫폼에서 통하지 않는 진단 방법 (기록)
 

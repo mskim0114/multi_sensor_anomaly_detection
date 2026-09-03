@@ -1207,4 +1207,4 @@ physical-local 요인의 가능성을 별도 hardware task 로 관리한다. 어
   interval mean 999.975 ms / `>1.5 s` 위반 0건으로 유지했다
 
 **공식 dataset 수집을 이 상태에서 조용히 시작해서는 안 된다.** preflight inventory 정책은
-[`JETSON_DATASET_PROTOCOL.md`](JETSON_DATASET_PROTOCOL.md) §11 을 본다.
+[`JETSON_DATASET_PROTOCOL.md`](JETSON_DATASET_PROTOCOL.md) §10 을 본다.

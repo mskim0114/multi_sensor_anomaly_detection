@@ -71,6 +71,22 @@ SCD30_STALE_AGE_MS = 4500.0
 FLIR_AGE_WARN_MS = 500.0
 
 # --------------------------------------------------------------------------
+# Sensor profile for the 2026 official dataset.
+#
+# A profile is the INTENDED sensor configuration of a run. It is not the same
+# thing as sensor_manifest, which records the physical identity actually read
+# from the devices present.
+#
+# SGP30 is disabled in v1: intermittent complete I2C disappearance was observed
+# repeatedly and the cause is unresolved (JETSON_ENVIRONMENT.md 19). It is not
+# part of the 2026 model input and is not required by the 2026 anomaly
+# scenarios, so the dataset does not wait on it. The implementation is kept.
+# --------------------------------------------------------------------------
+SENSOR_PROFILE_V1 = "jetson_factory_v1_2026"
+PROFILE_V1_REQUIRED = ("ads1115", "sps30", "scd30", "bme680", "flir")
+PROFILE_V1_DISABLED = ({"sensor": "sgp30", "reason": "hardware_stability_unresolved"},)
+
+# --------------------------------------------------------------------------
 # Bus / device map (matches AGENTS.md section 4)
 # --------------------------------------------------------------------------
 BUS7 = "/dev/i2c-7"
@@ -691,9 +707,11 @@ class Sgp30Reader:
 
     RETRY_BACKOFF_TICKS = (10, 20, 40, 80, 160, 300)
 
-    def __init__(self, bus: int = 7, address: int = SGP30_ADDRESS) -> None:
+    def __init__(self, bus: int = 7, address: int = SGP30_ADDRESS,
+                 enabled: bool = True) -> None:
         self.bus = bus
         self.address = address
+        self.enabled = enabled
         self.state = SensorState("sgp30")
         self._sensor = None
         self._last_measure_ns: int | None = None
@@ -750,7 +768,7 @@ class Sgp30Reader:
         Failure is not fatal: the reader falls back to its normal backoff and
         the manifest simply carries no serial for this sensor.
         """
-        if self._sensor is not None:
+        if not self.enabled or self._sensor is not None:
             return
         try:
             self._init()
@@ -767,6 +785,15 @@ class Sgp30Reader:
             self._schedule_retry(0)
 
     def read(self, sequence: int) -> dict:
+        if not self.enabled:
+            # Intentional disable is not a hardware error. No I2C access to
+            # 0x58, no iaq_init, no reconnect retry, and the error counters are
+            # left untouched so a disabled sensor is never confused with a
+            # failing one.
+            return observation(STATUS_DISABLED, extra={
+                "reason": "disabled_by_profile",
+                "detail": "hardware_stability_unresolved",
+            })
         if self._sensor is None:
             if sequence < self.state._retry_at_seq:
                 return observation(STATUS_ERROR, error=self.state.last_error,
@@ -949,7 +976,8 @@ class SensorCollector:
 
     def __init__(self, run_dir, duration_s: float, *, save_ct_raw: bool = False,
                  save_thermal: bool = True, ct_burst_s: float = 0.5,
-                 thermal_device: str = "/dev/video0") -> None:
+                 thermal_device: str = "/dev/video0",
+                 enable_sgp30: bool = True) -> None:
         self.run_dir = run_dir
         self.duration_s = duration_s
         self.save_ct_raw = save_ct_raw
@@ -959,7 +987,7 @@ class SensorCollector:
 
         self.ads: Ads1115Owner | None = None
         self.writer = ChunkWriter()
-        self.sgp30 = Sgp30Reader()
+        self.sgp30 = Sgp30Reader(enabled=enable_sgp30)
         self.bme680 = Bme680Reader()
         self.bus1 = Bus1Worker()
         self.thermal = ThermalWorker(thermal_device)
@@ -1076,6 +1104,28 @@ class SensorCollector:
             manifest[name].update(self.bus1.identity.get(name, {}))
         manifest["flir"].update(self.thermal.read_identity())
         return manifest
+
+    def sensor_profile(self) -> dict:
+        """Intended sensor configuration of this run.
+
+        Distinct from sensor_manifest(): this says what the run meant to use,
+        the manifest says what physically answered.
+        """
+        enabled = ["ads1115", "sps30", "scd30", "bme680", "flir"]
+        disabled: list[dict] = []
+        if self.sgp30.enabled:
+            enabled.insert(1, "sgp30")
+        else:
+            disabled.append({"sensor": "sgp30",
+                             "reason": "hardware_stability_unresolved"})
+        matches_v1 = not self.sgp30.enabled
+        return {
+            "name": SENSOR_PROFILE_V1 if matches_v1 else "custom",
+            "matches_profile_v1": matches_v1,
+            "profile_v1_required_sensors": list(PROFILE_V1_REQUIRED),
+            "enabled_sensors": enabled,
+            "disabled_sensors": disabled,
+        }
 
     # -- per-tick sensor reads --------------------------------------------
     def _read_ct(self, sequence: int) -> dict:
@@ -1340,6 +1390,7 @@ class SensorCollector:
                 "tick_work_ms_max": _mx(self.work_ms),
             },
             "sgp30": {
+                "enabled": self.sgp30.enabled,
                 "serial": self.sgp30.serial,
                 "measurement_count": self.sgp30.measure_count,
                 "interval_ms_mean": _mean(sgp_iv),

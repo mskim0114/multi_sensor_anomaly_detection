@@ -292,7 +292,7 @@ FLIR          120/120 tick 에 프레임 있음,  age mean 74.9 ms  p95 115.9 ms
 - **SGP30 은 I2C 버스에서 간헐적으로 완전히 사라지는 현상이 반복 관측되었다**
   (`HARDWARE_STABILITY = UNRESOLVED`, `JETSON_ENVIRONMENT.md` §19). 부재 시 collector 는
   degraded mode 로 계속 동작하고 serial 을 만들어내지 않는다. **공식 dataset 수집을 이
-  상태에서 조용히 시작하지 않는다** — `JETSON_DATASET_PROTOCOL.md` §11
+  상태에서 조용히 시작하지 않는다** — `JETSON_DATASET_PROTOCOL.md` §10
 
 관련 문서: [`JETSON_ENVIRONMENT.md`](JETSON_ENVIRONMENT.md),
 [`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md), [`../AGENTS.md`](../AGENTS.md)

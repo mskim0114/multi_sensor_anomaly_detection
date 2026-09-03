@@ -214,35 +214,104 @@ sensor_manifest.<sensor> = { bus, address, serial?, firmware?, chip_id?, ... }
 
 ---
 
-## 11. Preflight inventory (official trial 시작 조건)
+## 10. Sensor profile — `jetson_factory_v1_2026`
 
-**공식 dataset trial 은 collector 가 실행 중 센서 복구를 기다리는 방식으로 시작하지 않는다.**
-trial 시작 전에 preflight inventory 를 수행한다.
+2026 공식 dataset 의 sensor configuration 을 profile 로 고정한다.
 
-official full-sensor trial 에서 기대되는 canonical 센서:
+```
+profile name:  jetson_factory_v1_2026
+```
 
-| 센서 | 확인 대상 |
+| 구분 | 센서 |
 |---|---|
-| ADS1115 / NTC / CT1 | `/dev/i2c-7` `0x48` 응답 |
-| SPS30 | `/dev/i2c-1` `0x69` + serial |
-| SCD30 | `/dev/i2c-1` `0x61` + serial |
-| SGP30 | `/dev/i2c-7` `0x58` + serial |
-| BME680 | `/dev/i2c-7` `0x77` + chip_id / variant_id |
-| FLIR | `/dev/video0` + USB serial |
+| **REQUIRED** | ADS1115 (NTC, CT1) · SPS30 · SCD30 · BME680 · FLIR |
+| **DISABLED** | SGP30 |
 
-각 장치가 **기대 주소에서 기대 identity 로 응답하는지 확인한 뒤** acquisition 을 시작한다.
-unique identity 를 제공하는 장치는 그 identity 를 experiment metadata 에 고정한다.
+**SGP30 이 없다는 이유로 official trial 을 거부하지 않는다.** 반대로 **REQUIRED 센서 중
+하나라도 preflight 에서 실패하면 official trial 시작을 거부한다.**
 
-**SGP30 처럼 run 시작 시 identity 확보가 실패하면 official trial 은 기본적으로 시작을
-거부한다.** 이는 `12_run_trial.py` 의 gate 로 구현할 예정이며, **이번 커밋에는 구현되지
-않았다 — 정책만 기록한다.**
+SGP30 이 disabled 인 이유:
 
-`sensor_manifest` 는 run 시작 시점 inventory 이므로, 실행 중간에 복귀한 센서의 identity 는
-manifest 에 남지 않고 `timing_report.sgp30.sessions[].serial` 에만 남는다(§9). official trial
-에서는 중간 복귀에 의존하지 않는다.
+```
+SUPPORTED_BY_CODE       = true      구현은 유지된다
+HARDWARE_STABILITY      = unresolved
+OFFICIAL_DATASET_ENABLED = false
+```
 
-SGP30 의 현재 하드웨어 상태는 `JETSON_ENVIRONMENT.md` §19 를 본다
-(`HARDWARE_STABILITY = UNRESOLVED`).
+세션 중 intermittent complete I2C disappearance 가 반복 관측되었고 원인이 확정되지
+않았다 (`JETSON_ENVIRONMENT.md` §19). 2026 model input 에 포함되지 않고 2026 anomaly
+scenario 에 필수도 아니므로 dataset 이 이 센서를 기다리지 않는다.
+
+### disabled 의 의미 — intentional disable ≠ hardware error
+
+`--disable-sgp30` 로 실행하면 SGP30 에 대해 다음을 **하지 않는다.**
+
+```
+I2C 0x58 접근        없음
+iaq_init             없음
+reconnect retry      없음
+error count 증가      없음
+```
+
+기록은 `status = "disabled"` 이며 `reason = disabled_by_profile` 이 붙는다.
+의도적 비활성과 하드웨어 오류를 혼동하지 않기 위한 구분이다.
+
+### metadata 기록
+
+```
+sensor_profile     이 trial 이 의도한 sensor configuration
+                     name / matches_profile_v1 / profile_v1_required_sensors
+                     enabled_sensors / disabled_sensors[{sensor, reason}]
+sensor_manifest    실제로 초기화·조회한 physical inventory (§9)
+```
+
+**둘을 혼동하지 않는다.** profile 은 의도, manifest 는 사실이다.
+
+### preflight (v1)
+
+trial 시작 전에 REQUIRED 센서가 기대 주소에서 기대 identity 로 응답하는지 확인한 뒤
+acquisition 을 시작한다.
+
+| 센서 | 확인 대상 | v1 필수 |
+|---|---|---|
+| ADS1115 / NTC / CT1 | `/dev/i2c-7` `0x48` 응답 | **필수** |
+| SPS30 | `/dev/i2c-1` `0x69` + serial | **필수** |
+| SCD30 | `/dev/i2c-1` `0x61` + serial | **필수** |
+| BME680 | `/dev/i2c-7` `0x77` + chip_id / variant_id | **필수** |
+| FLIR | `/dev/video0` + USB serial | **필수** |
+| SGP30 | — | **NOT REQUIRED / DISABLED** |
+
+gate 는 `12_run_trial.py` 에서 구현할 예정이며 **이 문서 시점에는 구현되지 않았다.**
+
+`sensor_manifest` 는 run 시작 시점 inventory 이므로 실행 중간에 복귀한 센서의 identity 는
+manifest 에 남지 않는다(§9). official trial 은 중간 복귀에 의존하지 않는다.
+
+### profile 은 변경될 수 있다
+
+```
+v1_2026     SGP30 disabled
+future v2   새로운 VOC/NOx 센서가 추가될 수 있다
+```
+
+**아직 특정 replacement 가 검증된 것은 없다.** 후보 검토는 §11 을 본다.
+
+---
+
+## 11. 향후 센서 (별도 hardware task)
+
+SGP30 replacement 는 별도 hardware task 로 남긴다. 후보는 **SGP40 / SGP41 세대**다.
+
+**아직 package 선정도, 주문도, integration 도 하지 않았다. 검증된 사실이 아니다.**
+
+선정 기준으로 기록해 둘 것: 현재 시스템에는 이미
+
+```
+SCD30    real CO2
+BME680   broad gas / context
+```
+
+가 있으므로, 신규 gas 센서는 **기존 신호를 단순 중복하기보다 VOC / NOx 같은 새로운
+information axis** 를 우선 검토한다.
 
 ---
 

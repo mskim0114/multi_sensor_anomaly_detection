@@ -118,7 +118,7 @@ def print_report(report: dict) -> None:
     line("tick work ms mean/max", f'{m["tick_work_ms_mean"]} / {m["tick_work_ms_max"]}')
 
     s = report["sgp30"]
-    print("  SGP30 (1 Hz strict)")
+    print(f'  SGP30 (1 Hz strict){"" if s.get("enabled", True) else "  [DISABLED by profile]"}')
     line("measurements", s["measurement_count"])
     line("interval ms mean/p95/max",
          f'{s["interval_ms_mean"]} / {s["interval_ms_p95"]} / {s["interval_ms_max"]}')
@@ -198,6 +198,10 @@ def main() -> int:
     parser.add_argument("--ct-burst", type=float, default=0.5,
                         help="CT waveform capture seconds per tick")
     parser.add_argument("--thermal-device", default="/dev/video0")
+    parser.add_argument("--disable-sgp30", action="store_true",
+                        help="do not use SGP30 at all: no I2C access to 0x58, no "
+                             "iaq_init, no reconnect retry, status recorded as "
+                             "disabled. This is the jetson_factory_v1_2026 profile.")
     args = parser.parse_args()
 
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -210,6 +214,7 @@ def main() -> int:
     print(f"ct burst:  {args.ct_burst:.3f} s per tick")
     print(f"thermal:   {'off' if args.no_thermal_save else 'saved in 30-frame NPZ chunks'}")
     print(f"ct raw:    {'saved' if args.save_ct_raw else 'off (scalar RMS always saved)'}")
+    print(f"sgp30:     {'DISABLED (no 0x58 access)' if args.disable_sgp30 else 'enabled'}")
     print("NOTE: this process owns the ADS1115. Do not run scripts/08 or 09 concurrently.")
 
     collector = SensorCollector(
@@ -218,6 +223,7 @@ def main() -> int:
         save_thermal=not args.no_thermal_save,
         ct_burst_s=args.ct_burst,
         thermal_device=args.thermal_device,
+        enable_sgp30=not args.disable_sgp30,
     )
 
     interrupted = {"value": False}
@@ -235,9 +241,19 @@ def main() -> int:
     # metadata is written after start() so it can carry the sensor manifest -
     # the physical identity actually read from each device on this run.
     metadata = build_metadata(args, run_id)
+    # sensor_profile = intended configuration of this run.
+    # sensor_manifest = physical identity actually read from the devices.
+    metadata["sensor_profile"] = collector.sensor_profile()
     metadata["sensor_manifest"] = collector.sensor_manifest()
     (run_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    prof = metadata["sensor_profile"]
+    print(f'sensor profile: {prof["name"]}'
+          f'{"" if prof["matches_profile_v1"] else " (does not match v1)"}')
+    print(f'  enabled : {", ".join(prof["enabled_sensors"])}')
+    if prof["disabled_sensors"]:
+        for d in prof["disabled_sensors"]:
+            print(f'  disabled: {d["sensor"]} ({d["reason"]})')
     print("sensor manifest:")
     for name, info in metadata["sensor_manifest"].items():
         ident = ", ".join(f"{k}={v}" for k, v in info.items()

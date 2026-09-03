@@ -176,7 +176,77 @@ label 을 유도하는 것은 annotation 단계의 명시적 작업이다 (§2 �
 
 ---
 
-## 8. 유지되는 원칙
+## 8. 센서 unit 편향 규칙
+
+bring-up 중 SGP30 이 교체되어 serial 이 `000001B9391C` → `000001665DBF` 로 바뀐 사례가
+있었다. **물리 센서 unit 이 scenario 와 상관되면 모델이 고장이 아니라 센서 개체를 학습한다.**
+
+- 공식 anomaly dataset 은 **가능한 한 동일한 physical sensor set** 으로
+  `normal` / `overload` / `thermal_abnormal` / `dust` 를 모두 수집한다
+- 센서를 교체하면 **serial / identity 를 반드시 기록한다.** collector 가 실행마다
+  `metadata.json` 의 `sensor_manifest` 에 자동 기록한다 (§9)
+- **특정 scenario 와 특정 sensor unit 이 1:1 로 대응하지 않게 한다.** 예: `dust` trial 만
+  새 SGP30 으로 수집하는 상황을 만들지 않는다
+- 여러 unit 을 쓸 수밖에 없으면 **scenario 별로 균형 있게 배치**한다
+- train / validation / test split 시 **physical sensor identity 에 의한 leakage** 를
+  고려한다. 같은 unit 의 trial 이 train 과 test 로 갈리면 성능이 낙관적으로 편향될 수 있고,
+  반대로 unit 이 scenario 와 완전히 겹치면 분류기가 unit 을 구분하는 것으로 충분해진다
+
+---
+
+## 9. 센서 identity 기록
+
+collector 가 실행마다 `metadata.json` 의 `sensor_manifest` 에 **실제로 읽은 값만** 남긴다.
+
+```
+sensor_manifest.<sensor> = { bus, address, serial?, firmware?, chip_id?, ... }
+```
+
+**없는 serial 을 만들어내지 않는다.** 장치가 unique serial 을 제공하지 않으면 그 키는
+아예 나타나지 않는다 (ADS1115 가 그런 경우다).
+
+역할 분리:
+
+| 위치 | 의미 |
+|---|---|
+| `metadata.json` 의 `sensor_manifest` | **run 시작 당시의 physical inventory** |
+| `timing_report.json` 의 `sgp30.sessions[]` | **runtime initialization history** (session 별 `iaq_init` 기록) |
+
+---
+
+## 11. Preflight inventory (official trial 시작 조건)
+
+**공식 dataset trial 은 collector 가 실행 중 센서 복구를 기다리는 방식으로 시작하지 않는다.**
+trial 시작 전에 preflight inventory 를 수행한다.
+
+official full-sensor trial 에서 기대되는 canonical 센서:
+
+| 센서 | 확인 대상 |
+|---|---|
+| ADS1115 / NTC / CT1 | `/dev/i2c-7` `0x48` 응답 |
+| SPS30 | `/dev/i2c-1` `0x69` + serial |
+| SCD30 | `/dev/i2c-1` `0x61` + serial |
+| SGP30 | `/dev/i2c-7` `0x58` + serial |
+| BME680 | `/dev/i2c-7` `0x77` + chip_id / variant_id |
+| FLIR | `/dev/video0` + USB serial |
+
+각 장치가 **기대 주소에서 기대 identity 로 응답하는지 확인한 뒤** acquisition 을 시작한다.
+unique identity 를 제공하는 장치는 그 identity 를 experiment metadata 에 고정한다.
+
+**SGP30 처럼 run 시작 시 identity 확보가 실패하면 official trial 은 기본적으로 시작을
+거부한다.** 이는 `12_run_trial.py` 의 gate 로 구현할 예정이며, **이번 커밋에는 구현되지
+않았다 — 정책만 기록한다.**
+
+`sensor_manifest` 는 run 시작 시점 inventory 이므로, 실행 중간에 복귀한 센서의 identity 는
+manifest 에 남지 않고 `timing_report.sgp30.sessions[].serial` 에만 남는다(§9). official trial
+에서는 중간 복귀에 의존하지 않는다.
+
+SGP30 의 현재 하드웨어 상태는 `JETSON_ENVIRONMENT.md` §19 를 본다
+(`HARDWARE_STABILITY = UNRESOLVED`).
+
+---
+
+## 12. 유지되는 원칙
 
 - **CT2 / CT3 / CT4 는 `disabled`** 로 기록한다. 0 으로 채우거나 CT1 을 복제하지 않는다.
   모델이 요구하는 8채널을 맞추는 것은 이후 ModelAdapter 의 책임이다

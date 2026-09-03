@@ -324,6 +324,9 @@ class Bus1Worker(threading.Thread):
         self._sps = None
         self._scd = None
         self.startup_error: str | None = None
+        # Physical identity, read once at setup. Only values actually returned
+        # by the device are stored; nothing is synthesised.
+        self.identity: dict[str, dict] = {}
 
     # -- setup -------------------------------------------------------------
     def _setup(self) -> None:
@@ -348,6 +351,11 @@ class Bus1Worker(threading.Thread):
                 self._sps.stop_measurement()
             except Exception:
                 pass
+            self.identity["sps30"] = self._read_identity(self._sps, (
+                ("serial", "read_serial_number"),
+                ("product_type", "read_product_type"),
+                ("firmware", "read_firmware_version"),
+            ))
             # Started once and left running; not restarted per tick.
             self._sps.start_measurement(OutputFormat.OUTPUT_FORMAT_FLOAT)
         except Exception as exc:
@@ -356,12 +364,33 @@ class Bus1Worker(threading.Thread):
 
         try:
             self._scd = Scd30Device(I2cChannel(conn, slave_address=SCD30_ADDRESS, crc=crc))
+            self.identity["scd30"] = self._read_identity(self._scd, (
+                ("serial", "read_serial_number"),
+                ("firmware", "read_firmware_version"),
+            ))
             self._scd.start_periodic_measurement(0)
         except Exception as exc:
             self.scd30_state.fail(exc)
             self._scd = None
 
     # -- helpers -----------------------------------------------------------
+    @classmethod
+    def _read_identity(cls, device, fields) -> dict:
+        """Read identity fields. A field the device does not answer is omitted.
+
+        No value is ever invented: if the device provides no unique serial, the
+        key simply does not appear.
+        """
+        out: dict = {}
+        for key, method in fields:
+            try:
+                value = cls._plain(getattr(device, method)())
+            except Exception:
+                continue
+            if value is not None:
+                out[key] = str(value)
+        return out
+
     @staticmethod
     def _plain(value):
         if hasattr(value, "value"):
@@ -503,6 +532,36 @@ class ThermalWorker(threading.Thread):
             except Exception as exc:
                 self.state.fail(exc)
                 time.sleep(0.05)
+
+    def read_identity(self) -> dict:
+        """USB descriptors from sysfs. Only fields actually present are kept."""
+        import glob
+        out: dict = {"device": self.device}
+        name = os.path.basename(os.path.realpath(self.device))
+        link = f"/sys/class/video4linux/{name}/device"
+        try:
+            usb_iface = os.path.realpath(link)
+            usb_dev = os.path.dirname(usb_iface)
+        except Exception:
+            return out
+        for key, fname in (("serial", "serial"), ("usb_vendor_id", "idVendor"),
+                           ("usb_product_id", "idProduct"),
+                           ("manufacturer", "manufacturer"), ("product", "product")):
+            path = os.path.join(usb_dev, fname)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    value = f.read().strip()
+                if value:
+                    out[key] = value
+            except Exception:
+                continue
+        try:
+            v4l = sorted(glob.glob(f"/sys/class/video4linux/{name}/name"))
+            if v4l:
+                out["v4l2_name"] = open(v4l[0], encoding="utf-8").read().strip()
+        except Exception:
+            pass
+        return out
 
     def latest(self):
         with self._lock:
@@ -680,6 +739,33 @@ class Sgp30Reader:
         self._session_init_ns = time.monotonic_ns()
         self._session_init_sequence = None   # filled by the caller's sequence below
 
+    def prime(self) -> None:
+        """Initialise before the first tick.
+
+        Two reasons this cannot wait for tick 0. The run manifest is written
+        right after start() and must be able to record the serial, which is only
+        known once iaq_init has succeeded. And the 15 s initialisation phase
+        should be measured from the actual iaq_init, not from the first read.
+
+        Failure is not fatal: the reader falls back to its normal backoff and
+        the manifest simply carries no serial for this sensor.
+        """
+        if self._sensor is not None:
+            return
+        try:
+            self._init()
+            self._session_init_sequence = 0
+            self.session_log.append({
+                "session_id": self._session_id,
+                "init_sequence": 0,
+                "init_before_first_tick": True,
+                "init_monotonic_ns": self._session_init_ns,
+                "serial": self.serial,
+            })
+        except Exception as exc:
+            self.state.fail(exc)
+            self._schedule_retry(0)
+
     def read(self, sequence: int) -> dict:
         if self._sensor is None:
             if sequence < self.state._retry_at_seq:
@@ -770,6 +856,33 @@ class Bme680Reader:
         i2c = ExtendedI2C(self.bus)
         self._sensor = adafruit_bme680.Adafruit_BME680_I2C(i2c, address=self.address)
         self._retry_step = 0
+
+    def read_identity(self, i2c_port: str = BUS7) -> dict:
+        """Read chip_id (0xD0) and variant_id (0xF0) with normal register reads.
+
+        Two ordinary register reads, not an address scan. Called once at start
+        so the run metadata records which physical part answered.
+        """
+        out: dict = {}
+        try:
+            fd = os.open(i2c_port, os.O_RDWR)
+        except Exception:
+            return out
+        try:
+            ioctl(fd, I2C_SLAVE, self.address)
+            for key, reg in (("chip_id", 0xD0), ("variant_id", 0xF0)):
+                try:
+                    os.write(fd, bytes([reg]))
+                    data = os.read(fd, 1)
+                    if len(data) == 1:
+                        out[key] = f"0x{data[0]:02x}"
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        finally:
+            os.close(fd)
+        return out
 
     def read(self, sequence: int) -> dict:
         if self._sensor is None:
@@ -896,6 +1009,10 @@ class SensorCollector:
         self.bus1.start()
         self.thermal.start()
         self._await_workers()
+        # SGP30 is initialised here, before the first tick, so that
+        # sensor_manifest() can record its serial and the 15 s initialisation
+        # phase is measured from the real iaq_init. Failure is non-fatal.
+        self.sgp30.prime()
 
     def _await_workers(self, timeout_s: float = 8.0) -> None:
         """Wait for the background workers to produce their first reading.
@@ -926,6 +1043,39 @@ class SensorCollector:
 
     def request_stop(self) -> None:
         self.stop_requested = True
+
+    # -- provenance --------------------------------------------------------
+    def sensor_manifest(self) -> dict:
+        """Physical inventory at the start of this run.
+
+        Call after start(). Only facts actually read from the devices are
+        recorded - a device that provides no unique serial simply has no
+        `serial` key. Nothing here is synthesised or carried over from a
+        previous run.
+
+        This is the run-level physical inventory. Runtime initialisation
+        history (per-session iaq_init records) stays in
+        timing_report.sgp30.sessions and is a different thing.
+        """
+        manifest: dict = {
+            "ads1115": {
+                "bus": BUS7,
+                "address": f"0x{ADS1115_ADDRESS:02x}",
+                "note": "no unique serial available from this part",
+            },
+            "sgp30": {"bus": BUS7, "address": f"0x{SGP30_ADDRESS:02x}"},
+            "bme680": {"bus": BUS7, "address": f"0x{BME680_ADDRESS:02x}"},
+            "sps30": {"bus": BUS1, "address": f"0x{SPS30_ADDRESS:02x}"},
+            "scd30": {"bus": BUS1, "address": f"0x{SCD30_ADDRESS:02x}"},
+            "flir": {},
+        }
+        if self.sgp30.serial:
+            manifest["sgp30"]["serial"] = self.sgp30.serial
+        manifest["bme680"].update(self.bme680.read_identity())
+        for name in ("sps30", "scd30"):
+            manifest[name].update(self.bus1.identity.get(name, {}))
+        manifest["flir"].update(self.thermal.read_identity())
+        return manifest
 
     # -- per-tick sensor reads --------------------------------------------
     def _read_ct(self, sequence: int) -> dict:

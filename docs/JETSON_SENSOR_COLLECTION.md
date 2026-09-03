@@ -251,7 +251,32 @@ FLIR          120/120 tick 에 프레임 있음,  age mean 74.9 ms  p95 115.9 ms
 
 ---
 
-## 10. 주의
+## 10. 배선 변경 절차 (canonical)
+
+**40-pin I2C / SPI 센서 배선 변경과 커넥터 재장착은 반드시 아래 순서로 한다.**
+
+```
+1. collector 종료
+2. Jetson shutdown          (sudo shutdown -h now)
+3. external power 제거       (어댑터 분리, 전원 LED 소등 확인)
+4. sensor connector 변경
+5. 배선 / 방향 확인          (실크 첫 핀 위치를 눈으로)
+6. power on
+```
+
+**live I2C hot-plug / reseat 를 canonical procedure 로 사용하지 않는다.**
+
+근거: 활선 상태에서 SGP30 커넥터를 만졌을 때 같은 `/dev/i2c-7` 의 ADS1115 에
+`OSError Errno 121` transient 가 실제로 발생했다 (1800 tick soak, tick 75). ADS1115 는
+모델 입력 채널(NTC, CT1)을 담당하므로 그 순간의 데이터가 오염된다.
+
+한 번의 hot-plug 에서 문제가 없었다는 사실은 **hot-plug 가 안전하다는 뜻이 아니다.**
+90초 test 에서 재장착 후 ADS1115 오류가 0건이었지만, 그것은 재현된 안전성이 아니라
+한 번의 관측일 뿐이다.
+
+---
+
+## 11. 주의
 
 - 이 collector 가 도는 동안 `scripts/08` / `scripts/09` 를 동시에 실행하지 않는다
 - 센서 커넥터 접점이 이 프로젝트의 반복 실패 원인이었다. 수집 전에 이 스크립트를 5초만
@@ -264,6 +289,10 @@ FLIR          120/120 tick 에 프레임 있음,  age mean 74.9 ms  p95 115.9 ms
   ```
 - BME680 온도는 gas 히터 자체 발열로 실온보다 높다. 모델 온도 채널은 NTC 다
 - SGP30 `warming_up` 은 값이 아니라 **initialization session 경과시간**으로 판정한다 — §3-1
+- **SGP30 은 I2C 버스에서 간헐적으로 완전히 사라지는 현상이 반복 관측되었다**
+  (`HARDWARE_STABILITY = UNRESOLVED`, `JETSON_ENVIRONMENT.md` §19). 부재 시 collector 는
+  degraded mode 로 계속 동작하고 serial 을 만들어내지 않는다. **공식 dataset 수집을 이
+  상태에서 조용히 시작하지 않는다** — `JETSON_DATASET_PROTOCOL.md` §11
 
 관련 문서: [`JETSON_ENVIRONMENT.md`](JETSON_ENVIRONMENT.md),
 [`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md), [`../AGENTS.md`](../AGENTS.md)

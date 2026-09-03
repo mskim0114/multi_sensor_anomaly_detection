@@ -1171,3 +1171,40 @@ pynacl 1.5.0 requires cffi, which is not installed.        (exit 1)
 
 따라서 `pip check` 의 exit code 1 은 **이 한 줄이 유일한 원인인 한 정상**으로 취급한다.
 다른 줄이 추가로 나타나면 그때는 조사한다.
+
+---
+
+## 19. KNOWN HARDWARE ISSUE — SGP30 intermittent absence
+
+```
+HARDWARE_STABILITY = UNRESOLVED
+```
+
+**Repeated intermittent SGP30 absence observed.** 서로 다른 시점의 여러 실행에서 SGP30 이
+I2C 버스에서 완전히 사라지는 현상이 반복 관측되었다 (2026-09-03 세션 중 5회).
+
+부재 상태의 관측 사실:
+
+```
+address 0x58 가 응답하지 않는다
+initialization session 이 생성되지 않는다  (initialisation_count 0, sessions [])
+serial 을 만들어내지 않는다               (sensor_manifest.sgp30 에 serial 키 없음)
+Collector 는 degraded mode 로 계속 동작한다
+error 는 ValueError: No I2C device at address: 0x58
+```
+
+같은 `/dev/i2c-7` 의 다른 장치 **ADS1115 `0x48` 와 BME680 `0x77` 는 정상 동작**한다.
+
+**원인은 확정되지 않았다.** connector / wiring / module / local power path 등
+physical-local 요인의 가능성을 별도 hardware task 로 관리한다. 어느 하나를 확정 원인으로
+기록하지 않는다.
+
+관측된 사실 두 가지만 덧붙인다.
+
+- 이탈이 발생한 구간에서 이 저장소의 코드가 수행한 버스 접근은 collector 의 정상 1 Hz read
+  뿐이었다 (스캔·재초기화 hammering 없음)
+- 재장착 후에는 정상 동작이 재개되었고, 30분 soak 에서는 tick 80 복귀 후 1720 measurement 를
+  interval mean 999.975 ms / `>1.5 s` 위반 0건으로 유지했다
+
+**공식 dataset 수집을 이 상태에서 조용히 시작해서는 안 된다.** preflight inventory 정책은
+[`JETSON_DATASET_PROTOCOL.md`](JETSON_DATASET_PROTOCOL.md) §11 을 본다.

@@ -212,10 +212,6 @@ def main() -> int:
     print(f"ct raw:    {'saved' if args.save_ct_raw else 'off (scalar RMS always saved)'}")
     print("NOTE: this process owns the ADS1115. Do not run scripts/08 or 09 concurrently.")
 
-    (run_dir / "metadata.json").write_text(
-        json.dumps(build_metadata(args, run_id), indent=2, ensure_ascii=False),
-        encoding="utf-8")
-
     collector = SensorCollector(
         run_dir, args.duration,
         save_ct_raw=args.save_ct_raw,
@@ -235,6 +231,20 @@ def main() -> int:
     signal.signal(signal.SIGTERM, on_sigint)
 
     collector.start()   # startup-fatal: ADS1115 must be reachable
+
+    # metadata is written after start() so it can carry the sensor manifest -
+    # the physical identity actually read from each device on this run.
+    metadata = build_metadata(args, run_id)
+    metadata["sensor_manifest"] = collector.sensor_manifest()
+    (run_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    print("sensor manifest:")
+    for name, info in metadata["sensor_manifest"].items():
+        ident = ", ".join(f"{k}={v}" for k, v in info.items()
+                          if k not in ("bus", "address", "device", "note"))
+        loc = info.get("bus") or info.get("device") or "-"
+        addr = info.get("address", "")
+        print(f"  {name:<8} {loc} {addr:<6} {ident or '(no unique identity available)'}")
 
     jsonl_path = run_dir / "snapshots.jsonl"
     csv_path = run_dir / "scalars.csv"

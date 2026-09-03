@@ -941,6 +941,44 @@ class Bme680Reader:
 
 
 # --------------------------------------------------------------------------
+# Run persistence, shared by every runner
+# --------------------------------------------------------------------------
+def write_run(collector, run_dir, *, on_snapshot=None) -> dict:
+    """Drive the collector and persist snapshots.jsonl + scalars.csv.
+
+    Kept here so every runner (11_collect_sensors, 12_run_trial) uses one
+    implementation instead of copying the loop. `on_snapshot` is called with
+    each snapshot after it is written; it must not block or wait for input -
+    the tick schedule keeps running regardless.
+    """
+    import csv
+    import json
+    from .snapshot import SCALAR_FIELDS, scalar_row
+
+    jsonl_path = run_dir / "snapshots.jsonl"
+    csv_path = run_dir / "scalars.csv"
+    written = 0
+    with jsonl_path.open("w", encoding="utf-8") as jf, \
+         csv_path.open("w", newline="", encoding="utf-8") as cf:
+        writer = csv.DictWriter(cf, fieldnames=SCALAR_FIELDS)
+        writer.writeheader()
+        for snapshot in collector.iter_snapshots():
+            jf.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+            writer.writerow(scalar_row(snapshot))
+            written += 1
+            if on_snapshot is not None:
+                on_snapshot(snapshot)
+            if snapshot["sequence"] % 10 == 0:
+                jf.flush()
+                cf.flush()
+    return {
+        "snapshots_written": written,
+        "snapshots_path": str(jsonl_path),
+        "scalars_path": str(csv_path),
+    }
+
+
+# --------------------------------------------------------------------------
 # Statistics helpers
 # --------------------------------------------------------------------------
 def _pct(values: list[float], p: float):

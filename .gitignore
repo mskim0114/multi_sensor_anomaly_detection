@@ -120,3 +120,6 @@ ENV/
 
 # Editor backups
 *~
+
+# Official raw dataset - never committed
+/dataset/

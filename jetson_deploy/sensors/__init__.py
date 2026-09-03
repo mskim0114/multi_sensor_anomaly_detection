@@ -10,6 +10,7 @@ from .collector import (  # noqa: F401
     PROFILE_V1_DISABLED,
     PROFILE_V1_REQUIRED,
     SENSOR_PROFILE_V1,
+    write_run,
 )
 from .snapshot import (  # noqa: F401
     FLIR_MAX_AGE_MS,

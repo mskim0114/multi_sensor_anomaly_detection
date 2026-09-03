@@ -21,7 +21,6 @@ the model input vector [NTC, PM1.0, PM2.5, PM10, CT1, CT2, CT3, CT4].
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import json
 from pathlib import Path
@@ -35,9 +34,9 @@ REPO_ROOT = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sensors.collector import SensorCollector  # noqa: E402
+from sensors.collector import SensorCollector, write_run  # noqa: E402
 from sensors.snapshot import (  # noqa: E402
-    FLIR_MAX_AGE_MS, SCALAR_FIELDS, SCHEMA_VERSION, WINDOW_TICKS, scalar_row,
+    FLIR_MAX_AGE_MS, SCHEMA_VERSION, WINDOW_TICKS,
 )
 
 DEFAULT_OUT_DIR = ROOT / "results" / "sensor_collection"
@@ -262,30 +261,24 @@ def main() -> int:
         addr = info.get("address", "")
         print(f"  {name:<8} {loc} {addr:<6} {ident or '(no unique identity available)'}")
 
-    jsonl_path = run_dir / "snapshots.jsonl"
-    csv_path = run_dir / "scalars.csv"
+    def progress(snapshot: dict) -> None:
+        if snapshot["sequence"] % 10:
+            return
+        sen = snapshot["sensors"]
+        print(f'[{snapshot["sequence"]:>5}] '
+              f'jit {snapshot["tick_jitter_ms"]:+7.2f} ms  '
+              f'work {snapshot["tick_work_ms"]:6.1f} ms  '
+              f'ntc {sen["ntc"]["status"]:<11} '
+              f'ct1 {sen["ct1"]["status"]:<5} '
+              f'sps30 {sen["sps30"]["status"]:<5} '
+              f'sgp30 {sen["sgp30"]["status"]:<11} '
+              f'scd30 {sen["scd30"]["status"]:<5} '
+              f'bme680 {sen["bme680"]["status"]:<5} '
+              f'flir {sen["flir"]["status"]}')
+
+    paths = {}
     try:
-        with jsonl_path.open("w", encoding="utf-8") as jf, \
-             csv_path.open("w", newline="", encoding="utf-8") as cf:
-            writer = csv.DictWriter(cf, fieldnames=SCALAR_FIELDS)
-            writer.writeheader()
-            for snapshot in collector.iter_snapshots():
-                jf.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
-                writer.writerow(scalar_row(snapshot))
-                if snapshot["sequence"] % 10 == 0:
-                    jf.flush()
-                    cf.flush()
-                    sen = snapshot["sensors"]
-                    print(f'[{snapshot["sequence"]:>5}] '
-                          f'jit {snapshot["tick_jitter_ms"]:+7.2f} ms  '
-                          f'work {snapshot["tick_work_ms"]:6.1f} ms  '
-                          f'ntc {sen["ntc"]["status"]:<11} '
-                          f'ct1 {sen["ct1"]["status"]:<5} '
-                          f'sps30 {sen["sps30"]["status"]:<5} '
-                          f'sgp30 {sen["sgp30"]["status"]:<11} '
-                          f'scd30 {sen["scd30"]["status"]:<5} '
-                          f'bme680 {sen["bme680"]["status"]:<5} '
-                          f'flir {sen["flir"]["status"]}')
+        paths = write_run(collector, run_dir, on_snapshot=progress)
     finally:
         collector.flush_chunks()
         collector.shutdown()
@@ -296,8 +289,8 @@ def main() -> int:
     print_report(report)
 
     print(f"metadata:  {run_dir / 'metadata.json'}")
-    print(f"scalars:   {csv_path}")
-    print(f"snapshots: {jsonl_path}")
+    print(f"scalars:   {paths.get('scalars_path', run_dir / 'scalars.csv')}")
+    print(f"snapshots: {paths.get('snapshots_path', run_dir / 'snapshots.jsonl')}")
     print(f"timing:    {run_dir / 'timing_report.json'}")
 
     if interrupted["value"]:

@@ -1,6 +1,6 @@
 # 이상상태 데이터 수집 프로토콜 (canonical)
 
-**상태: 프로토콜 결정 확정 (2026-09-03). 수집 스크립트 `12_run_trial.py` 는 아직 미구현.**
+**상태: 프로토콜 확정 + 수집 러너 `12_run_trial.py` 구현 완료 (2026-09-03).**
 
 이 문서는 실측 데이터를 모으기 *전에* 형식을 고정하기 위한 결정 기록이다. 잘못된 형식으로
 모은 실측 데이터는 다시 만들 수 없으므로, 수집 시작 전에 여기 정의된 온톨로지를 따른다.
@@ -315,7 +315,131 @@ information axis** 를 우선 검토한다.
 
 ---
 
-## 12. 유지되는 원칙
+## 12. `12_run_trial.py` — trial 러너
+
+### 안전 경계
+
+**이 프로그램은 이상상태를 만들거나 제어하지 않는다.** mains switching, 전기 부하 제어,
+히터 제어, 팬 정지, 분진 발생기 제어, 릴레이, 액추에이터가 코드에 **존재하지 않는다.**
+담당 범위는 **DATA ACQUISITION + EXPERIMENT ORCHESTRATION** 뿐이며, 실제 개입은 별도의
+안전한 테스트베드와 작업자 절차의 책임이다.
+
+센서 드라이버를 새로 구현하지 않는다. 검증된 `jetson_deploy/sensors/` 의 `SensorCollector`
+를 **preflight 까지 포함해 그대로 재사용**하므로 같은 센서를 두 객체가 동시에 소유하지 않는다.
+파일 기록도 `sensors.collector.write_run()` 하나를 `11_collect_sensors.py` 와 공유한다.
+
+### 사용법
+
+```bash
+# official trial (canonical 90/180/90)
+./jetson_deploy/run_python.sh jetson_deploy/scripts/12_run_trial.py \
+    --scenario dust --severity 2 --operator-note "..." --equipment-condition "..."
+
+# normal control trial
+./jetson_deploy/run_python.sh jetson_deploy/scripts/12_run_trial.py \
+    --scenario normal --severity 0
+
+# test mode (official dataset 에 섞이지 않음)
+./jetson_deploy/run_python.sh jetson_deploy/scripts/12_run_trial.py \
+    --scenario normal --severity 0 --duration 30 --test-mode --yes
+
+# 하드웨어 없이 결정적 검증
+./jetson_deploy/run_python.sh jetson_deploy/scripts/12_run_trial.py --self-test
+```
+
+| 옵션 | 의미 |
+|---|---|
+| `--scenario` | `normal` / `overload` / `thermal_abnormal` / `dust` 만 허용 |
+| `--severity` | `0..3`. `normal` 은 반드시 0, 그 외는 1~3 |
+| `--dataset-root` | 기본 `dataset/` |
+| `--operator-note` / `--equipment-condition` | 자유 서술 |
+| `--save-ct-raw` / `--no-thermal-save` | collector 와 동일 |
+| `--baseline-seconds` / `--anomaly-seconds` / `--recovery-seconds` | override. 사용 시 `protocol_compliant = false` |
+| `--duration` | `normal` 전용 총 길이 override |
+| `--test-mode` | `dataset/_smoke/` 로 격리 |
+| `--yes` | ENTER 확인 생략 (countdown 은 유지). 비대화형 실행용 |
+| `--self-test` | 하드웨어 없는 결정적 검증 |
+
+### preflight gate
+
+**PASS 전에는 절대 acquisition 을 시작하지 않는다.** REQUIRED 가 하나라도 실패하면
+`status = "preflight_failed"` 로 남기고 non-zero 로 종료하며 360초 수집을 시작하지 않는다.
+`i2cdetect` scan 을 쓰지 않고 검증된 driver/protocol 경로만 사용한다.
+
+```
+PREFLIGHT
+  ADS1115      PASS      /dev/i2c-7 0x48 config=0x04e3
+  NTC          PASS      A2 25.04 C, R 9983 ohm
+  CT1          PASS      431 samples @ 861.67 SPS, vrms 3.494e-05 V
+  SPS30        PASS      /dev/i2c-1 0x69 serial=... fw=(2, 3)
+  SCD30        PASS      /dev/i2c-1 0x61 serial=... fw=(3, 66)
+  BME680       PASS      /dev/i2c-7 0x77 chip_id=0x61 variant_id=0x00
+  FLIR         PASS      /dev/video0 shape=(120, 160) serial=...
+  SGP30        DISABLED  disabled_by_profile: hardware_stability_unresolved
+  PROFILE:  jetson_factory_v1_2026
+  RESULT:   PASS
+```
+
+**sensor identity freeze**: preflight PASS 시점의 `sensor_profile` 과 `sensor_manifest` 를
+`experiment.json` 에 복사한다. unique serial 이 없는 부품은 만들어내지 않는다.
+
+### operator UX
+
+preflight PASS 후 바로 시작하지 않는다. scenario / severity / trial id / duration /
+sensor profile / output directory 를 보여주고 **ENTER 확인** 을 받은 뒤 `3 → 2 → 1 → START`
+countdown 후 수집을 시작한다.
+
+anomaly scenario 는 phase 경계 5초 전에 경고하고 경계에서 알린다 (terminal bell 포함).
+
+```
+T-5 sec: ANOMALY PHASE IN 5 SECONDS
+=== ANOMALY PHASE START ===  tick 90
+=== RECOVERY PHASE START ===  tick 270
+```
+
+**이 안내는 acquisition 을 멈추지 않고 입력을 기다리지도 않는다.** phase 전환은 monotonic
+timeline 대로 자동 진행한다.
+
+### status state machine
+
+```
+created -> preflight_failed
+created -> ready -> running -> completed | aborted | failed
+```
+
+상태 전환마다 **atomic write** 한다 (temp file → `fsync` → `os.replace`). 실험 도중 crash 가
+나도 마지막 상태가 남는다.
+
+### official vs test mode
+
+```
+official   dataset/<scenario>/trial_NNN/        scenario 별 번호 증가, 재사용·덮어쓰기 없음
+test       dataset/_smoke/<scenario>_<RUN_ID>/  official 디렉터리에 들어가지 않음
+```
+
+개발 테스트가 official dataset 에 섞이지 않도록 `--test-mode` 를 반드시 쓴다.
+
+### partial / failed trial
+
+`Ctrl+C` 나 실행 중 실패 시 **trial 디렉터리를 삭제하지 않는다.** `status` 를 `aborted`
+또는 `failed` 로 남기고 부분 파일을 보존한다. 그 trial 은 official completed count 에
+포함하지 않으며, 다시 실행하면 **새 `trial_NNN` 을 만든다 — 기존 번호를 재사용하지 않는다.**
+
+### acceptance
+
+official completed trial 의 최소 조건은 expected tick count 충족, missed master tick 0,
+REQUIRED 센서의 fatal absence 없음, writer drop/error 0 이다. **FFC 로 인한 window invalid 는
+trial 자체를 실패로 만들지 않으며** quality summary 에 정확히 기록된다.
+
+### 학습 label 을 자동 생성하지 않는다
+
+러너는 `state_label` 을 만들지 않는다. `phase` 는 실험 절차의 서술이고, tick 90 부터 dust,
+tick 270 부터 normal 같은 label 을 자동 부여하지 않는다. `observed_anomaly_onset_tick` 과
+`observed_recovery_tick` 은 `null` 로 시작하며 후속 annotation 단계의 책임이다 (§2, §3).
+
+---
+
+## 13. 유지되는 원칙
 
 - **CT2 / CT3 / CT4 는 `disabled`** 로 기록한다. 0 으로 채우거나 CT1 을 복제하지 않는다.
   모델이 요구하는 8채널을 맞추는 것은 이후 ModelAdapter 의 책임이다

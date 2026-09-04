@@ -1,103 +1,288 @@
-# Data Platform Architecture (V1 초안)
+# Data Platform Architecture (초안)
 
 **상태: 초안. 코드 미구현. 이 문서는 설계 합의를 위한 것이며 구현을 지시하지 않는다.**
 
 Jetson acquisition code 는 `jetson-dataset-v1-ready-2026` (`8bc5e88`) 에서 freeze 되어 있고
-이 문서의 내용은 그 코드를 변경하지 않는다.
+이 문서는 그 코드를 변경하지 않는다.
 
 관련 문서: [`JETSON_DATASET_PROTOCOL.md`](JETSON_DATASET_PROTOCOL.md) ·
-[`JETSON_SENSOR_COLLECTION.md`](JETSON_SENSOR_COLLECTION.md)
+[`JETSON_SENSOR_COLLECTION.md`](JETSON_SENSOR_COLLECTION.md) ·
+[`ENVIRONMENT_POLICY.md`](ENVIRONMENT_POLICY.md)
+
+**partner platform 확인 질문 목록**:
+[`CONSORTIUM_DATA_PLATFORM_QUESTIONS.md`](CONSORTIUM_DATA_PLATFORM_QUESTIONS.md) —
+이 문서의 모든 `TBD — consortium partner confirmation required` 항목은 거기에서 P01~P20 으로
+추적한다.
 
 ---
 
-## 1. 목적
+## 1. 목적과 범위
 
-수집한 trial 데이터를 **컨소시엄 참여기관이 안전하게 조회**할 수 있게 하고, 동시에
-**Jetson 을 외부에 노출하지 않는 것**이 목적이다.
+이 문서는 **누가 어떤 데이터를 보유하고, 어떤 방향으로 흐르고, 어디서 추론하는지**를 고정한다.
+특정 제품이나 API 를 확정하는 문서가 아니다.
 
-```
-Sensors -> Jetson Collector -> Dataset -> Central Data Storage -> REST API -> Web Viewer
-```
-
-V1 은 **read-only** 다. 외부기관이 데이터를 쓰거나 지우거나 trial 을 실행할 수 없다.
-
-### 전제 (현재 확인된 사실만)
-
-- fenced robot test area, 약 2평
-- robot arm 1대 설치
-- **robot 은 컨소시엄 참여기관 소유·운영 설비다**
-- 이 환경에서 Jetson multi-sensor acquisition system 을 사용한다
-
-**TBD — consortium / robot owner confirmation required**: robot payload, trajectory, speed,
-operating limit, sensor mounting location, robot cell modification, fence modification,
-heating location, particulate generation method. 이 문서는 이 항목들을 가정하지 않는다.
-
-### 2026 anomaly scope (physical phenomenon 수준)
-
-**machine ID 와 표시 이름을 분리한다.** `scenario_id` 는 안정적인 데이터셋 식별자이며
-변경하지 않는다. 문서·API·Web viewer 는 phenomenon 과 display name 을 쓴다.
-
-| scenario_id (machine) | phenomenon | display (EN / KO) | primary | secondary |
-|---|---|---|---|---|
-| `normal` | — | Normal / 정상 | — | — |
-| `overload` | `load_abnormality` | Load Abnormality / 부하 이상 | CT | NTC, FLIR |
-| `thermal_abnormal` | `thermal_abnormality` | Thermal Abnormality / 열 이상 | FLIR, NTC | CT |
-| `dust` | `particulate_abnormality` | Particulate Matter Abnormality / 입자상 물질 이상 | SPS30 | — |
-
-> **`overload` 라는 scenario_id 가 실제 정격 초과 운전을 의미한다고 해석하지 않는다.**
-> stable dataset identifier 일 뿐이다.
-
-API 응답은 세 값을 함께 제공한다. 그래야 외부기관이 machine ID 로 필터링하면서 화면에는
-읽을 수 있는 이름을 보여줄 수 있다.
-
-```json
-{ "scenario_id": "overload",
-  "phenomenon": "load_abnormality",
-  "display_name": { "en": "Load Abnormality", "ko": "부하 이상" } }
-```
-
-구체적인 anomaly induction procedure 는 컨소시엄 협의 후 결정한다. 정의와 TBD 목록은
-[`JETSON_DATASET_PROTOCOL.md`](JETSON_DATASET_PROTOCOL.md) §1 을 정본으로 한다.
-
-> 기존 문서에 기술된 손난로, 온수병, 히터 등의 이상상태 유발 방식은 **예시이며 현재
-> 확정된 현장 실험 절차가 아니다.** 실제 intervention 방법은 로봇 소유·운영기관 및
-> 컨소시엄 협의 후 결정한다.
+2027년 상반기 국제공동과제 field deployment 를 전제로 하되, **아직 확정되지 않은 것은
+확정하지 않는다.** 특히 consortium partner 가 운영할 data platform 의 사양은 전부 TBD 다.
 
 ---
 
-## 2. Jetson → central server data flow
+## 2. Repository / execution profile
 
-**Jetson 은 언제나 outbound 로만 통신한다.** 중앙 서버가 Jetson 으로 접속하지 않는다.
+**GitHub repository 는 하나다.** 실행 역할은 그 안에서 분리된다.
 
 ```
-[robot test area]                          [central data server]
-  Jetson                                     ingest endpoint (HTTPS)
-   trial 종료                                     |
-   status = completed | aborted | failed          |
-        |                                          |
-   upload agent  --- HTTPS POST (outbound) ------->|  검증 -> object store + DB index
-        |                                          |
-   업로드 성공 기록                                 |
+git@github.com:mskim0114/multi_sensor_anomaly_detection.git
+one repository, two execution profiles
 ```
 
-### 업로드 단위와 시점
+| | SERVER-TRAINING | JETSON-RUNTIME |
+|---|---|---|
+| 코드 영역 | `src/` | `jetson_deploy/` |
+| 환경 | `factory_training` | `factory_runtime` |
+| 역할 | training · evaluation · dataset processing · model export | sensor acquisition · dataset collection · **edge inference** · ONNX/TensorRT runtime |
 
-trial 은 완료 시점에 **불변**이 된다. 따라서 업로드 단위는 **trial 디렉터리 전체**이며,
-`experiment.json` 의 `status` 가 종료 상태(`completed` / `aborted` / `failed`)가 된 뒤에
-한 번 올린다. 실행 중 스트리밍은 V1 범위가 아니다.
+프로파일 판별과 설치 규칙은 [`ENVIRONMENT_POLICY.md`](ENVIRONMENT_POLICY.md) 를 정본으로 한다.
 
-- **멱등성**: `trial_id` + `scenario_id` + 파일 `sha256` 로 판단한다. 같은 내용을 다시
-  올려도 중복 저장하지 않는다
-- **무결성**: 업로드 시 파일별 `sha256` 을 함께 보내고 서버가 재계산해 대조한다
-- **재시도**: 네트워크 실패 시 Jetson 로컬 `dataset/` 은 그대로 남아 있으므로 재시도로 족하다.
-  Jetson 은 업로드 성공 여부를 로컬에 기록하고 미전송 trial 을 다시 시도한다
-- **부분 trial 도 올린다**: `aborted` / `failed` trial 을 버리지 않는다
-  (`JETSON_DATASET_PROTOCOL.md` §12 partial data policy). 다만 official completed count 에는
-  포함하지 않으며 API 는 `status` 로 구분해 제공한다
+---
+
+## 3. Deployment profile — 두 상황을 혼동하지 않는다
+
+### DEVELOPMENT / 2026 (현재)
+
+```
+Korea Linux Workstation          개발 · dataset 처리 · 학습 · 평가
+        +
+Local Jetson development device  센서 수집 · trial 생성 · edge 추론 검증
+```
+
+현재는 **partner platform 이 존재하지 않는다.** trial 데이터는 Jetson 로컬
+(`dataset/<scenario>/trial_NNN/`) 과 한국 workstation 사이에서만 다룬다.
+
+### FIELD / 2027 (계획)
+
+```
+German Robot Test Site
+  Jetson Orin Nano                 센서 수집 · trial 생성 · local spool · edge 추론
+        |
+        v  outbound upload
+  Partner-operated DB / Data Platform      (consortium partner 운영)
+        |
+        v  authenticated remote access
+  Korea Linux Training Workstation  dataset 처리 · 학습 · 평가 · batch 재추론 · ONNX export
+```
+
+**한국 workstation 은 독일 현장의 단일 central server 가 아니다.** 현장 데이터의 운영
+저장소는 partner platform 이고, 한국 workstation 은 연구·학습용 노드다.
+
+### 확정된 프로젝트 맥락
+
+- 2027년 상반기, 독일 robot test site 에 Jetson Orin Nano 기반 sensor module 설치 예정
+- robot / test site 는 **consortium partner 측이 운영**
+- 현장에서 생성된 sensor·trial 데이터는 **그 업체가 운영하는 DB 또는 data platform** 에 업로드 예정
+- 한국 연구팀은 설치 후 귀국하여 **그 platform 에 원격 접속**해 데이터를 확인할 예정
+
+---
+
+## 4. 세 노드의 역할
+
+### A. Korea training workstation
+
+현재 보유 중인 Linux workstation. `src/` + `factory_training` 이 이 역할이다.
+
+```
+development · dataset processing · training · evaluation ·
+batch re-inference · model export · research analysis
+```
+
+### B. German field Jetson
+
+2027년 상반기 독일 robot test site 설치 예정. `jetson_deploy/` + `factory_runtime` 이 이 역할이다.
+
+```
+sensor acquisition · trial dataset generation · local buffering · real-time edge inference
+```
+
+### C. Partner data platform
+
+독일 현장 데이터를 업로드할 **consortium partner 운영** DB 또는 platform.
+
+```
+field trial data ingestion · storage · remote consortium access ·
+data retrieval / export interface
+```
+
+**정확한 implementation 은 TBD 다.** 아래는 **현재 확정되지 않았으며 추측하지 않는다.**
+
+```
+TBD — consortium partner confirmation required
+
+  제품명
+  API specification
+  database type
+  hosting location
+  authentication method
+  network topology
+```
+
+---
+
+## 5. Canonical 2027 data flow
+
+```
+[GERMAN TEST SITE]
+  Sensors
+    -> Jetson Orin Nano
+    -> Collector
+    -> Trial Dataset            (local, immutable)
+    -> Edge Inference           (현장 실시간 판정)
+
+  Jetson
+    -> outbound upload
+    -> Partner-operated DB / Data Platform
+
+[KOREA]
+  Partner DB / Data Platform
+    -> authenticated remote access / API / export
+    -> Korea Linux Workstation
+    -> dataset processing
+    -> training
+    -> evaluation
+    -> batch re-inference
+    -> ONNX model export
+
+[MODEL DELIVERY]
+  Korea Workstation
+    -> controlled model delivery
+    -> German Jetson
+    -> edge inference
+```
+
+방향은 두 개이며 **방향별로 credential 과 권한을 분리한다** (§13).
+
+---
+
+## 6. Inference role — edge 와 batch 를 혼동하지 않는다
+
+```
+GERMAN JETSON   real-time / online EDGE inference
+  Sensors -> Collector -> model input window -> ONNX / TensorRT -> anomaly prediction
+  현장 실시간 판정은 Jetson 의 책임이다.
+
+KOREA WORKSTATION   batch inference / re-evaluation
+  저장된 trial 재추론 · 새 모델과 기존 모델 비교 · validation/test evaluation ·
+  논문 지표 산출 · regression evaluation
+  이것은 현장 실시간 판정 경로가 아니다.
+```
+
+### Network dependency 규칙
+
+**German Jetson 의 real-time anomaly inference 는 한국 workstation 이나 partner data
+platform 의 network availability 에 의존하지 않는다.**
+
+```
+canonical      :  Sensors -> Jetson -> Edge inference
+NOT canonical  :  Sensors -> Jetson -> remote server -> inference -> Jetson
+```
+
+network outage 가 발생해도 현장 edge inference 가 계속 가능한 구조를 유지한다. 원격 노드가
+실시간 판정 경로에 들어가면 회선 단절이 곧 판정 중단이 된다.
+
+---
+
+## 7. Local data spool (Jetson) — 필수
+
+**2027 field deployment 에서 network availability 를 항상 보장할 수 있다고 가정하지 않는다.**
+따라서 Jetson architecture 에 logical local spool 을 정의한다.
+
+```
+trial completed
+  -> immutable local trial directory
+  -> upload attempt
+  -> server checksum / integrity confirmation
+  -> uploaded state
+```
+
+**upload 실패 시**
+
+```
+trial 삭제 금지
+local spool 에 유지
+retry 가능
+```
+
+**upload 성공을 확인하기 전에 local raw trial 을 제거하지 않는다.** 확인은 서버 측
+checksum/integrity 응답으로 한다. "보냈다" 가 아니라 "받았고 무결하다" 가 기준이다.
+
+> **현재 uploader code 는 구현하지 않는다.** spool 의 물리적 형태(상태 파일, 디렉터리 이동,
+> DB) 는 partner platform 사양을 받은 뒤 정한다.
+
+---
+
+## 8. Upload unit
+
+기존 원칙을 유지한다.
+
+```
+upload unit = completed trial directory
+```
+
+포함 파일:
+
+```
+experiment.json
+metadata.json
+scalars.csv
+snapshots.jsonl
+thermal_*.npz
+timing_report.json
+optional  ct_raw_*.npz
+```
+
+- **`trial_id` + 파일 SHA-256** 으로 향후 idempotency / integrity verification 이 가능하도록
+  설계한다. 같은 내용을 다시 올려도 중복 저장되지 않아야 한다
+- trial 은 완료 시점에 불변이 되므로 업로드는 **완료 후 1회**다. 실행 중 스트리밍은 범위가 아니다
+- **`aborted` / `failed` trial 도 보존·업로드 가능하다.** 다만 official completed dataset 과는
+  `status` 로 구분한다 ([`JETSON_DATASET_PROTOCOL.md`](JETSON_DATASET_PROTOCOL.md) §12)
+
+---
+
+## 9. Partner platform integration — TBD
+
+**partner platform 이 아직 정해지지 않았으므로 특정 REST endpoint, DB table, S3 bucket 을
+만들어내지 않는다.** 대신 확인해야 할 integration requirement 만 정의한다.
+
+아래는 전부 **`TBD — consortium partner confirmation required`** 다.
+
+| # | 확인 항목 |
+|---|---|
+| 1 | upload mechanism |
+| 2 | remote download / query mechanism |
+| 3 | API 또는 SDK availability |
+| 4 | authentication / credential mechanism |
+| 5 | TLS / VPN / network requirement |
+| 6 | maximum file / object size |
+| 7 | trial directory / object representation |
+| 8 | checksum support |
+| 9 | duplicate / idempotent upload handling |
+| 10 | partial upload recovery |
+| 11 | retention policy |
+| 12 | storage quota |
+| 13 | data export capability |
+| 14 | API rate limits |
+| 15 | timestamp / timezone convention |
+| 16 | partner-side backup responsibility |
+| 17 | Korea-side access permission |
+| 18 | model artifact delivery path |
+
+이 항목들은 [`CONSORTIUM_DATA_PLATFORM_QUESTIONS.md`](CONSORTIUM_DATA_PLATFORM_QUESTIONS.md)
+의 **P01~P20** 으로 추적한다. 답이 나오기 전에는 production upload / API code 를 만들지 않는다.
+
+참고로 우리 쪽 데이터의 형태는 이미 고정되어 있으므로(§8, 아래 규모), 위 항목 중
+6·7·8·9·12 는 우리 값으로 즉시 대조 가능하다.
 
 ### 데이터 규모 (실측 기반)
 
-30분 수집 실측 43.8 MB (thermal + CT raw 포함) 기준으로 환산한다.
+30분 수집 실측 43.8 MB (thermal + CT raw 포함) 기준 환산이다.
 
 | 단위 | 크기 |
 |---|---|
@@ -110,244 +295,343 @@ trial 은 완료 시점에 **불변**이 된다. 따라서 업로드 단위는 *
 `snapshots.jsonl`(360줄), `thermal_000000..000011.npz`(30프레임 × 12), `timing_report.json`,
 선택적으로 `ct_raw_000000..000005.npz`.
 
-**V1 규모에서는 특별한 스토리지 기술이 필요하지 않다.** 이 숫자는 과설계를 막기 위한 것이다.
-**V1 에서 분산 스토리지 아키텍처를 도입하지 않는다. single central server 로 시작한다.**
+**이 규모에서는 분산 스토리지 아키텍처가 필요하지 않다.** 이 숫자는 과설계를 막기 위한 것이다.
 
 ---
 
-## 3. Storage model
+## 10. Korea training workstation
 
-**raw sensor data 를 relational DB 에 넣지 않는다.**
-
-```
-PostgreSQL  (또는 동등한 경량 DB)      metadata / search index
-   trial, sensor_manifest, quality, phase_plan, upload record, annotation
-
-Object store (filesystem 또는 S3-compatible)   raw file
-   dataset/<scenario>/<trial_id>/<원본 파일 그대로>
-```
-
-현재 dataset format 을 **변형 없이 그대로 수용**한다. 서버가 파일을 재가공해 저장하지 않는다.
-원본을 그대로 보관하고, 조회 편의를 위한 파생물은 필요할 때 생성한다.
-
-### DB 에 색인할 것 (조회·필터에 필요한 것만)
+한국 Linux workstation 은 계속 **canonical training environment** 다.
 
 ```
-trial          trial_id, scenario_id, severity_level, status, protocol_compliant,
-               test_mode, started_at, completed_at, planned_duration_s,
-               git_commit, sensor_profile_name, upload_time, storage_prefix
-sensor_unit    trial_id, sensor, bus, address, serial, firmware, chip_id
-quality        trial_id, total/valid/invalid ticks, window 통계, invalid_reason_counts,
-               missed_ticks, writer drop/error, 센서별 error count
-file           trial_id, filename, bytes, sha256, content_type
+SERVER-TRAINING profile
+  src/
+  $HOME/venvs/factory_training
 ```
 
-`snapshots.jsonl` 의 tick 단위 레코드는 DB 에 넣지 않는다. 360 tick × trial 수만큼의 행을
-관계형 DB 에 넣는 것은 V1 목적(목록·조회·다운로드)에 필요하지 않다. 시계열 질의가 실제로
-필요해지면 그때 별도로 검토한다.
+역할:
 
-### 불변성과 annotation 분리 — 중요
+```
+partner platform 으로부터 확보한 dataset
+  -> local research / training storage
+  -> preprocessing
+  -> dataset versioning
+  -> training
+  -> evaluation
+  -> batch re-evaluation
+  -> ONNX export
+```
 
-**업로드된 raw 는 불변으로 다룬다.** 이후 annotation 단계에서 채워질
+> **partner platform 의 production database 를 training process 가 직접 임의 수정하지 않는다.**
+> 학습용으로 가져온 dataset 은 명확한 version / provenance 를 가진 **local research
+> copy / cache** 로 관리한다.
+
+`docs/SERVER_ENVIRONMENT.md` 는 현재 `PENDING SERVER ENVIRONMENT AUDIT` 상태다. 서버에서
+직접 audit 한 뒤 채우며, Jetson 에서 관측한 버전을 서버 환경으로 가정하지 않는다.
+
+---
+
+## 11. Data authority / provenance
+
+2027 field deployment 에서 개념적 역할 분리는 다음과 같다.
+
+| 노드 | 데이터 권위 |
+|---|---|
+| **Partner platform** | field-uploaded **raw data 의 operational source** |
+| **Korea workstation** | research / training **copy** + processed dataset + model artifacts |
+
+### 불변성과 annotation 분리
+
+- **raw data 는 immutable 원칙을 유지한다**
+- **annotation 은 raw file 을 수정하지 않고 별도 annotation / version layer 에 둔다**
+
+이후 annotation 단계에서 채워질 값
 
 ```
 observed_anomaly_onset_tick
 observed_recovery_tick
-observed_response (ct/thermal/pm 실측 반응)
+observed_response        (ct / thermal / pm 실측 반응)
 state_label
 ```
 
-는 **원본 `experiment.json` 을 수정해서 넣지 않는다.** DB 의 별도 annotation 레코드로 저장하고
-작성자·시각·버전을 남긴다. API 는 원본과 annotation 을 합쳐 보여줄 수 있지만, 어느 값이 수집
-시점 사실이고 어느 값이 사후 해석인지 항상 구분되어야 한다.
+은 원본 `experiment.json` 을 수정해서 넣지 않는다. 별도 레코드로 저장하고 작성자·시각·버전을
+남긴다. **어느 값이 수집 시점 사실이고 어느 값이 사후 해석인지 항상 구분되어야 한다.**
 
-이것을 지키지 않으면 나중에 "이 값이 측정된 것인가 판단된 것인가" 를 복원할 수 없다.
+### 추적 가능하게 유지할 것
+
+```
+source platform
+trial_id
+source checksum
+imported_at
+dataset_version
+annotation_version
+git_commit
+```
+
+이것이 있으면 "이 학습에 쓰인 데이터가 어느 platform 의 어느 trial 에서 언제 가져온
+무엇인가" 를 복원할 수 있다.
 
 ---
 
-## 4. REST API (V1, read-only)
+## 12. Model lifecycle
 
 ```
-GET /api/v1/health
-
-GET /api/v1/trials                          목록 + 필터/페이지네이션
-GET /api/v1/trials/{trial_id}               요약
-
-GET /api/v1/trials/{trial_id}/metadata      metadata.json + sensor_manifest + sensor_profile
-GET /api/v1/trials/{trial_id}/scalars       시계열 스칼라
-GET /api/v1/trials/{trial_id}/thermal       thermal 프레임 접근
-GET /api/v1/trials/{trial_id}/files         파일 목록 및 다운로드
+German Jetson
+  -> raw trial
+  -> partner platform
+  -> Korea workstation
+  -> dataset version
+  -> training
+  -> evaluation
+  -> model version
+  -> ONNX
+  -> German Jetson
+  -> edge inference
 ```
 
-### 설계 노트
+### Model artifact 정책
 
-- **`/trials`** 필터: `scenario_id`, `severity_level`, `status`, `protocol_compliant`,
-  `test_mode`, 기간. **기본적으로 `test_mode=true` 는 제외**한다. smoke 데이터가 조회 결과에
-  섞이면 안 된다
-- **`/scalars`** 는 `scalars.csv` 를 JSON 으로 제공한다. 360행이므로 V1 에서 다운샘플링이
-  필요 없다. 컬럼 선택(`?fields=ct1_vrms,ntc_temperature_c`)만 지원하면 충분하다
-- **`/thermal`** 은 NPZ 를 그대로 내리면 웹에서 쓰기 어렵다. 세 가지를 분리한다
-  ```
-  GET .../thermal                 프레임 인덱스 (chunk, index, tick, min/max/mean °C)
-  GET .../thermal/{tick}          해당 tick 1프레임 (PNG 또는 JSON 배열)
-  GET .../files/thermal_000000.npz  원본 그대로 다운로드
-  ```
-  °C 변환은 `raw/100 - 273.15` 이며 서버가 수행한다
-- **`/files`** 는 파일 목록(이름·크기·sha256)과 개별 다운로드를 제공한다. trial 전체를
-  묶어 내려받는 archive 는 편의 기능이며 V1 필수는 아니다
-- 모든 응답에 `quality` 요약과 `protocol_compliant` 를 포함해, 사용자가 **FFC 로 무효화된
-  window 를 모르고 학습에 쓰는 일**이 없게 한다
+- **ONNX 를 우선 canonical portable model artifact 로 사용한다**
+- **TensorRT serialized engine 은 runtime environment 에 민감하다.** server 에서 빌드한
+  engine 이 Jetson 에서 실행된다고 가정하지 않는다
+- Jetson-target TensorRT build / deployment policy 는 **Phase 2 에서 실제 환경으로 검증한 뒤
+  결정한다**
+
+이 판단의 근거: 현재 `jetson_deploy/model/model_v2plus_fp16.trt` 는 이 보드에서 빌드된
+것이고, 같은 보드에서 ORT TensorRT EP 가 첫 `run()` 에 SIGSEGV 를 낸 사례가 기록되어 있다
+([`JETSON_ENVIRONMENT.md`](JETSON_ENVIRONMENT.md) §10). engine 이식성을 낙관적으로 가정하면
+현장에서 곤란해진다.
+
+### Model version provenance
+
+model artifact 는 아래 provenance 를 연결할 수 있도록 architecture 를 정의한다.
+**지금 구현하지 않는다.**
+
+```
+model_id
+model_version
+git_commit
+dataset_version
+training_config
+metrics
+created_at
+artifact_sha256
+```
+
+Jetson 측에서는 향후 runtime metadata 에 아래를 기록할 수 있도록 확장 여지를 둔다.
+
+```
+deployed_model_id
+deployed_model_version
+artifact_sha256
+```
+
+**현재 Jetson code 는 수정하지 않는다.** 실제 automatic deployment / update mechanism 도
+구현하지 않으며 Phase 2 architecture 항목으로만 정의한다. 현재 Jetson 의 모델 배치는 수동이며
+`jetson_deploy/model/` 의 파일이 그 상태다.
 
 ---
 
-## 5. Authentication
+## 13. Security boundary
 
-- **API key 또는 JWT.** V1 은 API key 로 시작해도 충분하며, 조직·사용자 구분이 필요해지면
-  JWT 로 확장한다
-- **외부기관별 credential 분리.** 기관 단위로 발급·폐기·회전이 가능해야 한다.
-  한 기관의 키를 폐기해도 다른 기관이 영향받지 않아야 한다
-- 최소 권한: V1 credential 은 **read-only**. 쓰기 권한은 Jetson upload agent 전용의 별도
-  credential 로 분리하고, 그 credential 로는 조회 API 를 쓸 수 없게 한다
-- 접근 로그: 어느 기관이 어느 trial 을 언제 조회했는지 남긴다
-- **TBD**: 기관별로 볼 수 있는 trial 범위를 제한할 필요가 있는지 (전체 공개인지, scenario
-  단위인지) — 컨소시엄 협의 필요
-
----
-
-## 6. Web viewer (V1)
-
-과도한 dashboard 를 만들지 않는다. 화면 4개.
-
-1. **Dataset / Trial list** — scenario·severity·status·기간 필터, `test_mode` 기본 제외
-2. **Trial detail** — experiment metadata, sensor manifest(serial 포함), phase plan,
-   quality summary, 파일 목록
-3. **Sensor time-series viewer** — `scalars.csv` 기반. NTC / CT1 / PM / CO2 / BME680.
-   phase 경계와 invalid tick 을 시간축에 표시
-4. **Thermal viewer** — tick 슬라이더로 프레임 이동, min/max/mean °C 표시
-
-집계 통계, 사용자 정의 대시보드, 실시간 스트리밍은 V1 범위가 아니다.
-
----
-
-## 7. External consortium access
+**Jetson 을 public Internet 에 직접 노출하지 않는다.**
 
 ```
-컨소시엄 기관 --- HTTPS ---> 중앙 데이터 서버 API / Web viewer
-```
+기본 방향
+  Jetson  -> outbound upload           -> partner platform
+  Korea   -> authenticated remote access -> partner platform
 
-- 외부기관은 **중앙 서버만** 접근한다. Jetson 주소를 알 필요도, 알아서도 안 된다
-- 기관별 credential 로 인증하고 접근 로그를 남긴다
-- V1 은 read-only 이므로 외부기관이 데이터를 수정·삭제하거나 trial 을 실행할 수 없다
-- **TBD**: 공개 범위, 라이선스/이용 조건, 개인정보 해당 여부 — 컨소시엄 협의 필요
-
----
-
-## 8. Security boundary
-
-**가장 중요한 규칙: Jetson device 를 public Internet 에 직접 노출하지 않는다.**
-
-```
-  robot test area (신뢰 구역)          |   중앙 서버 (DMZ/클라우드)      |  외부기관
-  ----------------------------------- | ------------------------------ | -----------
-  Jetson                              |  HTTPS ingest (인증 필요)       |
-   - inbound port 개방 없음            |  HTTPS API (인증 필요)          |  read-only
-   - outbound HTTPS 만 사용            |  object store (비공개)          |  credential
-   - 외부에서 접속 불가                 |  DB (비공개)                    |
+사용하지 않는 구조
+  remote user -> Jetson direct inbound
 ```
 
 - Jetson 에 포트 포워딩, DDNS, 원격 접속 노출을 설정하지 않는다
-- Jetson 의 upload credential 은 **쓰기 전용**이며 조회 API 에 쓸 수 없다. 유출되어도
-  데이터 열람으로 이어지지 않는다
-- 중앙 서버는 TLS 종단, 인증, 접근 로그를 담당한다
-- object store 는 서버를 통해서만 접근한다. 버킷/디렉터리를 공개하지 않는다
-- **TBD**: 사내망/전용망 여부, 방화벽 정책, 기관 IP 제한 가능 여부
+- Jetson 은 outbound 만 사용한다. 원격에서 Jetson 으로 접속하지 않는다
 
----
+### Credential 분리
 
-## 9. Deployment options
-
-| 옵션 | 구성 | 적합한 경우 |
-|---|---|---|
-| **A. 단일 서버** | 1 VM 에 API + PostgreSQL + 파일시스템 + 정적 viewer | V1 규모(수 GB)에 충분. 가장 단순 |
-| **B. 관리형 분리** | 관리형 PostgreSQL + S3 호환 object storage + API 컨테이너 | 운영 부담을 낮추고 확장 여지를 둘 때 |
-| **C. 온프레미스** | 기관 내부 서버 + NAS | 데이터 반출 제약이 있을 때 |
-
-V1 데이터 규모가 작으므로 **A 로 시작해 필요 시 B 로 옮기는 것**을 권한다. 파일 접근을
-object-store 추상화 뒤에 두면 A → B 이전이 저렴해진다.
-
-**TBD**: 호스팅 주체, 데이터 보관 위치 제약, 백업 정책 — 컨소시엄 협의 필요.
-
----
-
-## 10. 서버의 세 가지 용도와 구현 순서
-
-서버는 최종적으로 아래 세 용도를 모두 지원할 수 있도록 **architecture 만 열어둔다.**
-구현은 단계적으로 한다.
-
-| 용도 | 내용 |
-|---|---|
-| **A. Dataset storage / external viewing** | trial 보관, 색인, read-only API, Web viewer, 컨소시엄 접근 |
-| **B. Server-side training** | 서버에 축적된 dataset 으로 학습 job 실행, 산출 모델·지표 보관 |
-| **C. Server-side batch / online inference** | 저장된 trial 에 대한 batch 추론, 또는 온라인 추론 API |
-
-열어둔다는 것의 의미: object store 를 추상화 뒤에 두고, trial 을 불변 단위로 다루며,
-DB 에 학습·추론 산출물을 붙일 자리를 남긴다는 뜻이다. **B/C 를 위한 코드를 지금 만들지
-않는다.**
+**하나의 credential 에 모든 권한을 주지 않는다.**
 
 ```
-Phase 1   storage + metadata + read-only API + viewer      <- 현재 계획 범위
-Phase 2   training job
-Phase 3   inference job / API
+Jetson              upload permission            (조회·모델 다운로드 불가)
+Korea researchers   read / export permission
+model deployment    separate authenticated mechanism
+```
+
+partner platform 의 authentication mechanism 자체는 **TBD** 이므로(§9-4), 위는 권한 분리
+원칙이며 구체적 구현 방식은 사양 확인 후 정한다.
+
+---
+
+## 14. External access 와 우리 자체 tool 의 위치
+
+**2027 German deployment 에서는 partner platform 이 이미 API / viewer 를 제공할 수 있다.**
+따라서 다음을 원칙으로 한다.
+
+- partner platform 의 existing viewer / API 가 충분하면 **재사용한다**
+- **부족한 기능만** 별도 research tool / API 로 보완한다
+- **동일 기능을 중복 구현하지 않는다**
+
+우리 자체 FastAPI / Web viewer 는 **production 필수 구성요소가 아니다.**
+
+```
+우리 자체 API / viewer 의 위치
+  candidate / fallback / development option
+```
+
+**partner interface 를 확인하기 전에는 production implementation 을 시작하지 않는다.**
+
+### 필요해질 경우의 후보 형태 (구현 아님)
+
+2026 개발 단계에서 로컬 데이터를 보기 위해, 또는 partner platform 이 특정 기능을 제공하지
+않을 때의 **후보** 다.
+
+```
+GET /api/v1/health
+GET /api/v1/trials                      목록 + 필터 (test_mode 기본 제외)
+GET /api/v1/trials/{trial_id}
+GET /api/v1/trials/{trial_id}/metadata  metadata + sensor_manifest + sensor_profile
+GET /api/v1/trials/{trial_id}/scalars   시계열 스칼라 (360행, 다운샘플링 불필요)
+GET /api/v1/trials/{trial_id}/thermal   프레임 인덱스 / 단일 프레임 / 원본 NPZ
+GET /api/v1/trials/{trial_id}/files     파일 목록 및 다운로드
+```
+
+- `scenario_id` · `phenomenon` · `display_name` 을 함께 제공한다 (§16)
+- 응답에 `quality` 요약과 `protocol_compliant` 를 포함해, **FFC 로 무효화된 window 를 모르고
+  학습에 쓰는 일**이 없게 한다
+- thermal 은 NPZ 를 그대로 내리면 웹에서 다루기 어렵다. 인덱스 / 단일 프레임(°C 변환은
+  `raw/100 - 273.15`) / 원본 다운로드를 분리한다
+
+viewer 후보 화면도 최소로 둔다: trial 목록 · trial 상세 · sensor time-series · thermal viewer.
+집계 dashboard 와 실시간 스트리밍은 범위가 아니다.
+
+### 연구용 local storage model (Korea workstation)
+
+**이것은 partner platform 의 저장 구조가 아니라 우리 연구 copy 의 구조다.**
+
+```
+경량 DB (SQLite 또는 PostgreSQL)   metadata / search index
+   trial, sensor_unit, quality, file, import record, annotation, dataset_version
+
+파일시스템 (또는 S3 호환)           raw file — 원본 형식 그대로
+```
+
+`snapshots.jsonl` 의 tick 단위 레코드를 관계형 DB 에 넣지 않는다. 목록·조회·다운로드에
+필요하지 않다. 시계열 질의가 실제로 필요해지면 그때 별도로 검토한다.
+
+---
+
+## 15. Phase 와 구현 경계
+
+```
+Phase 1   dataset 확보 경로 정리 · metadata/index · provenance ·
+          (필요 시) 로컬 조회 도구
+Phase 2   dataset versioning · training jobs · evaluation ·
+          model registry · model artifact export / delivery
+Phase 3   batch re-inference jobs · model comparison ·
+          prediction result management
 ```
 
 Phase 1 이 끝나고 실제 dataset 이 쌓인 뒤에 Phase 2 를 시작한다. Phase 2 없이 Phase 3 를
 먼저 하지 않는다.
 
----
+> **German Jetson 의 real-time edge inference 는 Phase 3 서버 기능이 아니다.** 이미 별도로
+> 존재하는 edge runtime 역할이며(`jetson_deploy/` + ONNX/TensorRT), 서버 phase 진행과
+> 무관하게 동작한다.
 
-## 11. MVP scope (Phase 1)
+### 이번 단계에서 구현하지 않는 것
 
-**포함**
+```
+upload agent 구현
+FastAPI 구현
+DB schema 구현
+web viewer 구현
+training 변경
+Jetson collector 변경
+model artifact 변경
+trial 실행
+```
 
-- Jetson upload agent (outbound, 완료된 trial 디렉터리 업로드, sha256 검증, 재시도)
-- ingest endpoint + 무결성 검증 + 멱등 저장
-- DB 색인: trial / sensor_unit / quality / file
-- read-only API: `health`, `trials`, `trials/{id}`, `metadata`, `scalars`, `thermal`, `files`
-- API key 인증, 기관별 credential 분리, 접근 로그
-- Web viewer 4화면
-- `test_mode` trial 기본 제외
-
-**미포함 (V1 아님)**
-
-- 실시간 스트리밍, 원격 trial 실행/제어
-- annotation 편집 UI (스키마는 §3 에서 미리 분리해 두되 구현은 이후)
-- 모델 추론·학습 파이프라인 연동
-- 사용자 정의 dashboard, 집계 분석
-- 외부기관 쓰기 권한
+**partner platform specification 을 받기 전에 production upload / API code 를 만들지 않는다.**
 
 ---
 
-## 12. 해소해야 할 항목
-
-| 항목 | 상태 |
-|---|---|
-| anomaly induction procedure (3종) | **TBD — 컨소시엄 협의** |
-| robot payload / trajectory / speed / operating limit | **TBD — robot owner** |
-| sensor mounting location, robot cell / fence 변경 | **TBD — robot owner** |
-| heating location, particulate generation method | **TBD — 컨소시엄 협의** |
-| scenario_id 명칭 | **결정 완료** — 아래 |
-| 기관별 공개 범위 / 라이선스 | **TBD — 컨소시엄 협의** |
-| 호스팅 주체 / 보관 위치 / 백업 | **TBD** |
-
-### scenario_id 명칭 — 결정 완료 (2026-09-04)
+## 16. Scenario 식별자 — 결정 완료 (2026-09-04)
 
 **코드의 `scenario_id` 를 변경하지 않는다.** canonical machine ID 는 다음이며, trial runner /
-디렉터리 구조 / `experiment.json` / milestone `jetson-dataset-v1-ready-2026` 를 다시 바꾸지
+디렉터리 구조 / `experiment.json` / milestone `jetson-dataset-v1-ready-2026` 을 다시 바꾸지
 않는다.
 
 ```
 normal   overload   thermal_abnormal   dust
 ```
 
-연구 문서와 API 에서는 별도의 phenomenon / display name 을 쓴다 (§1). 두 층을 분리했으므로
-표기를 바꾸기 위해 이미 수집된 데이터의 식별자를 건드릴 필요가 없다.
+문서·API·viewer 는 phenomenon 과 display name 을 쓴다. 정본은
+[`JETSON_DATASET_PROTOCOL.md`](JETSON_DATASET_PROTOCOL.md) §1 이다.
+
+| scenario_id (machine) | phenomenon | display (EN / KO) | primary | secondary |
+|---|---|---|---|---|
+| `normal` | — | Normal / 정상 | — | — |
+| `overload` | `load_abnormality` | Load Abnormality / 부하 이상 | CT | NTC, FLIR |
+| `thermal_abnormal` | `thermal_abnormality` | Thermal Abnormality / 열 이상 | FLIR, NTC | CT |
+| `dust` | `particulate_abnormality` | Particulate Matter Abnormality / 입자상 물질 이상 | SPS30 | — |
+
+> **`overload` 라는 scenario_id 가 실제 정격 초과 운전을 의미한다고 해석하지 않는다.**
+> stable dataset identifier 일 뿐이다.
+
+API 응답은 세 값을 함께 제공한다.
+
+```json
+{ "scenario_id": "overload",
+  "phenomenon": "load_abnormality",
+  "display_name": { "en": "Load Abnormality", "ko": "부하 이상" } }
+```
+
+anomaly induction procedure 와 robot 관련 항목은 전부
+`TBD — consortium / robot owner confirmation required` 다
+([`JETSON_DATASET_PROTOCOL.md`](JETSON_DATASET_PROTOCOL.md) §1).
+
+---
+
+## 17. Open questions
+
+### HIGH PRIORITY
+
+추적은 [`CONSORTIUM_DATA_PLATFORM_QUESTIONS.md`](CONSORTIUM_DATA_PLATFORM_QUESTIONS.md) 에서
+한다 (P01 · P02 · P03 · P09 · P10 이 먼저 확인할 다섯 가지).
+
+| # | 항목 | 상태 |
+|---|---|---|
+| 1 | partner platform specification | **TBD — consortium partner confirmation required** |
+| 2 | German test site outbound network availability | **TBD** |
+| 3 | partner API / upload method | **TBD** |
+| 4 | Korea remote access method | **TBD** |
+| 5 | data retention / export policy | **TBD** |
+| 6 | model delivery mechanism to German Jetson | **TBD** |
+| 7 | raw data backup responsibility | **TBD** |
+| 8 | platform 이 programmatic training-data export 를 허용하는지 | **TBD** |
+
+2번과 8번은 특히 답에 따라 architecture 가 달라진다. outbound 회선이 없으면 §7 의 spool 은
+"업로드 대기" 가 아니라 "오프라인 반출" 설계가 되고, 8번이 불가하면 §10 의 학습 경로 자체를
+다시 짜야 한다.
+
+### Data governance
+
+독일 현장 데이터에 **사람을 식별할 수 있는 영상·정보가 포함되는 경우**의 data governance /
+access policy 는 consortium 확인 사항으로 둔다.
+
+**현재 FLIR 사용 자체가 personal data 를 포함한다고 단정하지 않는다.** 120×160 열화상의
+식별 가능성, 현장에 사람이 등장하는지, 독일·EU 규정 적용 여부는 확인이 필요한 별개 사안이다.
+확인 전에 "포함된다" 또는 "포함되지 않는다" 로 문서에 적지 않는다.
+
+### 기타
+
+| 항목 | 상태 |
+|---|---|
+| anomaly induction procedure (3종) | **TBD — 컨소시엄 협의** |
+| robot payload / trajectory / speed / operating limit | **TBD — robot owner** |
+| sensor mounting position, robot cell / fence 변경 | **TBD — robot owner** |
+| heating method / location, particulate generation method | **TBD — 컨소시엄 협의** |
+| 기관별 공개 범위 / 라이선스 | **TBD — 컨소시엄 협의** |
+| Korea workstation 연구 copy 의 백업 정책 | **TBD** |

@@ -24,14 +24,64 @@ recovery    개입을 멈춘 뒤의 관측 구간
 
 `phase` 는 **실험 절차의 서술**이다. 그 자체로 상태 label 이 아니다.
 
-### scenario_id — 유발한 고장 유형
+### scenario_id — 데이터셋 식별자 (machine ID)
+
+`scenario_id` 는 **안정적인 데이터셋 식별자**다. 이 값은 모든 trial 디렉터리 이름과
+`experiment.json` 에 박히므로 수집 시작 후 변경하지 않는다. 코드
+(`12_run_trial.py` 의 `SCENARIOS`) 와 디렉터리 구조가 이 값을 쓴다.
 
 ```
-normal              개입 없음 (정상 운전 기준선 수집)
-overload            과부하
-thermal_abnormal    냉각 이상 / 국부 과열
-dust                분진
+normal
+overload
+thermal_abnormal
+dust
 ```
+
+> **`overload` 라는 식별자가 실제 정격 초과 운전을 의미한다고 해석하지 않는다.**
+> 이것은 stable dataset identifier 일 뿐이며, 물리 현상의 정의는 아래 phenomenon 이다.
+
+### phenomenon / display name — 연구 문서와 API 표기
+
+기계용 식별자와 사람이 읽는 이름을 분리한다. 문서·논문·API 응답·Web viewer 는 아래
+phenomenon 과 display name 을 쓴다.
+
+| scenario_id (machine) | phenomenon | display (EN / KO) | 정의 | primary | secondary |
+|---|---|---|---|---|---|
+| `normal` | — | Normal / 정상 | 개입 없음, 정상 운전 기준선 | — | — |
+| `overload` | `load_abnormality` | Load Abnormality / 부하 이상 | 정상 운전 대비 electrical·mechanical load signature 변화 | CT | NTC, FLIR |
+| `thermal_abnormal` | `thermal_abnormality` | Thermal Abnormality / 열 이상 | local·system thermal signature 변화 | FLIR, NTC | CT |
+| `dust` | `particulate_abnormality` | Particulate Matter Abnormality / 입자상 물질 이상 | airborne particulate concentration 변화 | SPS30 | — |
+
+**2026 범위에서 이상상태는 physical phenomenon 수준으로만 정의한다.**
+
+### anomaly induction 방법 — 전부 TBD
+
+구체적인 anomaly induction procedure 는 **컨소시엄 협의 후 결정한다.** 다음은 현재
+확정하지 않는다.
+
+```
+TBD — consortium / robot owner confirmation required
+
+  robot payload
+  trajectory
+  speed
+  operating limit
+  sensor mounting position
+  robot cell / fence modification
+  heating method / location
+  particulate generation method
+```
+
+현재 확인된 사실은 이것뿐이다: fenced robot test area 약 2평, robot arm 1대 설치,
+**robot 은 컨소시엄 참여기관 소유·운영 설비**, 이 환경에서 Jetson multi-sensor
+acquisition system 을 사용한다.
+
+> **기존 문서에 기술된 손난로, 온수병, 히터 등의 이상상태 유발 방식은 예시이며 현재
+> 확정된 현장 실험 절차가 아니다. 실제 intervention 방법은 로봇 소유·운영기관 및
+> 컨소시엄 협의 후 결정한다.**
+>
+> (`docs/이상상태_시나리오_및_데이터수집전략.md` 는 작성 출처와 산출물 성격이 불확실하여
+> 원문을 보존한다. 그 문서의 유발 방식 서술은 이 절이 대체한다.)
 
 ### severity_level — 데이터셋 독립 ontology
 

@@ -54,12 +54,23 @@ Python 실행은 런처를 쓴다. plain `python3` 를 쓰지 않는다.
 
 ## 3. SERVER-TRAINING 에서 작업할 때
 
+**READ FIRST — 이 순서로 읽는다.**
+
+1. [docs/SERVER_WORKSTATION_HANDOFF.md](docs/SERVER_WORKSTATION_HANDOFF.md) — canonical handoff.
+   현재 상태, 준비된 데이터, raw 획득 방법, first-run 절차, 아직 하면 안 되는 것
+2. [docs/ENVIRONMENT_POLICY.md](docs/ENVIRONMENT_POLICY.md)
+3. [docs/SERVER_ENVIRONMENT.md](docs/SERVER_ENVIRONMENT.md)
+4. [docs/DATA_PLATFORM_ARCHITECTURE.md](docs/DATA_PLATFORM_ARCHITECTURE.md)
+
 `docs/SERVER_ENVIRONMENT.md` 는 현재 **PENDING SERVER ENVIRONMENT AUDIT** 상태다.
 Jetson에서 수집한 버전을 서버 환경으로 가정하지 않는다. 서버에서 직접 audit한 뒤 채운다.
 
 - venv: `$HOME/venvs/factory_training`
 - requirements: `requirements-server.txt` (아직 비어 있음)
 - Jetson 센서 패키지를 이 환경에 설치하지 않는다
+- **raw dataset 은 GitHub 에 없다.** `dataset/` 과 `processed/` 는 `.gitignore` 대상이다.
+  clone 만으로는 데이터가 생기지 않는다 — handoff 문서 §3 참조
+- 첫 작업은 학습이 아니라 **environment audit → raw checksum 검증 → preprocessing 재현**이다
 
 ## 4. 저장소 상태에서 알고 있어야 할 것
 

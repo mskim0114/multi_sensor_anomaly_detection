@@ -1,5 +1,9 @@
 # 서버 학습 환경 (SERVER-TRAINING)
 
+> **First read: [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)** — 서버에서
+> 처음 작업할 때의 canonical handoff (현재 상태, 준비된 데이터, first-run 절차).
+> 이 문서의 실제 hardware/software 값은 workstation audit 전까지 아래 상태를 유지한다.
+
 ## 상태
 
 ```

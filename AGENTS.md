@@ -6,6 +6,11 @@
 관련 문서: [docs/JETSON_ENVIRONMENT.md](docs/JETSON_ENVIRONMENT.md) (실측값),
 [docs/SERVER_ENVIRONMENT.md](docs/SERVER_ENVIRONMENT.md)
 
+> **SERVER-TRAINING (non-Jetson Linux workstation) 에서 작업한다면
+> [docs/SERVER_WORKSTATION_HANDOFF.md](docs/SERVER_WORKSTATION_HANDOFF.md) 를 먼저 읽는다.**
+> 현재 프로젝트 상태, 준비된 development baseline, raw data 획득 방법(GitHub 에 없다),
+> canonical first-run 절차, reproduction PASS 전까지 금지되는 작업이 그 문서에 있다.
+
 > `jetson_deploy/codex_context/AGENTS.md` 는 별개 파일이다. 그것은 2026-05-22 스냅샷 기준의
 > Codex 전용 컨텍스트이며 일부 내용이 오래되었다. 충돌하면 **이 루트 파일이 우선한다.**
 
@@ -20,6 +25,11 @@
 
 두 영역의 의존성을 섞지 않는다. Jetson 센서 패키지를 학습 환경에, PyTorch를 Jetson 런타임에
 설치하지 않는다.
+
+`jetson_deploy/` = physical acquisition + real-time edge inference.
+`src/` = raw import, preprocessing, training, evaluation, model export.
+**서버는 real-time field inference node 가 아니다** —
+[docs/DATA_PLATFORM_ARCHITECTURE.md](docs/DATA_PLATFORM_ARCHITECTURE.md).
 
 **환경이 불명확하면 자동 설치하지 말고 먼저 판별한다.**
 

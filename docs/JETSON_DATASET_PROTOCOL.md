@@ -169,6 +169,30 @@ frame_age_ms > 500                        ->  tick thermal invalid
 
 구현은 `jetson_deploy/sensors/snapshot.py` 의 `tick_quality()` / `window_quality()` 다.
 
+### FFC invalidity 는 random missingness 가 아니다
+
+2026-09-04 development baseline (normal 5 trial x 360 s, 60 window) 실측:
+
+```
+stale tick sequence     28~31 과 211~214 두 군데에만 몰림
+trial 내 invalid window  window 0: 2/5    window 1: 4/5    window 7: 5/5
+전체                     60 window 중 11 invalid (18.3 %), 사유는 flir_stale 뿐
+```
+
+FFC 위상이 camera open 기준으로 반복되기 때문에 **손실이 trial 시간축에 균등하게 흩어지지
+않고 같은 구간에 계통적으로 몰린다.** window 7 은 5 trial 전부 손실됐다.
+
+**anomaly experiment 를 설계할 때 반드시 고려한다.** intervention 구간이 그 위치와 겹치면
+해당 구간이 통째로 학습에서 빠진다. 18.3 % 를 무작위 결측으로 가정하고 phase 배치를
+정하면 안 된다.
+
+이 관측 때문에 정책을 바꾸지는 않는다. **FFC manual mode 전환 금지, post-FFC exclusion
+rule 추가 금지, interpolation 금지, stale frame 대체 금지.**
+
+같은 baseline 에서 FLIR `max_c 50.66 C` / `min_c 15.23 C` outlier 가 관측됐다. 해당 tick
+자체는 `age < 500 ms` 로 valid 였고, 인접한 FFC stale tick 때문에 같은 window 가 invalid
+가 되어 결과적으로 제외됐다. **이 값을 새로운 automatic threshold 로 쓰지 않는다.**
+
 ---
 
 ## 6. 디렉터리 구조
@@ -497,3 +521,31 @@ tick 270 부터 normal 같은 label 을 자동 부여하지 않는다. `observed
   이상상태를 정의할 때 이미 장기 축적된 정상/이상 환경 데이터가 남아 있게 된다.
   수집 계층을 모델 입력과 분리한 가장 큰 이득이 이것이다
 - collector 는 **관측 사실만 기록한다.** 추정·보간·정규화·라벨 유도를 하지 않는다
+
+---
+
+## 14. CT1 은 현재 no-load noise floor 다
+
+2026-09-04 development baseline 실측. ADS1115 PGA ±2.048 V, 16-bit -> 1 LSB = 62.5 uV:
+
+```
+no-load differential   약 +-1~2 LSB
+vrms                   약 0.46~0.61 LSB   (2.90e-05 ~ 3.78e-05 V)
+current_a_nominal      약 0.0196 A
+clipping               0 tick
+```
+
+vrms 가 1 LSB 의 절반이다. 따라서 `current_a_nominal ~= 0.0196 A` 는 측정된 전류가 아니라
+**ADC/analog noise floor 를 CT nominal 환산식에 통과시킨 값**이다. `std ~1.5e-04 A` 도 실제
+전류 변동이 아니다.
+
+다음을 하지 않는다.
+
+- 0.0196 A 를 **정상 운전 전류로 문서화하지 않는다**
+- **anomaly threshold 로 쓰지 않는다**
+- **calibration 결과로 쓰지 않는다**
+
+known-load 또는 실제 robot 운전 CT 데이터가 생기기 전까지 이 채널은
+**CT1 no-load / noise-floor baseline** 으로만 취급한다.
+
+hardware gain / PGA / burden 저항은 변경하지 않는다.

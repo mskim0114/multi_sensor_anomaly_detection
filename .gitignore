@@ -123,3 +123,6 @@ ENV/
 
 # Official raw dataset - never committed
 /dataset/
+
+# Generated 30-second windows built from raw trials (regenerable, large)
+/processed/

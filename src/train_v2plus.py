@@ -10,11 +10,16 @@ Usage:
 import sys
 import argparse
 import contextlib
+import datetime as dt
 import hashlib
 import json
 import logging
 import os
+import platform
 import random
+import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -26,7 +31,7 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classifi
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.paths import project_path
+from src.paths import PROJECT_ROOT, project_path
 
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.v2_plus import V2Plus, SupConLoss
@@ -46,7 +51,9 @@ def enable_fast_math():
     torch.backends.cudnn.benchmark = True
     logger.info("Fast math enabled: TF32 matmul, TF32 cudnn, cudnn benchmark=True")
 
-RESULTS_DIR = project_path("results/v2plus")
+# Default output location. Pass --results-dir to write a new run elsewhere; the paper
+# run lives here and must not be overwritten by later experiments.
+DEFAULT_RESULTS_DIR = "results/v2plus"
 
 
 def train_one_epoch(model, loader, ce_criterion, supcon_criterion,
@@ -99,6 +106,38 @@ def train_one_epoch(model, loader, ce_criterion, supcon_criterion,
     acc = accuracy_score(all_labels, all_preds)
     f1 = f1_score(all_labels, all_preds, average="macro")
     return avg_loss, acc, f1
+
+
+def run_provenance(args) -> dict:
+    """Facts a later reader needs to trust or reproduce this run.
+
+    §11 of the research brief requires git commit, dirty state, environment and the exact
+    command for every training run; no earlier run recorded them, which is why the legacy
+    results carry `no_record` in the experiment index. A dirty tree is recorded as such,
+    never hidden: AGENTS §5 forbids citing results from a dirty revision.
+    """
+    def git(*a):
+        try:
+            return subprocess.run(["git", "-C", str(PROJECT_ROOT), *a], capture_output=True,
+                                  text=True, timeout=10, check=True).stdout.strip()
+        except Exception:
+            return None
+    porcelain = git("status", "--porcelain")
+    return {
+        "git_commit": git("rev-parse", "HEAD"),
+        "git_branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "git_dirty": None if porcelain is None else bool(porcelain),
+        "hostname": socket.gethostname(),
+        "environment_profile": "SERVER-TRAINING",
+        "python_executable": sys.executable,
+        "python_version": platform.python_version(),
+        "torch_version": torch.__version__,
+        "torch_cuda": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version() if torch.cuda.is_available() else None,
+        "gpu_name": torch.cuda.get_device_name(args.gpu) if torch.cuda.is_available() else None,
+        "command": " ".join(sys.argv),
+        "started_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
 
 
 def state_dict_sha256(model) -> str:
@@ -159,6 +198,10 @@ def main():
                         help="Weight for SupCon loss (0=CE only, 1=SupCon only)")
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--gpu", type=int, default=1)
+    parser.add_argument("--results-dir", default=DEFAULT_RESULTS_DIR,
+                        help="Output directory, relative to the checkout unless absolute. "
+                             f"Default {DEFAULT_RESULTS_DIR} is the paper run - use a new "
+                             "directory for any re-run so it is never overwritten.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed. Set BEFORE the model is built, so it "
                              "controls the initial weights as well as the sample order.")
@@ -240,7 +283,13 @@ def main():
     history = {"train_loss": [], "train_acc": [], "train_f1": [],
                "val_loss": [], "val_acc": [], "val_f1": [], "lr": []}
 
-    Path(RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+    results_dir = project_path(args.results_dir)
+    if os.path.exists(os.path.join(results_dir, "results.json")):
+        logger.warning(f"{results_dir}/results.json already exists and will be overwritten")
+    Path(results_dir).mkdir(parents=True, exist_ok=True)
+    provenance = run_provenance(args)
+    logger.info(f"Provenance: commit={str(provenance['git_commit'])[:7]} dirty={provenance['git_dirty']} "
+                f"host={provenance['hostname']} torch={provenance['torch_version']}")
 
     logger.info(f"\n{'Epoch':>5s} {'TrLoss':>8s} {'TrAcc':>7s} {'TrF1':>7s} "
                 f"{'VaLoss':>8s} {'VaAcc':>7s} {'VaF1':>7s} {'LR':>10s} {'Time':>6s}")
@@ -283,7 +332,7 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_f1": val_f1,
                 "val_acc": val_acc,
-            }, os.path.join(RESULTS_DIR, "best_model.pt"))
+            }, os.path.join(results_dir, "best_model.pt"))
             logger.info(f"  ★ New best model saved (F1={val_f1:.4f})")
 
     # Final evaluation
@@ -291,7 +340,7 @@ def main():
     logger.info("Final evaluation with best model")
     logger.info("=" * 60)
 
-    ckpt = torch.load(os.path.join(RESULTS_DIR, "best_model.pt"), weights_only=False)
+    ckpt = torch.load(os.path.join(results_dir, "best_model.pt"), weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     val_loss, val_acc, val_f1, val_preds, val_labels = evaluate(
         model, val_loader, ce_criterion, device, use_amp=args.amp,
@@ -332,11 +381,12 @@ def main():
         "seed": args.seed,
         "seed_controls_init": True,
         "initial_state_sha256": init_state_sha256,
+        "provenance": {**provenance, "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat()},
     }
-    with open(os.path.join(RESULTS_DIR, "results.json"), "w") as f:
+    with open(os.path.join(results_dir, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    logger.info(f"\nResults saved to {RESULTS_DIR}/")
+    logger.info(f"\nResults saved to {results_dir}/")
 
 
 if __name__ == "__main__":

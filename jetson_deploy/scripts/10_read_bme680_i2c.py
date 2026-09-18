@@ -40,6 +40,11 @@ from fcntl import ioctl
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from sensors.runtime import AcquisitionBusyError, AcquisitionLock
+
 DEFAULT_OUT_DIR = ROOT / "results" / "bme680"
 DEFAULT_I2C_PORT = "/dev/i2c-7"
 DEFAULT_ADDRESS = 0x77
@@ -149,6 +154,15 @@ def main() -> int:
         print("--samples must be at least 1", file=sys.stderr)
         return 2
 
+    try:
+        with AcquisitionLock():
+            return run(args)
+    except AcquisitionBusyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def run(args: argparse.Namespace) -> int:
     print(f"I2C port: {args.i2c_port}")
     print(f"I2C address: 0x{args.address:02x}")
 

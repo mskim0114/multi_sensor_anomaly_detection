@@ -27,6 +27,11 @@ from sensirion_i2c_sps30.device import Sps30Device
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from sensors.runtime import AcquisitionBusyError, AcquisitionLock
+
 DEFAULT_OUT_DIR = ROOT / "results" / "sps30"
 DEFAULT_I2C_PORT = "/dev/i2c-1"
 SPS30_I2C_ADDRESS = 0x69
@@ -133,6 +138,15 @@ def main() -> int:
     parser.add_argument("--format", choices=("float", "uint16"), default="float")
     args = parser.parse_args()
 
+    try:
+        with AcquisitionLock():
+            return run(args)
+    except AcquisitionBusyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def run(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     prefix = f"sps30_{time.strftime('%Y%m%d_%H%M%S')}"
 

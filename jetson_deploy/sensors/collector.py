@@ -29,6 +29,7 @@ vector or the inference pipeline.
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 import os
 import queue
@@ -36,7 +37,7 @@ import threading
 import time
 from dataclasses import dataclass
 from fcntl import ioctl
-from typing import Any
+from typing import Any, Callable
 
 from .snapshot import (
     SCHEMA_VERSION,
@@ -229,6 +230,9 @@ class Ads1115Owner:
         clipping = int(((arr >= ADC_CODE_MAX) | (arr <= ADC_CODE_MIN)).sum())
 
         return {
+            "acquisition_start_monotonic_ns": t_start,
+            "acquisition_end_monotonic_ns": t_end,
+            "acquisition_center_monotonic_ns": (t_start + t_end) // 2,
             "sample_count": len(codes),
             "capture_duration_ms": round(capture_ms, 3),
             "actual_sample_rate": None if actual_sps is None else round(actual_sps, 2),
@@ -247,6 +251,8 @@ class Ads1115Owner:
         config = (OS_START_SINGLE | ((0x04 + NTC_CHANNEL) << 12) | PGA_FSR[NTC_PGA]
                   | MODE_SINGLE_SHOT | DATA_RATE_BITS[NTC_DATA_RATE] | COMP_QUE_DISABLE)
         settle = (1.0 / NTC_DATA_RATE) + 0.01
+        acquisition_start_ns = time.monotonic_ns()
+        primary_error: BaseException | None = None
         try:
             # First conversion after the MUX/PGA change is discarded.
             self._write_reg(REG_CONFIG, config)
@@ -256,12 +262,15 @@ class Ads1115Owner:
             self._write_reg(REG_CONFIG, config)
             time.sleep(settle)
             raw = _twos_complement_16(self._read_reg(REG_CONVERSION))
+            acquisition_end_ns = time.monotonic_ns()
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
-            # Restore CT configuration for the next tick regardless of outcome.
-            try:
+            # Do not issue another bus write after the first communication
+            # failure. A later run always enters CT mode during startup.
+            if primary_error is None:
                 self.enter_ct_mode()
-            except Exception:
-                pass
 
         voltage = raw * NTC_PGA / 32768.0
         if voltage <= 0.0 or voltage >= NTC_VCC:
@@ -269,6 +278,10 @@ class Ads1115Owner:
         resistance = NTC_FIXED_R * voltage / (NTC_VCC - voltage)
         inv_t = (1.0 / NTC_T0_K) + (math.log(resistance / NTC_R0) / NTC_BETA)
         return {
+            "acquisition_start_monotonic_ns": acquisition_start_ns,
+            "acquisition_end_monotonic_ns": acquisition_end_ns,
+            "acquisition_center_monotonic_ns": (
+                acquisition_start_ns + acquisition_end_ns) // 2,
             "raw_code": raw,
             "voltage_v": voltage,
             "resistance_ohm": resistance,
@@ -276,10 +289,7 @@ class Ads1115Owner:
         }
 
     def close(self) -> None:
-        try:
-            os.close(self.fd)
-        except Exception:
-            pass
+        os.close(self.fd)
 
 
 # --------------------------------------------------------------------------
@@ -292,18 +302,48 @@ class SensorState:
     total_errors: int = 0
     total_ok: int = 0
     last_error: str | None = None
+    last_successful_operation: str | None = None
     handle: Any = None
-    _retry_at_seq: int = 0
 
-    def ok(self) -> None:
+    def ok(self, operation: str | None = None) -> None:
         self.consecutive_errors = 0
         self.total_ok += 1
         self.last_error = None
+        if operation is not None:
+            self.last_successful_operation = operation
 
     def fail(self, exc: BaseException) -> None:
         self.consecutive_errors += 1
         self.total_errors += 1
         self.last_error = f"{type(exc).__name__}: {exc}"
+
+
+def _error_record(operation: str, exc: BaseException,
+                  last_successful_operation: str | None = None) -> dict:
+    """Stable, JSON-serialisable evidence for the first acquisition failure."""
+    chain = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append({
+            "exception_class": type(current).__name__,
+            "message": str(current),
+            "errno": getattr(current, "errno", None),
+        })
+        current = current.__cause__ or current.__context__
+    errno_value = next((item["errno"] for item in chain
+                        if item["errno"] is not None), None)
+    return {
+        "operation": operation,
+        "exception_class": type(exc).__name__,
+        "message": str(exc),
+        "errno": errno_value,
+        "exception_chain": chain,
+        "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "monotonic_ns": time.monotonic_ns(),
+        "last_successful_operation": last_successful_operation,
+    }
 
 
 @dataclass
@@ -327,9 +367,11 @@ class Bus1Worker(threading.Thread):
 
     POLL_S = 0.25
 
-    def __init__(self, i2c_port: str = BUS1) -> None:
+    def __init__(self, i2c_port: str = BUS1,
+                 on_error: Callable[[str, BaseException, str | None], None] | None = None) -> None:
         super().__init__(name="bus1", daemon=True)
         self.i2c_port = i2c_port
+        self._on_error = on_error
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._sps30: Reading | None = None
@@ -343,6 +385,12 @@ class Bus1Worker(threading.Thread):
         # Physical identity, read once at setup. Only values actually returned
         # by the device are stored; nothing is synthesised.
         self.identity: dict[str, dict] = {}
+
+    def _fail(self, state: SensorState, operation: str, exc: BaseException) -> None:
+        state.fail(exc)
+        if self._on_error is not None:
+            self._on_error(operation, exc, state.last_successful_operation)
+        self._stop_event.set()
 
     # -- setup -------------------------------------------------------------
     def _setup(self) -> None:
@@ -359,14 +407,8 @@ class Bus1Worker(threading.Thread):
 
         try:
             self._sps = Sps30Device(I2cChannel(conn, slave_address=SPS30_ADDRESS, crc=crc))
-            try:
-                self._sps.wake_up_sequence()
-            except Exception:
-                pass
-            try:
-                self._sps.stop_measurement()
-            except Exception:
-                pass
+            self._sps.wake_up_sequence()
+            self._sps.stop_measurement()
             self.identity["sps30"] = self._read_identity(self._sps, (
                 ("serial", "read_serial_number"),
                 ("product_type", "read_product_type"),
@@ -374,9 +416,11 @@ class Bus1Worker(threading.Thread):
             ))
             # Started once and left running; not restarted per tick.
             self._sps.start_measurement(OutputFormat.OUTPUT_FORMAT_FLOAT)
+            self.sps30_state.last_successful_operation = "sps30.start_measurement"
         except Exception as exc:
-            self.sps30_state.fail(exc)
+            self._fail(self.sps30_state, "sps30.setup", exc)
             self._sps = None
+            return
 
         try:
             self._scd = Scd30Device(I2cChannel(conn, slave_address=SCD30_ADDRESS, crc=crc))
@@ -385,8 +429,9 @@ class Bus1Worker(threading.Thread):
                 ("firmware", "read_firmware_version"),
             ))
             self._scd.start_periodic_measurement(0)
+            self.scd30_state.last_successful_operation = "scd30.start_periodic_measurement"
         except Exception as exc:
-            self.scd30_state.fail(exc)
+            self._fail(self.scd30_state, "scd30.setup", exc)
             self._scd = None
 
     # -- helpers -----------------------------------------------------------
@@ -399,10 +444,7 @@ class Bus1Worker(threading.Thread):
         """
         out: dict = {}
         for key, method in fields:
-            try:
-                value = cls._plain(getattr(device, method)())
-            except Exception:
-                continue
+            value = cls._plain(getattr(device, method)())
             if value is not None:
                 out[key] = str(value)
         return out
@@ -434,6 +476,8 @@ class Bus1Worker(threading.Thread):
             self._setup()
         except Exception as exc:
             self.startup_error = f"{type(exc).__name__}: {exc}"
+            if self._on_error is not None:
+                self._on_error("bus1.setup", exc, None)
             return
 
         while not self._stop_event.is_set():
@@ -446,9 +490,10 @@ class Bus1Worker(threading.Thread):
                             "temperature_c": float(temp),
                             "humidity_pct": float(rh),
                         })
-                        self.scd30_state.ok()
+                        self.scd30_state.ok("scd30.read_measurement_data")
                 except Exception as exc:
-                    self.scd30_state.fail(exc)
+                    self._fail(self.scd30_state, "scd30.poll_and_read", exc)
+                    return
 
             if self._sps is not None:
                 try:
@@ -461,27 +506,38 @@ class Bus1Worker(threading.Thread):
                             "nc2_5_per_cm3": v[6], "nc4_0_per_cm3": v[7],
                             "nc10_per_cm3": v[8], "typical_particle_size_um": v[9],
                         })
-                        self.sps30_state.ok()
+                        self.sps30_state.ok("sps30.read_measurement_values_float")
                 except Exception as exc:
-                    self.sps30_state.fail(exc)
+                    self._fail(self.sps30_state, "sps30.poll_and_read", exc)
+                    return
 
             self._stop_event.wait(self.POLL_S)
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout_s: float = 3.0, *,
+                 skip_device_commands: bool = False) -> list[dict]:
+        errors: list[dict] = []
         self._stop_event.set()
-        self.join(timeout=3.0)
-        for dev, stop in ((self._sps, "stop_measurement"),
-                          (self._scd, "stop_periodic_measurement")):
-            if dev is not None:
-                try:
-                    getattr(dev, stop)()
-                except Exception:
-                    pass
+        if self.ident is not None:
+            self.join(timeout=timeout_s)
+        if self.is_alive():
+            errors.append(_error_record(
+                "bus1.join", TimeoutError(f"bus1 worker did not stop within {timeout_s}s")))
+            return errors
+        if not skip_device_commands:
+            for dev, stop in ((self._sps, "stop_measurement"),
+                              (self._scd, "stop_periodic_measurement")):
+                if dev is not None:
+                    try:
+                        getattr(dev, stop)()
+                    except Exception as exc:
+                        errors.append(_error_record(f"bus1.{stop}", exc))
+                        break
         if self._transceiver is not None:
             try:
                 self._transceiver.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                errors.append(_error_record("bus1.close", exc))
+        return errors
 
 
 # --------------------------------------------------------------------------
@@ -499,9 +555,11 @@ class ThermalWorker(threading.Thread):
     MODEL_HEIGHT = 120
     MODEL_WIDTH = 160
 
-    def __init__(self, device: str = "/dev/video0") -> None:
+    def __init__(self, device: str = "/dev/video0",
+                 on_error: Callable[[str, BaseException, str | None], None] | None = None) -> None:
         super().__init__(name="thermal", daemon=True)
         self.device = device
+        self._on_error = on_error
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._frame = None
@@ -526,28 +584,31 @@ class ThermalWorker(threading.Thread):
             self._open()
         except Exception as exc:
             self.startup_error = f"{type(exc).__name__}: {exc}"
+            self.state.fail(exc)
+            if self._on_error is not None:
+                self._on_error("flir.open", exc, self.state.last_successful_operation)
             return
         while not self._stop_event.is_set():
             try:
                 ok, frame = self._cap.read()
                 if not ok or frame is None:
-                    self.state.fail(RuntimeError("frame read failed"))
-                    time.sleep(0.02)
-                    continue
+                    raise RuntimeError("frame read failed")
                 if frame.ndim != 2 or frame.shape[1] != self.MODEL_WIDTH \
                         or frame.shape[0] < self.MODEL_HEIGHT:
                     self.shape_failures += 1
-                    self.state.fail(RuntimeError(f"unexpected frame shape {frame.shape}"))
-                    continue
+                    raise RuntimeError(f"unexpected frame shape {frame.shape}")
                 image = frame[: self.MODEL_HEIGHT, : self.MODEL_WIDTH].copy()
                 with self._lock:
                     self._frame = image
                     self._frame_ns = time.monotonic_ns()
                     self._sequence += 1
-                self.state.ok()
+                self.state.ok("flir.read")
             except Exception as exc:
                 self.state.fail(exc)
-                time.sleep(0.05)
+                if self._on_error is not None:
+                    self._on_error("flir.read", exc, self.state.last_successful_operation)
+                self._stop_event.set()
+                return
 
     def read_identity(self) -> dict:
         """USB descriptors from sysfs. Only fields actually present are kept."""
@@ -585,14 +646,21 @@ class ThermalWorker(threading.Thread):
                 return None, 0, 0
             return self._frame, self._frame_ns, self._sequence
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout_s: float = 3.0) -> list[dict]:
+        errors: list[dict] = []
         self._stop_event.set()
-        self.join(timeout=3.0)
+        if self.ident is not None:
+            self.join(timeout=timeout_s)
+        if self.is_alive():
+            errors.append(_error_record(
+                "flir.join", TimeoutError(f"thermal worker did not stop within {timeout_s}s")))
+            return errors
         if self._cap is not None:
             try:
                 self._cap.release()
-            except Exception:
-                pass
+            except Exception as exc:
+                errors.append(_error_record("flir.release", exc))
+        return errors
 
 
 # --------------------------------------------------------------------------
@@ -615,8 +683,12 @@ class ChunkWriter(threading.Thread):
     QUEUE_MAXSIZE = 8            # 8 thermal chunks = 240 s of buffer
     SUBMIT_TIMEOUT_S = 0.05      # absorb transient slowness, never a long stall
 
-    def __init__(self) -> None:
-        super().__init__(name="chunkwriter", daemon=False)
+    def __init__(self,
+                 on_error: Callable[[str, BaseException, str | None], None] | None = None) -> None:
+        # Atomic target replacement means a timed-out writer can safely be left
+        # as a daemon: at worst an unreferenced .tmp remains, never a partial NPZ.
+        super().__init__(name="chunkwriter", daemon=True)
+        self._on_error = on_error
         self.q: queue.Queue = queue.Queue(maxsize=self.QUEUE_MAXSIZE)
         self.written = 0
         self.errors = 0
@@ -624,52 +696,102 @@ class ChunkWriter(threading.Thread):
         self.degraded_events: list[dict] = []
         self.max_queue_depth = 0
         self.last_error: str | None = None
-        self._sentinel = object()
+        self._last_successful_operation: str | None = None
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_started = False
+
+    def _record_failure(self, operation: str, exc: BaseException,
+                        *, chunk=None, dropped: bool = False) -> None:
+        if dropped:
+            self.dropped += 1
+        else:
+            self.errors += 1
+        self.last_error = f"{type(exc).__name__}: {exc}"
+        event = {
+            "reason": operation,
+            "error": self.last_error,
+        }
+        if chunk is not None:
+            event["chunk"] = str(getattr(chunk, "name", chunk))
+        self.degraded_events.append(event)
+        if self._on_error is not None:
+            self._on_error(operation, exc, self._last_successful_operation)
 
     def submit(self, path, arrays: dict) -> bool:
         """Queue one chunk. Returns False and records degradation if refused."""
+        if self._shutdown_started:
+            self._record_failure(
+                "writer_submit_after_shutdown", RuntimeError("chunk writer is shutting down"),
+                chunk=path, dropped=True)
+            return False
         try:
             self.q.put((path, arrays), timeout=self.SUBMIT_TIMEOUT_S)
         except queue.Full:
-            self.dropped += 1
-            self.degraded_events.append({
-                "chunk": str(getattr(path, "name", path)),
-                "reason": "writer_queue_full",
-                "queue_maxsize": self.QUEUE_MAXSIZE,
-            })
+            self._record_failure(
+                "writer_queue_full", queue.Full(f"queue maxsize={self.QUEUE_MAXSIZE}"),
+                chunk=path, dropped=True)
             return False
         depth = self.q.qsize()
         if depth > self.max_queue_depth:
             self.max_queue_depth = depth
+        self._last_successful_operation = "chunkwriter.submit"
         return True
 
     def run(self) -> None:
         import numpy as np
         while True:
-            item = self.q.get()
             try:
-                if item is self._sentinel:
+                item = self.q.get(timeout=0.1)
+            except queue.Empty:
+                if self._shutdown_started:
                     return
+                continue
+            try:
                 path, arrays = item
                 try:
-                    np.savez_compressed(path, **arrays)
+                    temporary = path.with_name(path.name + ".tmp")
+                    try:
+                        with temporary.open("wb") as f:
+                            np.savez_compressed(f, **arrays)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(temporary, path)
+                        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+                    finally:
+                        if temporary.exists():
+                            temporary.unlink()
                     self.written += 1
+                    self._last_successful_operation = "chunkwriter.atomic_write"
                 except Exception as exc:
-                    self.errors += 1
-                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self._record_failure("writer_atomic_write", exc, chunk=path)
             finally:
                 self.q.task_done()
 
-    def shutdown(self, timeout_s: float = 60.0) -> None:
+    def shutdown(self, timeout_s: float = 60.0) -> list[dict]:
         """Drain, flush and join. Anything still queued is reported, not hidden."""
-        self.q.put(self._sentinel)
+        with self._shutdown_lock:
+            if self._shutdown_started:
+                return []
+            self._shutdown_started = True
+        errors: list[dict] = []
+        if self.ident is None:
+            return errors
         self.join(timeout=timeout_s)
         if self.is_alive() or not self.q.empty():
             remaining = self.q.qsize()
+            exc = TimeoutError(
+                f"writer did not drain within {timeout_s}s; remaining={remaining}")
+            record = _error_record("chunkwriter.join", exc)
+            errors.append(record)
             self.degraded_events.append({
                 "reason": "writer_did_not_drain_before_shutdown",
                 "remaining": remaining,
             })
+        return errors
 
     def report(self) -> dict:
         return {
@@ -692,33 +814,30 @@ class Sgp30Reader:
     The device is initialised once (iaq_init) and the instance is kept for the
     whole run; re-initialising per tick would restart the IAQ algorithm.
 
-    Warm-up is an INITIALISATION SESSION, not a property of the values. Each
+    Warm-up is an INITIALISATION SESSION, not a property of the values. The
     successful iaq_init opens a session with its own monotonic start time; for
     the first SGP30_WARMUP_S of that session the status is warming_up, after
     which it is ok. The returned values never affect the status: 400/0 is the
     documented output during initialisation, but a live reading that happens to
     land on 400/0 later must not push the status back to warming_up.
 
-    warming_up -> ok therefore happens at most once per session. A genuine
-    reinitialisation after a communication failure opens a NEW session and
-    legitimately restarts the 15 s phase; the session id and init timestamp are
-    recorded so that is distinguishable from oscillation.
+    warming_up -> ok therefore happens at most once. Communication failure is
+    terminal for the run; automatic device reinitialisation is forbidden.
     """
 
-    RETRY_BACKOFF_TICKS = (10, 20, 40, 80, 160, 300)
-
     def __init__(self, bus: int = 7, address: int = SGP30_ADDRESS,
-                 enabled: bool = True) -> None:
+                 enabled: bool = True,
+                 on_error: Callable[[str, BaseException, str | None], None] | None = None) -> None:
         self.bus = bus
         self.address = address
         self.enabled = enabled
+        self._on_error = on_error
         self.state = SensorState("sgp30")
         self._sensor = None
         self._last_measure_ns: int | None = None
         self.intervals_ms: list[float] = []
         self.measure_count = 0
         self.serial: str | None = None
-        self._retry_step = 0
         self._ticks_since_init = 0
         # initialisation session
         self._session_id = 0
@@ -726,19 +845,6 @@ class Sgp30Reader:
         self._session_init_sequence: int | None = None
         self.init_count = 0
         self.session_log: list[dict] = []
-
-    def _schedule_retry(self, sequence: int) -> None:
-        """Bounded exponential backoff.
-
-        Re-initialising through Blinka issues an I2CDevice probe whose
-        zero-length write is not supported by the Tegra adapter (Errno 95).
-        Hammering an absent or marginal device with that every 10 ticks adds
-        useless traffic to a bus shared with the ADS1115, so the interval
-        backs off and is capped.
-        """
-        step = min(self._retry_step, len(self.RETRY_BACKOFF_TICKS) - 1)
-        self.state._retry_at_seq = sequence + self.RETRY_BACKOFF_TICKS[step]
-        self._retry_step = min(self._retry_step + 1, len(self.RETRY_BACKOFF_TICKS) - 1)
 
     def _init(self) -> None:
         from adafruit_extended_bus import ExtendedI2C
@@ -749,13 +855,13 @@ class Sgp30Reader:
         sensor.iaq_init()
         # A new initialisation session starts here, not at first read.
         self._sensor = sensor
-        self._retry_step = 0
         self._ticks_since_init = 0
         self._last_measure_ns = None
         self._session_id += 1
         self.init_count += 1
         self._session_init_ns = time.monotonic_ns()
         self._session_init_sequence = None   # filled by the caller's sequence below
+        self.state.last_successful_operation = "sgp30.iaq_init"
 
     def prime(self) -> None:
         """Initialise before the first tick.
@@ -782,7 +888,8 @@ class Sgp30Reader:
             })
         except Exception as exc:
             self.state.fail(exc)
-            self._schedule_retry(0)
+            if self._on_error is not None:
+                self._on_error("sgp30.prime", exc, self.state.last_successful_operation)
 
     def read(self, sequence: int) -> dict:
         if not self.enabled:
@@ -795,7 +902,10 @@ class Sgp30Reader:
                 "detail": "hardware_stability_unresolved",
             })
         if self._sensor is None:
-            if sequence < self.state._retry_at_seq:
+            # A failed prime/read is terminal for this run. Reinitialising a
+            # physical device automatically is forbidden by the acquisition
+            # policy; the operator starts a new run after diagnosing it.
+            if self.state.total_errors:
                 return observation(STATUS_ERROR, error=self.state.last_error,
                                    consecutive_errors=self.state.consecutive_errors)
             try:
@@ -809,7 +919,8 @@ class Sgp30Reader:
                 })
             except Exception as exc:
                 self.state.fail(exc)
-                self._schedule_retry(sequence)
+                if self._on_error is not None:
+                    self._on_error("sgp30.init", exc, self.state.last_successful_operation)
                 return observation(STATUS_ERROR, error=self.state.last_error,
                                    consecutive_errors=self.state.consecutive_errors)
 
@@ -823,7 +934,7 @@ class Sgp30Reader:
                 self.intervals_ms.append(interval_ms)
             self._last_measure_ns = now
             self.measure_count += 1
-            self.state.ok()
+            self.state.ok("sgp30.iaq_measure")
 
             # Status comes from the elapsed time of the initialisation session,
             # never from the measured values.
@@ -851,7 +962,9 @@ class Sgp30Reader:
         except Exception as exc:
             self.state.fail(exc)
             self._sensor = None
-            self._schedule_retry(sequence)
+            if self._on_error is not None:
+                self._on_error("sgp30.iaq_measure", exc,
+                               self.state.last_successful_operation)
             return observation(STATUS_ERROR, error=self.state.last_error,
                                consecutive_errors=self.state.consecutive_errors)
 
@@ -863,26 +976,19 @@ class Bme680Reader:
     above ambient. The model's temperature channel is the NTC.
     """
 
-    RETRY_BACKOFF_TICKS = (10, 20, 40, 80, 160, 300)
-
-    def __init__(self, bus: int = 7, address: int = BME680_ADDRESS) -> None:
+    def __init__(self, bus: int = 7, address: int = BME680_ADDRESS,
+                 on_error: Callable[[str, BaseException, str | None], None] | None = None) -> None:
         self.bus = bus
         self.address = address
+        self._on_error = on_error
         self.state = SensorState("bme680")
         self._sensor = None
-        self._retry_step = 0
-
-    def _schedule_retry(self, sequence: int) -> None:
-        step = min(self._retry_step, len(self.RETRY_BACKOFF_TICKS) - 1)
-        self.state._retry_at_seq = sequence + self.RETRY_BACKOFF_TICKS[step]
-        self._retry_step = min(self._retry_step + 1, len(self.RETRY_BACKOFF_TICKS) - 1)
 
     def _init(self) -> None:
         from adafruit_extended_bus import ExtendedI2C
         import adafruit_bme680
         i2c = ExtendedI2C(self.bus)
         self._sensor = adafruit_bme680.Adafruit_BME680_I2C(i2c, address=self.address)
-        self._retry_step = 0
 
     def read_identity(self, i2c_port: str = BUS7) -> dict:
         """Read chip_id (0xD0) and variant_id (0xF0) with normal register reads.
@@ -890,37 +996,40 @@ class Bme680Reader:
         Two ordinary register reads, not an address scan. Called once at start
         so the run metadata records which physical part answered.
         """
-        out: dict = {}
         try:
+            out: dict = {}
             fd = os.open(i2c_port, os.O_RDWR)
-        except Exception:
-            return out
-        try:
-            ioctl(fd, I2C_SLAVE, self.address)
-            for key, reg in (("chip_id", 0xD0), ("variant_id", 0xF0)):
-                try:
+            try:
+                ioctl(fd, I2C_SLAVE, self.address)
+                for key, reg in (("chip_id", 0xD0), ("variant_id", 0xF0)):
                     os.write(fd, bytes([reg]))
                     data = os.read(fd, 1)
-                    if len(data) == 1:
-                        out[key] = f"0x{data[0]:02x}"
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        finally:
-            os.close(fd)
-        return out
+                    if len(data) != 1:
+                        raise OSError(f"short read from BME680 {key}: {len(data)} bytes")
+                    out[key] = f"0x{data[0]:02x}"
+            finally:
+                os.close(fd)
+            self.state.last_successful_operation = "bme680.read_identity"
+            return out
+        except Exception as exc:
+            self.state.fail(exc)
+            if self._on_error is not None:
+                self._on_error("bme680.read_identity", exc,
+                               self.state.last_successful_operation)
+            raise
 
     def read(self, sequence: int) -> dict:
         if self._sensor is None:
-            if sequence < self.state._retry_at_seq:
+            if self.state.total_errors:
                 return observation(STATUS_ERROR, error=self.state.last_error,
                                    consecutive_errors=self.state.consecutive_errors)
             try:
                 self._init()
             except Exception as exc:
                 self.state.fail(exc)
-                self._schedule_retry(sequence)
+                if self._on_error is not None:
+                    self._on_error("bme680.init", exc,
+                                   self.state.last_successful_operation)
                 return observation(STATUS_ERROR, error=self.state.last_error,
                                    consecutive_errors=self.state.consecutive_errors)
         try:
@@ -930,12 +1039,14 @@ class Bme680Reader:
                 "pressure_hpa": float(self._sensor.pressure),
                 "gas_ohm": int(self._sensor.gas),
             }
-            self.state.ok()
+            self.state.ok("bme680.read")
             return observation(STATUS_OK, values, fresh=True, age_ms=0.0)
         except Exception as exc:
             self.state.fail(exc)
             self._sensor = None
-            self._schedule_retry(sequence)
+            if self._on_error is not None:
+                self._on_error("bme680.read", exc,
+                               self.state.last_successful_operation)
             return observation(STATUS_ERROR, error=self.state.last_error,
                                consecutive_errors=self.state.consecutive_errors)
 
@@ -954,23 +1065,47 @@ def write_run(collector, run_dir, *, on_snapshot=None) -> dict:
     import csv
     import json
     from .snapshot import SCALAR_FIELDS, scalar_row
+    from .live import PreviewPublisher
+    import sys
 
     jsonl_path = run_dir / "snapshots.jsonl"
     csv_path = run_dir / "scalars.csv"
     written = 0
-    with jsonl_path.open("w", encoding="utf-8") as jf, \
-         csv_path.open("w", newline="", encoding="utf-8") as cf:
-        writer = csv.DictWriter(cf, fieldnames=SCALAR_FIELDS)
-        writer.writeheader()
-        for snapshot in collector.iter_snapshots():
-            jf.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
-            writer.writerow(scalar_row(snapshot))
-            written += 1
-            if on_snapshot is not None:
-                on_snapshot(snapshot)
-            if snapshot["sequence"] % 10 == 0:
-                jf.flush()
-                cf.flush()
+    preview = None
+    try:
+        preview = PreviewPublisher(run_dir)
+        preview.start()
+    except Exception as exc:
+        collector.preview_report = {"last_error": f"{type(exc).__name__}: {exc}"}
+        print(f"Live preview unavailable: {exc}", file=sys.stderr, flush=True)
+        preview = None
+    try:
+        with jsonl_path.open("w", encoding="utf-8") as jf, \
+             csv_path.open("w", newline="", encoding="utf-8") as cf:
+            writer = csv.DictWriter(cf, fieldnames=SCALAR_FIELDS)
+            writer.writeheader()
+            for snapshot in collector.iter_snapshots():
+                jf.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+                writer.writerow(scalar_row(snapshot))
+                written += 1
+                if preview is not None:
+                    try:
+                        preview.offer(snapshot, getattr(collector, "_preview_frame", None))
+                    except Exception as exc:
+                        preview.error = f"{type(exc).__name__}: {exc}"
+                        preview.close()
+                        collector.preview_report = preview.stats()
+                        print(f"Live preview disabled: {exc}", file=sys.stderr, flush=True)
+                        preview = None
+                if on_snapshot is not None:
+                    on_snapshot(snapshot)
+                if snapshot["sequence"] % 10 == 0:
+                    jf.flush()
+                    cf.flush()
+    finally:
+        if preview is not None:
+            preview.close()
+            collector.preview_report = preview.stats()
     return {
         "snapshots_written": written,
         "snapshots_path": str(jsonl_path),
@@ -1023,12 +1158,21 @@ class SensorCollector:
         self.ct_burst_s = ct_burst_s
         self.thermal_device = thermal_device
 
+        self._error_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = False
+        self._acquisition_lock = None
+        self.first_error: dict | None = None
+        self.stopped_on_error = False
+        self.shutdown_errors: list[dict] = []
+
         self.ads: Ads1115Owner | None = None
-        self.writer = ChunkWriter()
-        self.sgp30 = Sgp30Reader(enabled=enable_sgp30)
-        self.bme680 = Bme680Reader()
-        self.bus1 = Bus1Worker()
-        self.thermal = ThermalWorker(thermal_device)
+        self.writer = ChunkWriter(on_error=self._record_error)
+        self.sgp30 = Sgp30Reader(enabled=enable_sgp30, on_error=self._record_error)
+        self.bme680 = Bme680Reader(on_error=self._record_error)
+        self.bus1 = Bus1Worker(on_error=self._record_error)
+        self.thermal = ThermalWorker(thermal_device, on_error=self._record_error)
 
         self.ct_state = SensorState("ct1")
         self.ntc_state = SensorState("ntc")
@@ -1050,6 +1194,8 @@ class SensorCollector:
         self.sps30_ages_ms: list[float] = []
         self.snapshot_count = 0
         self.expected_ticks = 0
+        self.missed_ticks = 0
+        self.start_monotonic_ns: int | None = None
         self.stop_requested = False
         self.invalid_tick_count = 0
         self.invalid_reason_counts: dict[str, int] = {}
@@ -1064,51 +1210,132 @@ class SensorCollector:
         self._ct_raw_buffer: list = []
         self._ct_raw_chunk_index = 0
         self._last_thermal_seq = 0
+        self._preview_frame = None
+        self.preview_report = {}
 
     # -- lifecycle ---------------------------------------------------------
+    def _record_error(self, operation: str, exc: BaseException,
+                      last_successful_operation: str | None = None) -> None:
+        record = _error_record(operation, exc, last_successful_operation)
+        with self._error_lock:
+            if self.first_error is None:
+                self.first_error = record
+                self.stopped_on_error = True
+        self.request_stop()
+
+    def _record_shutdown_errors(self, records: list[dict] | None) -> None:
+        if records:
+            self.shutdown_errors.extend(records)
+
     def start(self) -> None:
-        """Startup-fatal work happens here: without the ADS1115 there is no run."""
-        self.ads = Ads1115Owner(ct_burst_s=self.ct_burst_s)
-        self.ads.probe()
-        self.ads.enter_ct_mode()
-        self.writer.start()
-        self.bus1.start()
-        self.thermal.start()
-        self._await_workers()
-        # SGP30 is initialised here, before the first tick, so that
-        # sensor_manifest() can record its serial and the 15 s initialisation
-        # phase is measured from the real iaq_init. Failure is non-fatal.
-        self.sgp30.prime()
+        """Acquire exclusive ownership, then start; unwind every partial start."""
+        from .runtime import AcquisitionLock
+
+        self._acquisition_lock = AcquisitionLock()
+        self._acquisition_lock.acquire()
+        operation = "ads1115.open"
+        try:
+            self.ads = Ads1115Owner(ct_burst_s=self.ct_burst_s)
+            operation = "ads1115.probe"
+            self.ads.probe()
+            operation = "ads1115.enter_ct_mode"
+            self.ads.enter_ct_mode()
+            self.ct_state.last_successful_operation = operation
+            self.ntc_state.last_successful_operation = operation
+
+            operation = "chunkwriter.start"
+            self.writer.start()
+            operation = "bus1.start"
+            self.bus1.start()
+            operation = "flir.start"
+            self.thermal.start()
+            operation = "workers.await_first_reading"
+            self._await_workers()
+            if self.first_error is not None:
+                raise RuntimeError("background worker failed during startup")
+
+            operation = "sgp30.prime"
+            self.sgp30.prime()
+            if self.first_error is not None:
+                raise RuntimeError("sensor failed during startup")
+        except BaseException as exc:
+            self._record_error(operation, exc, None)
+            self.shutdown()
+            raise
 
     def _await_workers(self, timeout_s: float = 8.0) -> None:
         """Wait for the background workers to produce their first reading.
 
         Without this the first ticks report status=error for sensors whose
         worker has simply not delivered anything yet - a startup artefact, not
-        a fault. Bounded by timeout_s: a sensor that never appears must not
-        block the run, it is reported as degraded instead.
+        a fault. A sensor that produces no initial reading before the bounded
+        deadline makes startup fail; start() must only return once every
+        required worker is ready.
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
+            if self.first_error is not None:
+                return
+            if self._stop_event.is_set():
+                raise InterruptedError("stop requested while awaiting sensor workers")
             frame, _, _ = self.thermal.latest()
             sps, scd = self.bus1.latest()
             if frame is not None and sps is not None and scd is not None:
                 return
             if self.thermal.startup_error and self.bus1.startup_error:
                 return
-            time.sleep(0.1)
+            self._stop_event.wait(min(0.1, max(0.0, deadline - time.monotonic())))
+
+        if self._stop_event.is_set():
+            raise InterruptedError("stop requested while awaiting sensor workers")
+        frame, _, _ = self.thermal.latest()
+        sps, scd = self.bus1.latest()
+        missing = [name for name, value in (
+            ("flir", frame), ("sps30", sps), ("scd30", scd),
+        ) if value is None]
+        raise TimeoutError(
+            "required sensor workers produced no initial reading: " + ", ".join(missing))
 
     def shutdown(self) -> None:
-        self.bus1.shutdown()
-        self.thermal.shutdown()
-        # Chunk writer last: flush_chunks() has already queued the partial
-        # chunks, and shutdown() drains, flushes and joins.
-        self.writer.shutdown()
-        if self.ads is not None:
-            self.ads.close()
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+        self.request_stop()
+        try:
+            operations = (
+                ("bus1.shutdown", lambda: self.bus1.shutdown(
+                    skip_device_commands=self.first_error is not None)),
+                ("flir.shutdown", self.thermal.shutdown),
+                # Chunk writer last: the runner queues partial chunks first.
+                ("chunkwriter.shutdown", self.writer.shutdown),
+            )
+            for operation, close in operations:
+                try:
+                    self._record_shutdown_errors(close())
+                except Exception as exc:
+                    self.shutdown_errors.append(_error_record(operation, exc))
+            if self.ads is not None:
+                try:
+                    self.ads.close()
+                except Exception as exc:
+                    self.shutdown_errors.append(_error_record("ads1115.close", exc))
+        finally:
+            # A timed-out worker may still touch its device. Keep ownership until
+            # process exit in that case; closing the fd would let a second process
+            # acquire the hardware lock while the first worker is still alive.
+            alive_operations = {"bus1.join", "flir.join", "chunkwriter.join"}
+            worker_alive = any(e.get("operation") in alive_operations
+                               for e in self.shutdown_errors)
+            if self._acquisition_lock is not None and not worker_alive:
+                try:
+                    self._acquisition_lock.release()
+                except Exception as exc:
+                    self.shutdown_errors.append(_error_record("acquisition_lock.release", exc))
 
     def request_stop(self) -> None:
         self.stop_requested = True
+        self._stop_event.set()
 
     # -- provenance --------------------------------------------------------
     def sensor_manifest(self) -> dict:
@@ -1137,7 +1364,11 @@ class SensorCollector:
         }
         if self.sgp30.serial:
             manifest["sgp30"]["serial"] = self.sgp30.serial
-        manifest["bme680"].update(self.bme680.read_identity())
+        try:
+            manifest["bme680"].update(self.bme680.read_identity())
+        except Exception as exc:
+            # Bme680Reader already recorded the first error atomically.
+            manifest["bme680"]["identity_error"] = f"{type(exc).__name__}: {exc}"
         for name in ("sps30", "scd30"):
             manifest[name].update(self.bus1.identity.get(name, {}))
         manifest["flir"].update(self.thermal.read_identity())
@@ -1174,38 +1405,52 @@ class SensorCollector:
                 self._ct_raw_buffer.append((sequence, codes))
                 if len(self._ct_raw_buffer) >= self.CT_RAW_CHUNK_TICKS:
                     self._flush_ct_raw()
-            self.ct_state.ok()
+            self.ct_state.ok("ads1115.ct_burst")
             self.ct_sample_counts.append(result["sample_count"])
             if result["actual_sample_rate"]:
                 self.ct_sps.append(result["actual_sample_rate"])
             if result["clipping"]:
                 self.ct_clipping_ticks += 1
-            return observation(STATUS_OK, result, fresh=True, age_ms=0.0)
+            age_ms = max(0.0, (time.monotonic_ns()
+                               - result["acquisition_end_monotonic_ns"]) / 1e6)
+            return observation(STATUS_OK, result, fresh=True, age_ms=age_ms)
         except Exception as exc:
             self.ct_state.fail(exc)
+            self._record_error("ads1115.ct_burst", exc,
+                               self.ct_state.last_successful_operation)
             return observation(STATUS_ERROR, error=self.ct_state.last_error,
                                consecutive_errors=self.ct_state.consecutive_errors)
 
     def _read_ntc(self) -> dict:
         try:
             values = self.ads.read_ntc()
-            self.ntc_state.ok()
-            return observation(STATUS_OK, values, fresh=True, age_ms=0.0)
+            self.ntc_state.ok("ads1115.read_ntc")
+            age_ms = max(0.0, (time.monotonic_ns()
+                               - values["acquisition_end_monotonic_ns"]) / 1e6)
+            return observation(STATUS_OK, values, fresh=True, age_ms=age_ms)
         except Exception as exc:
             self.ntc_state.fail(exc)
+            self._record_error("ads1115.read_ntc", exc,
+                               self.ntc_state.last_successful_operation)
             return observation(STATUS_ERROR, error=self.ntc_state.last_error,
                                consecutive_errors=self.ntc_state.consecutive_errors)
 
-    def _observe_bus1(self, now_ns: int) -> tuple[dict, dict]:
+    def _observe_bus1(self) -> tuple[dict, dict]:
         sps_reading, scd_reading = self.bus1.latest()
+        now_ns = time.monotonic_ns()
 
-        if sps_reading is None:
+        if self.bus1.sps30_state.last_error is not None:
+            sps_obs = observation(
+                STATUS_ERROR,
+                error=self.bus1.sps30_state.last_error,
+                consecutive_errors=self.bus1.sps30_state.consecutive_errors)
+        elif sps_reading is None:
             sps_obs = observation(
                 STATUS_ERROR,
                 error=self.bus1.startup_error or self.bus1.sps30_state.last_error,
                 consecutive_errors=self.bus1.sps30_state.consecutive_errors)
         else:
-            age_ms = (now_ns - sps_reading.monotonic_ns) / 1e6
+            age_ms = max(0.0, (now_ns - sps_reading.monotonic_ns) / 1e6)
             fresh = sps_reading.sequence != self._last_sps30_seq
             self._last_sps30_seq = sps_reading.sequence
             if fresh:
@@ -1214,15 +1459,21 @@ class SensorCollector:
             sps_obs = observation(
                 STATUS_OK if age_ms <= 3000.0 else STATUS_STALE,
                 sps_reading.values, fresh=fresh, age_ms=age_ms,
-                extra={"measurement_sequence": sps_reading.sequence})
+                extra={"measurement_sequence": sps_reading.sequence,
+                       "measurement_monotonic_ns": sps_reading.monotonic_ns})
 
-        if scd_reading is None:
+        if self.bus1.scd30_state.last_error is not None:
+            scd_obs = observation(
+                STATUS_ERROR,
+                error=self.bus1.scd30_state.last_error,
+                consecutive_errors=self.bus1.scd30_state.consecutive_errors)
+        elif scd_reading is None:
             scd_obs = observation(
                 STATUS_ERROR,
                 error=self.bus1.startup_error or self.bus1.scd30_state.last_error,
                 consecutive_errors=self.bus1.scd30_state.consecutive_errors)
         else:
-            age_ms = (now_ns - scd_reading.monotonic_ns) / 1e6
+            age_ms = max(0.0, (now_ns - scd_reading.monotonic_ns) / 1e6)
             fresh = scd_reading.sequence != self._last_scd30_seq
             self._last_scd30_seq = scd_reading.sequence
             if fresh:
@@ -1241,16 +1492,18 @@ class SensorCollector:
                        "measurement_monotonic_ns": scd_reading.monotonic_ns})
         return sps_obs, scd_obs
 
-    def _observe_thermal(self, now_ns: int, sequence: int) -> dict:
+    def _observe_thermal(self, sequence: int) -> dict:
         import numpy as np
         frame, frame_ns, frame_seq = self.thermal.latest()
+        self._preview_frame = (sequence, frame)
+        now_ns = time.monotonic_ns()
         if frame is None:
             return observation(
                 STATUS_ERROR,
                 error=self.thermal.startup_error or self.thermal.state.last_error,
                 consecutive_errors=self.thermal.state.consecutive_errors)
 
-        age_ms = (now_ns - frame_ns) / 1e6
+        age_ms = max(0.0, (now_ns - frame_ns) / 1e6)
         self.flir_ages_ms.append(age_ms)
         self.flir_ticks_with_frame += 1
         fresh = frame_seq != self._last_thermal_seq
@@ -1265,11 +1518,18 @@ class SensorCollector:
         }
         extra: dict = {"frame_sequence": frame_seq, "frame_monotonic_ns": frame_ns}
         if self.save_thermal:
-            extra["thermal_chunk"] = f"thermal_{self._thermal_chunk_index:06d}.npz"
-            extra["thermal_index"] = len(self._thermal_buffer)
+            ref = (f"thermal_{self._thermal_chunk_index:06d}.npz",
+                   len(self._thermal_buffer))
             self._thermal_buffer.append((sequence, frame))
             if len(self._thermal_buffer) >= self.THERMAL_CHUNK_FRAMES:
                 self._flush_thermal()
+            extra["thermal_chunk"], extra["thermal_index"] = ref
+        if self.thermal.state.last_error is not None:
+            return observation(
+                STATUS_ERROR, values, fresh=fresh, age_ms=age_ms,
+                error=self.thermal.state.last_error,
+                consecutive_errors=self.thermal.state.consecutive_errors,
+                extra=extra)
         status = STATUS_OK if age_ms <= FLIR_AGE_WARN_MS else STATUS_STALE
         return observation(status, values, fresh=fresh, age_ms=age_ms, extra=extra)
 
@@ -1314,8 +1574,6 @@ class SensorCollector:
         deadline, the elapsed deadlines are counted as missed rather than
         silently shifting the whole schedule.
         """
-        import datetime as _dt
-
         start_ns = time.monotonic_ns()
         self.start_monotonic_ns = start_ns
         expected = None if self.duration_s <= 0 else int(round(self.duration_s / MASTER_PERIOD_S))
@@ -1325,7 +1583,7 @@ class SensorCollector:
         prev_actual_ns: int | None = None
 
         while expected is None or n < expected:
-            if self.stop_requested:
+            if self._stop_event.is_set():
                 break
 
             target_ns = start_ns + n * MASTER_PERIOD_NS
@@ -1340,9 +1598,11 @@ class SensorCollector:
                 target_ns = start_ns + n * MASTER_PERIOD_NS
                 now_ns = time.monotonic_ns()
             if now_ns < target_ns:
-                time.sleep((target_ns - now_ns) / 1e9)
+                if self._stop_event.wait((target_ns - now_ns) / 1e9):
+                    break
 
             actual_ns = time.monotonic_ns()
+            tick_start_utc = dt.datetime.now(dt.timezone.utc).isoformat()
             jitter_ms = (actual_ns - target_ns) / 1e6
             self.jitters_ms.append(jitter_ms)
             if prev_actual_ns is not None:
@@ -1351,16 +1611,27 @@ class SensorCollector:
 
             # --- bus 7, serial, in timing-priority order --------------------
             sgp30_obs = self.sgp30.read(n)          # strict 1 Hz, goes first
+            if self.stopped_on_error:
+                break
             bme680_obs = self.bme680.read(n)
+            if self.stopped_on_error:
+                break
             ct_obs = self._read_ct(n)               # ~0.5 s burst
+            if self.stopped_on_error:
+                break
             ntc_obs = self._read_ntc()
+            if self.stopped_on_error:
+                break
 
             # --- buses/devices read from their own workers ------------------
-            read_ns = time.monotonic_ns()
-            sps30_obs, scd30_obs = self._observe_bus1(read_ns)
-            flir_obs = self._observe_thermal(read_ns, n)
+            sps30_obs, scd30_obs = self._observe_bus1()
+            flir_obs = self._observe_thermal(n)
+            if self.stopped_on_error:
+                break
 
-            work_ms = (time.monotonic_ns() - actual_ns) / 1e6
+            snapshot_created_ns = time.monotonic_ns()
+            snapshot_created_utc = dt.datetime.now(dt.timezone.utc).isoformat()
+            work_ms = (snapshot_created_ns - actual_ns) / 1e6
             self.work_ms.append(work_ms)
 
             sensors = {
@@ -1387,8 +1658,11 @@ class SensorCollector:
             snapshot = {
                 "schema_version": SCHEMA_VERSION,
                 "sequence": n,
-                "timestamp_utc": _dt.datetime.now(_dt.timezone.utc)
-                                    .strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                # Backward-compatible field now pairs with actual_monotonic_ns.
+                "timestamp_utc": tick_start_utc,
+                "tick_start_utc": tick_start_utc,
+                "snapshot_created_utc": snapshot_created_utc,
+                "snapshot_created_monotonic_ns": snapshot_created_ns,
                 "target_monotonic_ns": target_ns,
                 "actual_monotonic_ns": actual_ns,
                 "tick_jitter_ms": round(jitter_ms, 3),
@@ -1413,6 +1687,10 @@ class SensorCollector:
         abs_jitter = [abs(j) for j in self.jitters_ms]
         sgp_iv = self.sgp30.intervals_ms
         return {
+            "first_error": self.first_error,
+            "preview": dict(self.preview_report),
+            "stopped_on_error": self.stopped_on_error,
+            "shutdown_errors": list(self.shutdown_errors),
             "master": {
                 "snapshot_count": self.snapshot_count,
                 "expected_ticks": self.expected_ticks,
@@ -1482,7 +1760,8 @@ class SensorCollector:
             "quality": {
                 "policy": ("window is training-invalid when any tick has "
                            "flir status != ok or age_ms > 500 ms; raw data is kept, "
-                           "stale frames are never duplicated or interpolated"),
+                           "stale source frames are stored for each tick but never "
+                           "synthesised or interpolated"),
                 "window_ticks": WINDOW_TICKS,
                 "invalid_tick_count": self.invalid_tick_count,
                 "invalid_tick_reasons": self.invalid_reason_counts,

@@ -25,6 +25,11 @@ from fcntl import ioctl
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from sensors.runtime import AcquisitionBusyError, AcquisitionLock
+
 DEFAULT_OUT_DIR = ROOT / "results" / "ntc"
 DEFAULT_I2C_PORT = "/dev/i2c-1"
 DEFAULT_ADDRESS = 0x48
@@ -218,6 +223,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    try:
+        with AcquisitionLock():
+            return run(args)
+    except AcquisitionBusyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def run(args: argparse.Namespace) -> int:
     print(f"I2C port: {args.i2c_port}")
     print(f"ADS1115 address: 0x{args.address:02x}")
     print(f"ADS1115 channel: A{args.channel}")

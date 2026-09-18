@@ -2,9 +2,60 @@
 
 모든 센서를 **모델의 시간축인 1 Hz** 로 한 스냅샷에 모으는 raw 수집 계층이다.
 
+브라우저에서 시작·중지와 실시간 열화상·센서 추이를 보려면 `./jetson_deploy/collect.sh dashboard`를
+실행한다. [로컬 대시보드 사용법](JETSON_SENSOR_DASHBOARD.md)을 참고한다.
+
+## 한 명령으로 시작·종료 (2026-09-17)
+
+```bash
+cd /home/keti/projects/factory_safety
+./jetson_deploy/collect.sh start     # 백그라운드 연속 수집, SSH 종료 후에도 유지
+./jetson_deploy/collect.sh status    # 상태·PID·저장 경로
+./jetson_deploy/collect.sh stop      # 현재 작업 종료, 부분 청크 저장·검증 후 반환
+```
+
+`start --duration 60`은 60초의 기록을 목표로 자동 종료한다(초기화 시간은 별도).
+`run`은 포그라운드 수집이며 Ctrl+C로 종료한다. 옵션은 `start --help`에서 확인한다.
+기존 11번 Python 진입점도 유지한다:
+
 ```bash
 ./jetson_deploy/run_python.sh jetson_deploy/scripts/11_collect_sensors.py --duration 120
 ```
+
+기본 프로파일은 `jetson_factory_v1_2026`: NTC·CT1·SPS30·SCD30·BME680·열화상을 사용하고,
+불안정성이 해결되지 않은 SGP30은 접근하지 않는다. `--enable-sgp30`은 명시적 opt-in이며
+custom 프로파일로 기록한다. CT2~CT4는 실제 연결이 없어 disabled로 남긴다.
+
+현재 모델의 30초 입력창에는 **열화상 1장/초 저장**을 기본으로 사용한다. 카메라는 계속 읽어
+최신 프레임을 선택하므로 오래된 USB 버퍼를 매초 한 장씩 꺼내는 방식과 다르다.
+Lepton 3.5의 유효 프레임 속도는 약 8.7 Hz다
+([제조사 사양](https://oem.flir.com/es-mx/products/lepton/?model=500-0771-01&segment=oem&vertical=microcam)).
+160×120 uint16를 초당 한 장 저장하면 영상 원본만 압축 전 약 **138 MB/시간**이다.
+NPZ는 온도 원시값을 무손실 압축하며 실제 크기는 장면에 따라 달라진다.
+1초보다 짧은 열적 사건까지 보장하는 설정은 아니므로 향후 현장 사건 데이터로 재평가한다.
+CT는 860 SPS 설정의 0.5초 burst에서 RMS를 계산해 초당 하나 기록한다.
+SCD30은 기본 2초 측정 주기를 유지하며 새 값 여부와 age를 남긴다
+([Sensirion 설명](https://sensirion.com/media/documents/D7CEEF4A/6165372F/Sensirion_CO2_Sensors_SCD30_Interface_Description.pdf)).
+
+동기화는 **공통 monotonic 시간축에 묶는 소프트웨어 동기화**다. 센서마다 실제 측정 시간이
+다르며 동시 하드웨어 trigger를 의미하지 않는다. additive timing 필드와 메타데이터의
+`acquisition_timing_version`으로 tick 시작, CT 측정 구간, 센서 host 수신시각을 구분한다.
+FLIR의 host 수신시각은 정확한 노출시각이 아니다. 기존 schema v2/품질 임계값은 유지한다.
+카메라가 멈춘 구간에는 당시 latest 원본을 해당 tick에 저장하되 동일 frame sequence와
+`fresh=false`/증가하는 age로 반복임을 남긴다. stale 관측을 fresh로 보간하거나 정상 프레임으로
+대체하지 않는다. 이는 기존 window builder의 tick별 저장 sequence 계약을 유지하기 위한 것이다.
+
+같은 계정의 수집기·trial·06~10번 진단 명령은 공통 `flock`으로 중복 실행을 막는다.
+잠금과 제어 상태는 `~/.cache/factory_safety/acquisition/`에 있다.
+다른 계정이나 `gst-launch` 같은 외부 프로그램은 이 잠금을 따르지 않으므로 별도로 종료한다.
+`stop`은 PID·프로세스 시작시간·부팅 ID를 확인한 pidfd로 SIGTERM을 보내며, 기본 90초 안에
+끝나지 않으면 실패를 알린다. 강제 종료나 자동 재시작은 하지 않는다.
+`stop`은 이 CLI로 시작한 background run만 대상으로 한다. `run`/기존 trial은 해당 터미널에서 종료한다.
+
+출력 폴더의 `collector.log`는 실행 로그, `control.json`은 관리 상태다. `timing_report.json`의
+`validation.passed`와 최종 `status`를 확인한다. `stopped/completed`는 파일 정리가 완료됐다는
+뜻이며 모든 30초 모델 window가 training-valid라는 뜻은 아니다. FFC 중 stale은 별도 표시한다.
+이 명령은 원시 데이터 수집용이며 공식 시나리오/단계 라벨링은 기존 12번 trial runner를 사용한다.
 
 이 계층은 **추론을 하지 않고 모델 입력 벡터를 바꾸지 않는다.** 모델 입력은
 `src/data/config.py` 의 `[NTC, PM1.0, PM2.5, PM10, CT1, CT2, CT3, CT4]` 로 고정이며,
@@ -95,8 +146,8 @@ ok           otherwise
 `warming_up → ok` 전이는 **initialization session 당 정확히 1회**다. `session_elapsed_s` 는
 단조 증가하므로 같은 session 안에서 되돌아가는 것이 구조적으로 불가능하다.
 
-통신 실패 후 **실제 재초기화에 성공하면 새 session** 이 열려 15초 phase 가 정상적으로 다시
-시작한다. 진동과 구분할 수 있도록 스냅샷과 timing report 에 다음을 남긴다.
+통신 실패 후 자동 재초기화는 하지 않는다. 원인을 확인하고 새로운 run을 시작하면
+새 초기화 구간이 생긴다. 기존 session 필드는 과거 raw와의 호환을 위해 남긴다.
 
 ```
 session_id            session 번호 (재초기화마다 증가)
@@ -189,14 +240,14 @@ Lepton 은 주기적으로 **FFC(flat-field correction)** 셔터 동작 때문�
 
 ## 7. 실패 정책
 
-센서 하나가 실패해도 전체 수집을 중단하지 않는다. 해당 센서만 `status="error"` 로
-기록하고 `consecutive_errors` 를 센다. SGP30/BME680 은 10 tick 마다 재초기화를 시도하므로
-**센서가 돌아오면 자동으로 `ok` 로 복귀**한다.
+루트 `AGENTS.md`에 따라 첫 통신 오류를 보존하고 수집을 멈춘다. operation, 예외 종류,
+errno, UTC/monotonic 시각, 직전 성공을 기록하며 자동 retry/reconnect는 하지 않는다.
+저장 queue 유실·쓰기 실패·종료 실패·누락 chunk·sequence gap도 성공으로 처리하지 않는다.
+오류 전 원시 데이터는 보존하고 최종 보고서에 실패를 남긴다.
 
-**startup fatal 은 셋뿐이다**: ADS1115 접근 불가, 출력 디렉터리 생성 불가, 스키마 초기화 실패.
-나머지는 degraded 수집으로 계속한다.
-
-`Ctrl+C` 는 현재 tick 을 마치고 센서를 정리한 뒤 파일을 flush 하고 **exit 130** 으로 끝난다.
+일반 Ctrl+C는 현재 tick을 마치고 flush한 뒤 **exit 130**, SIGTERM은 **exit 143**이다.
+그 과정에서 오류가 발견되면 **exit 1**이다. `collect.sh stop` 관리 명령은 정상적인
+SIGTERM 종료와 저장 검증을 확인하면 0을 반환한다.
 
 ---
 
@@ -223,6 +274,7 @@ jetson_deploy/results/sensor_collection/<RUN_ID>/     RUN_ID = UTC 타임스탬�
 --no-thermal-save   thermal 프레임 저장 안 함 (scalar 는 계속 기록)
 --ct-burst SEC      tick 당 CT 캡처 길이 (기본 0.5)
 --thermal-device    기본 /dev/video0
+--enable-sgp30      기본 비활성 SGP30을 명시적으로 사용 (custom 프로파일)
 ```
 
 ---
@@ -290,9 +342,9 @@ FLIR          120/120 tick 에 프레임 있음,  age mean 74.9 ms  p95 115.9 ms
 - BME680 온도는 gas 히터 자체 발열로 실온보다 높다. 모델 온도 채널은 NTC 다
 - SGP30 `warming_up` 은 값이 아니라 **initialization session 경과시간**으로 판정한다 — §3-1
 - **SGP30 은 I2C 버스에서 간헐적으로 완전히 사라지는 현상이 반복 관측되었다**
-  (`HARDWARE_STABILITY = UNRESOLVED`, `JETSON_ENVIRONMENT.md` §19). 부재 시 collector 는
-  degraded mode 로 계속 동작하고 serial 을 만들어내지 않는다. **공식 dataset 수집을 이
-  상태에서 조용히 시작하지 않는다** — `JETSON_DATASET_PROTOCOL.md` §10
+  (`HARDWARE_STABILITY = UNRESOLVED`, `JETSON_ENVIRONMENT.md` §19). 기본 프로파일에서
+  비활성화하며 serial을 만들어내지 않는다. 명시적으로 활성화했을 때 통신 오류가 나면
+  전체 run을 멈춘다 — `JETSON_DATASET_PROTOCOL.md` §10
 
 관련 문서: [`JETSON_ENVIRONMENT.md`](JETSON_ENVIRONMENT.md),
 [`JETSON_SPI_BME680_SETUP.md`](JETSON_SPI_BME680_SETUP.md), [`../AGENTS.md`](../AGENTS.md)

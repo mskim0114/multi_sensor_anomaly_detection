@@ -23,6 +23,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import importlib.metadata
+import math
+import platform
 from pathlib import Path
 import signal
 import subprocess
@@ -38,6 +41,8 @@ from sensors.collector import SensorCollector, write_run  # noqa: E402
 from sensors.snapshot import (  # noqa: E402
     FLIR_MAX_AGE_MS, SCHEMA_VERSION, WINDOW_TICKS,
 )
+from sensors.runtime import atomic_json, utc_now  # noqa: E402
+from sensors.validation import validate_run  # noqa: E402
 
 DEFAULT_OUT_DIR = ROOT / "results" / "sensor_collection"
 
@@ -52,11 +57,38 @@ def git_sha() -> str | None:
 
 
 def build_metadata(args, run_id: str) -> dict:
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+                           capture_output=True, text=True, timeout=5)
+    versions = {}
+    for package in ("numpy", "adafruit-circuitpython-bme680", "adafruit-circuitpython-sgp30",
+                    "sensirion-i2c-sps30", "sensirion-i2c-scd30", "sensirion-i2c-driver"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
+    l4t_path = Path("/etc/nv_tegra_release")
     return {
         "run_id": run_id,
         "schema_version": SCHEMA_VERSION,
         "started_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "git_commit_sha": git_sha(),
+        "git_dirty": bool(dirty.stdout) if dirty.returncode == 0 else None,
+        "timestamp": utc_now(),
+        "hostname": platform.node(),
+        "jetpack_l4t": l4t_path.read_text().strip() if l4t_path.exists() else None,
+        "python_version": sys.version,
+        "python_executable": sys.executable,
+        "environment_profile": "JETSON-RUNTIME",
+        "sensor_driver_versions": versions,
+        "acquisition_timing_version": 1,
+        "synchronization": "1 Hz software timeline; per-sensor host receipt times, not hardware triggers",
+        "thermal_saved_hz": 1.0 if not args.no_thermal_save else 0.0,
+        "i2c_clock_hz": {"/dev/i2c-7": 400000, "/dev/i2c-1": 100000},
+        "ads1115": {"address": "0x48", "ct_mux": "AIN0-AIN1", "ct_pga_fsr_v": 2.048,
+                    "ct_data_rate_sps": 860, "ntc_mux": "A2", "ntc_pga_fsr_v": 4.096,
+                    "ntc_data_rate_sps": 128, "ct_burden_ohm": 0.68,
+                    "ct_primary_a": 400.0, "ct_secondary_a": 1.0,
+                    "calibration": "nominal circuit conversion; field calibration pending"},
         "master_tick_hz": 1.0,
         "duration_s": args.duration,
         "ct_burst_s": args.ct_burst,
@@ -86,7 +118,8 @@ def build_metadata(args, run_id: str) -> dict:
             "rule": ("a 30-tick window is training-invalid when any tick has "
                      "flir status != ok or flir age_ms > 500 ms"),
             "raw_data": "kept - never deleted because a window is invalid",
-            "repair": "none - stale frames are never duplicated or interpolated",
+            "repair": ("none - stale source frames retain per-tick raw entries; "
+                       "never synthesised or interpolated as fresh"),
             "model_channel_issues": ("recorded for visibility, does not "
                                      "invalidate a window under this policy"),
         },
@@ -185,125 +218,137 @@ def print_report(report: dict) -> None:
     print()
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+def create_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration", type=float, default=120.0,
-                        help="seconds to collect; 0 means run until Ctrl+C")
+                        help="seconds to collect; 0 means until stopped")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
-    parser.add_argument("--save-ct-raw", action="store_true",
-                        help="also store the raw CT waveform codes as NPZ chunks")
-    parser.add_argument("--no-thermal-save", action="store_true",
-                        help="do not store thermal frames (scalars are still recorded)")
-    parser.add_argument("--ct-burst", type=float, default=0.5,
-                        help="CT waveform capture seconds per tick")
+    parser.add_argument("--save-ct-raw", action="store_true")
+    parser.add_argument("--no-thermal-save", action="store_true")
+    parser.add_argument("--ct-burst", type=float, default=0.5)
     parser.add_argument("--thermal-device", default="/dev/video0")
-    parser.add_argument("--disable-sgp30", action="store_true",
-                        help="do not use SGP30 at all: no I2C access to 0x58, no "
-                             "iaq_init, no reconnect retry, status recorded as "
-                             "disabled. This is the jetson_factory_v1_2026 profile.")
-    args = parser.parse_args()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--enable-sgp30", dest="disable_sgp30", action="store_false",
+                       help="opt into SGP30; unresolved hardware stability (custom profile)")
+    group.add_argument("--disable-sgp30", dest="disable_sgp30", action="store_true",
+                       help="v1 profile default: no access to SGP30")
+    parser.set_defaults(disable_sgp30=True)
+    return parser
 
-    run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = Path(args.out_dir) / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)   # startup-fatal if this fails
 
-    print(f"run id:    {run_id}")
-    print(f"run dir:   {run_dir}")
-    print(f"duration:  {'continuous (Ctrl+C to stop)' if args.duration <= 0 else f'{args.duration:.0f} s'}")
-    print(f"ct burst:  {args.ct_burst:.3f} s per tick")
-    print(f"thermal:   {'off' if args.no_thermal_save else 'saved in 30-frame NPZ chunks'}")
-    print(f"ct raw:    {'saved' if args.save_ct_raw else 'off (scalar RMS always saved)'}")
-    print(f"sgp30:     {'DISABLED (no 0x58 access)' if args.disable_sgp30 else 'enabled'}")
-    print("NOTE: this process owns the ADS1115. Do not run scripts/08 or 09 concurrently.")
+def parse_args(argv=None):
+    parser = create_parser()
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.duration) or args.duration < 0:
+        parser.error("duration must be finite and >= 0")
+    if 0 < args.duration < 1:
+        parser.error("duration must be 0 or at least one second")
+    if not math.isfinite(args.ct_burst) or not 0 < args.ct_burst <= 0.5:
+        parser.error("ct-burst must be > 0 and <= 0.5 seconds to fit the 1 Hz tick")
+    return args
 
+
+def main(argv=None, *, run_dir=None, on_state=None) -> int:
+    args = parse_args(argv)
+    if run_dir is None:
+        run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        run_dir = Path(args.out_dir).expanduser().resolve() / run_id
+        run_dir.mkdir(parents=True, exist_ok=False)
+    else:
+        run_dir = Path(run_dir)
+        run_id = run_dir.name
+
+    state_errors = []
+
+    def state(name, **extra):
+        if on_state is not None:
+            try:
+                on_state(name, **extra)
+            except Exception as exc:
+                # A full disk must never bypass device shutdown.
+                state_errors.append(f"{type(exc).__name__}: {exc}")
+                print(f"cannot persist control state: {exc}", file=sys.stderr)
+
+    print(f"run dir: {run_dir}", flush=True)
+    print("1 Hz snapshots and thermal storage; continuous camera reader", flush=True)
+    print(f"SGP30: {'disabled (v1 profile)' if args.disable_sgp30 else 'enabled (custom)'}", flush=True)
     collector = SensorCollector(
-        run_dir, args.duration,
-        save_ct_raw=args.save_ct_raw,
-        save_thermal=not args.no_thermal_save,
-        ct_burst_s=args.ct_burst,
-        thermal_device=args.thermal_device,
-        enable_sgp30=not args.disable_sgp30,
-    )
-
-    interrupted = {"value": False}
-
-    def on_sigint(signum, frame):
-        interrupted["value"] = True
-        collector.request_stop()
-        print("\nstopping after the current tick ...", file=sys.stderr)
-
-    signal.signal(signal.SIGINT, on_sigint)
-    signal.signal(signal.SIGTERM, on_sigint)
-
-    collector.start()   # startup-fatal: ADS1115 must be reachable
-
-    # metadata is written after start() so it can carry the sensor manifest -
-    # the physical identity actually read from each device on this run.
-    metadata = build_metadata(args, run_id)
-    # sensor_profile = intended configuration of this run.
-    # sensor_manifest = physical identity actually read from the devices.
-    metadata["sensor_profile"] = collector.sensor_profile()
-    metadata["sensor_manifest"] = collector.sensor_manifest()
-    (run_dir / "metadata.json").write_text(
-        json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
-    prof = metadata["sensor_profile"]
-    print(f'sensor profile: {prof["name"]}'
-          f'{"" if prof["matches_profile_v1"] else " (does not match v1)"}')
-    print(f'  enabled : {", ".join(prof["enabled_sensors"])}')
-    if prof["disabled_sensors"]:
-        for d in prof["disabled_sensors"]:
-            print(f'  disabled: {d["sensor"]} ({d["reason"]})')
-    print("sensor manifest:")
-    for name, info in metadata["sensor_manifest"].items():
-        ident = ", ".join(f"{k}={v}" for k, v in info.items()
-                          if k not in ("bus", "address", "device", "note"))
-        loc = info.get("bus") or info.get("device") or "-"
-        addr = info.get("address", "")
-        print(f"  {name:<8} {loc} {addr:<6} {ident or '(no unique identity available)'}")
-
-    def progress(snapshot: dict) -> None:
-        if snapshot["sequence"] % 10:
-            return
-        sen = snapshot["sensors"]
-        print(f'[{snapshot["sequence"]:>5}] '
-              f'jit {snapshot["tick_jitter_ms"]:+7.2f} ms  '
-              f'work {snapshot["tick_work_ms"]:6.1f} ms  '
-              f'ntc {sen["ntc"]["status"]:<11} '
-              f'ct1 {sen["ct1"]["status"]:<5} '
-              f'sps30 {sen["sps30"]["status"]:<5} '
-              f'sgp30 {sen["sgp30"]["status"]:<11} '
-              f'scd30 {sen["scd30"]["status"]:<5} '
-              f'bme680 {sen["bme680"]["status"]:<5} '
-              f'flir {sen["flir"]["status"]}')
-
+        run_dir, args.duration, save_ct_raw=args.save_ct_raw,
+        save_thermal=not args.no_thermal_save, ct_burst_s=args.ct_burst,
+        thermal_device=args.thermal_device, enable_sgp30=not args.disable_sgp30)
+    interrupted = {"signal": None}
+    previous_handlers = {}
+    failure = None
     paths = {}
+    metadata = {"run_id": run_id, "started_utc": utc_now()}
+
+    def on_stop(signum, frame):
+        interrupted["signal"] = signum
+        collector.request_stop()
+
+    def progress(snapshot):
+        if snapshot["sequence"] == 0:
+            state("running", first_snapshot_utc=snapshot["timestamp_utc"])
+        if snapshot["sequence"] % 10 == 0:
+            sensors = snapshot["sensors"]
+            statuses = " ".join(f"{k}={v['status']}" for k, v in sensors.items()
+                                if v["status"] != "disabled")
+            print(f"[{snapshot['sequence']}] {statuses}", flush=True)
+
     try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[sig] = signal.signal(sig, on_stop)
+        state("starting")
+        metadata = build_metadata(args, run_id)
+        atomic_json(run_dir / "metadata.json", metadata)
+        collector.start()
+        metadata["sensor_profile"] = collector.sensor_profile()
+        metadata["sensor_manifest"] = collector.sensor_manifest()
+        atomic_json(run_dir / "metadata.json", metadata)
         paths = write_run(collector, run_dir, on_snapshot=progress)
+    except Exception as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+        print(f"collection failed: {failure}", file=sys.stderr, flush=True)
     finally:
-        collector.flush_chunks()
-        collector.shutdown()
+        state("stopping")
+        try:
+            collector.flush_chunks()
+        except Exception as exc:
+            failure = failure or f"chunk flush: {type(exc).__name__}: {exc}"
+        try:
+            collector.shutdown()
+        except Exception as exc:
+            failure = failure or f"shutdown: {type(exc).__name__}: {exc}"
 
-    report = collector.timing_report()
-    (run_dir / "timing_report.json").write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    print_report(report)
+    try:
+        report = collector.timing_report()
+        validation = validate_run(run_dir, save_thermal=not args.no_thermal_save,
+                                  expected_snapshots=report["master"]["snapshot_count"])
+        storage = report["storage"]
+        failed = bool(failure or state_errors or report.get("first_error") or report.get("shutdown_errors")
+                      or storage["dropped_chunks"] or storage["write_errors"]
+                      or storage["degraded_events"] or not validation["passed"]
+                      or report["master"]["missed_ticks"])
+        # A successful stop means files were finalized; it does not mean all model
+        # windows are training-valid (e.g. the camera can pause during FFC).
+        outcome = "failed" if failed else ("stopped" if interrupted["signal"] else "completed")
+        report.update(status=outcome, failure=failure, control_state_errors=state_errors, validation=validation,
+                      stop_signal=interrupted["signal"], completed_utc=utc_now())
+        atomic_json(run_dir / "timing_report.json", report)
+        metadata.update(status=outcome, completed_utc=report["completed_utc"],
+                        snapshot_count=report["master"]["snapshot_count"])
+        atomic_json(run_dir / "metadata.json", metadata)
+        print_report(report)
+        code = 1 if failed else (128 + interrupted["signal"] if interrupted["signal"] else 0)
+        state(outcome, exit_code=code, failure=failure, first_error=report.get("first_error"),
+              validation=validation, snapshot_count=report["master"]["snapshot_count"])
+        print(f"{outcome}: {run_dir}", flush=True)
+        return code
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
 
-    print(f"metadata:  {run_dir / 'metadata.json'}")
-    print(f"scalars:   {paths.get('scalars_path', run_dir / 'scalars.csv')}")
-    print(f"snapshots: {paths.get('snapshots_path', run_dir / 'snapshots.jsonl')}")
-    print(f"timing:    {run_dir / 'timing_report.json'}")
-
-    if interrupted["value"]:
-        return 130
-    return 0
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except PermissionError as exc:
-        print(f"Permission denied: {exc}", file=sys.stderr)
-        print("Add the user to the 'i2c' / 'video' groups and log in again.", file=sys.stderr)
-        raise SystemExit(1)
-    except KeyboardInterrupt:
-        raise SystemExit(130)
+    raise SystemExit(main())

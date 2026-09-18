@@ -45,6 +45,11 @@ from fcntl import ioctl
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from sensors.runtime import AcquisitionBusyError, AcquisitionLock
+
 DEFAULT_OUT_DIR = ROOT / "results" / "ct"
 
 # MAIN I2C bus: Jetson 40-pin pin 3 (SDA) / pin 5 (SCL), 400 kHz.
@@ -612,6 +617,15 @@ def main() -> int:
     if args.sanity_samples < 1:
         parser.error("--sanity-samples must be >= 1")
 
+    try:
+        with AcquisitionLock():
+            return run(args)
+    except AcquisitionBusyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def run(args: argparse.Namespace) -> int:
     config_value, fsr = build_continuous_diff_config(args.pga, args.data_rate)
     turns_ratio = args.ct_primary / args.ct_secondary
     scale_a_per_v = turns_ratio / args.burden_ohm

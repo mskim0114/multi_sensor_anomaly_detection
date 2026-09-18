@@ -29,6 +29,11 @@ import zlib
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from sensors.runtime import AcquisitionBusyError, AcquisitionLock
+
 DEFAULT_OUT_DIR = ROOT / "results" / "camera"
 WIDTH = 160
 HEIGHT = 120
@@ -162,7 +167,7 @@ def capture_one(device: str, out_dir: Path, prefix: str, width: int, height: int
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device", default=find_default_device(), help="V4L2 device path")
+    parser.add_argument("--device", default=None, help="V4L2 device path")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="Directory for captures")
     parser.add_argument("--count", type=int, default=1, help="Number of frames to capture")
     parser.add_argument("--interval", type=float, default=1.0, help="Seconds between captures")
@@ -171,6 +176,17 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=HEIGHT)
     args = parser.parse_args()
 
+    try:
+        with AcquisitionLock():
+            return run(args)
+    except AcquisitionBusyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def run(args: argparse.Namespace) -> int:
+    if args.device is None:
+        args.device = find_default_device()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 

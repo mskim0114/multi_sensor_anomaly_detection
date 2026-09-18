@@ -158,8 +158,12 @@ def run_rows_for_plan(e: dict) -> list[dict]:
         d = json.loads(path.read_text())
         prov = d.get("provenance") or {}
         seed = d.get("seed", d.get("args", {}).get("seed"))
+        # A factorial plan has several conditions per seed; the condition recorded by the
+        # run itself goes into the run id so rows stay distinct (EXP-.../ms1_se0_sc1/seed42).
+        cond = d.get("condition")
+        run_id = f"{e['experiment_id']}/{cond}/seed{seed}" if cond else f"{e['experiment_id']}/seed{seed}"
         rows.append({
-            "experiment_id": f"{e['experiment_id']}/seed{seed}",
+            "experiment_id": run_id,
             "hypothesis_id": e.get("hypothesis_id") or NO_RECORD,
             "status": "completed",
             "purpose": e.get("purpose") or "",

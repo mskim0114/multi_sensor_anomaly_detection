@@ -44,18 +44,62 @@ experiments:
 
   - experiment_id: EXP-20260907-003
     hypothesis_id: AIHUB-H1
-    status: blocked
-    purpose: 2^3 ablation(multiscale x SE x SupCon) 동일 예산·다중 seed 재실행. interaction 추정
-    blocked_by: [B-1, B-3]
+    status: completed
+    purpose: 2^3 ablation(multiscale x SE x SupCon) 동일 예산·동일 scheduler 규칙·3 seed. interaction 추정. 2026-09-18 16:49~21:07 KST 서버 완료 (연구노트 #19)
     seeds: [42, 123, 456]
+    code_commit: 4fac5bc
+    environment_profile: SERVER-TRAINING (factory_training venv)
+    result_dirs:
+      - results/factorial_ablation/ms0_se0_sc0_seed42
+      - results/factorial_ablation/ms0_se0_sc1_seed42
+      - results/factorial_ablation/ms0_se1_sc0_seed42
+      - results/factorial_ablation/ms0_se1_sc1_seed42
+      - results/factorial_ablation/ms1_se0_sc0_seed42
+      - results/factorial_ablation/ms1_se0_sc1_seed42
+      - results/factorial_ablation/ms1_se1_sc0_seed42
+      - results/factorial_ablation/ms1_se1_sc1_seed42
+      - results/factorial_ablation/ms0_se0_sc0_seed123
+      - results/factorial_ablation/ms0_se0_sc1_seed123
+      - results/factorial_ablation/ms0_se1_sc0_seed123
+      - results/factorial_ablation/ms0_se1_sc1_seed123
+      - results/factorial_ablation/ms1_se0_sc0_seed123
+      - results/factorial_ablation/ms1_se0_sc1_seed123
+      - results/factorial_ablation/ms1_se1_sc0_seed123
+      - results/factorial_ablation/ms1_se1_sc1_seed123
+      - results/factorial_ablation/ms0_se0_sc0_seed456
+      - results/factorial_ablation/ms0_se0_sc1_seed456
+      - results/factorial_ablation/ms0_se1_sc0_seed456
+      - results/factorial_ablation/ms0_se1_sc1_seed456
+      - results/factorial_ablation/ms1_se0_sc0_seed456
+      - results/factorial_ablation/ms1_se0_sc1_seed456
+      - results/factorial_ablation/ms1_se1_sc0_seed456
+      - results/factorial_ablation/ms1_se1_sc1_seed456
     primary_metric: val_macro_f1
-    comparison: 현재 단독 3개(20 epoch) vs full(30 epoch) 예산 불일치를 제거
-    stopping_rule: 전 조건 동일 상한 + 동일 scheduler + 동일 early stopping patience. lr 시계열을 반드시 기록
+    comparison: 팩토리얼 내부 contrast (legacy Table 8 과는 classifier dropout 통일 때문에 직접 비교 불가). 분석 compare_exp003.py
+    stopping_rule: 전 조건 30 epoch, AdamW 1e-3, ReduceLROnPlateau(0.5, 3), best val F1 checkpoint, early stopping 없음. lr 시계열 기록
     limitations: >-
-      2요소 조합 3개가 신규이므로 기존 표와 직접 이어 붙일 수 없다.
-      기존 V2 실행은 lr 시계열이 기록되지 않아 schedule 동일성을 사후 확인할 수 없으므로
-      V2 도 이 실험에서 함께 재실행해야 한다 (기존 0.943008 을 그대로 인용하지 않는다)
-    decision: null
+      n=3 seed, validation 장비 4대. LR 감소 시점은 run 마다 다르다(동일 scheduler 규칙이지 동일 schedule 이 아니다).
+      학습 비결정성 ±0.001 수준(EXP-20260918-002)이라 SE 주효과·3-way 는 잡음과 같은 크기다
+    decision: >-
+      완료. multiscale +0.011558 ± 0.000799, SupCon +0.004170 ± 0.000637, SE +0.000128 ± 0.001137, interaction 합 +0.003920
+      (V2→V2+ +0.016924 의 23 %). "단독 무효·결합 시너지" 해석 철회 대상 (D-021). 본문 교체는 O-111
+
+  - experiment_id: EXP-20260918-002
+    hypothesis_id: AIHUB-H1
+    status: completed
+    purpose: seed 42 동일 조건 V2+ 재실행 1회 — seed 가 초기 가중치와 결과를 재현하는지 (연구노트 #19 §5)
+    seeds: [42]
+    code_commit: 3920ef1
+    environment_profile: SERVER-TRAINING (factory_training venv)
+    result_dirs:
+      - results/v2plus_g2e_seed42_rep
+    primary_metric: val_macro_f1
+    comparison: results/v2plus_g2e_seed42 (G2e, 초기 가중치 sha256 58f43109…)
+    stopping_rule: G2e 와 동일 30 epoch
+    limitations: cuDNN 결정론 옵션을 켜지 않은 상태의 재실행. 비결정성 원인은 추정이며 확인하지 않았다
+    decision: >-
+      초기 가중치 sha256 동일. F1 0.954040 vs 0.954825 (Δ −0.0008), epoch 별 val F1 30 중 0 일치. 재현성 주장은
+      "초기 가중치 + 결과 분포" 로 한정 (N17)
 
   - experiment_id: EXP-20260907-004
     hypothesis_id: AIHUB-H3

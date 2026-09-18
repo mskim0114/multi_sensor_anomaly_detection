@@ -549,3 +549,37 @@ known-load 또는 실제 robot 운전 CT 데이터가 생기기 전까지 이 �
 **CT1 no-load / noise-floor baseline** 으로만 취급한다.
 
 hardware gain / PGA / burden 저항은 변경하지 않는다.
+
+---
+
+## 15. bench 데이터 — 현장 데이터가 아닌 장비 검증 데이터 (2026-09-18)
+
+사무실 책상에서 수집하는 데이터는 감시 대상 장비의 정상 상태가 아니므로 **이상 탐지 모델의
+학습·평가 데이터로 쓰지 않는다.** 정상 분포가 배포 환경과 다르면 one-class 기준이 성립하지
+않고, AI Hub 4-class 의 과열 단계는 책상에서 만들 수 없다. 대신 아래 세 목적에 한정한 **bench
+데이터**로 수집하며, 개발 baseline(§7)과 같은 방식으로 official 데이터셋과 격리한다.
+
+```
+실행       12_run_trial.py --scenario normal --severity 0 --test-mode [--duration N]
+위치       dataset/_smoke/normal_<RUN_ID>/          (official 디렉터리에 들어가지 않는다)
+식별       operator_note 가 아래 접두어로 시작한다. window builder 는
+           --scan-dir dataset/_smoke --operator-note-prefix <접두어> 로 걸러낸다
+```
+
+| 접두어 | 목적 | 구도 | 분량 |
+|---|---|---|---|
+| `bench_soak` | 파이프라인 내구: tick 누락·jitter·FFC·센서 warm-up/stale·저장 지연 | 무관 (아무 구도) | `--duration 28800` 이상, 2~3회 |
+| `bench_thermal_xcal` | FLIR 픽셀 온도 vs NTC 접촉 온도 대응 (관측만, 보정 상수는 만들지 않는다) | NTC 를 온도가 변하는 표면에 접촉, FLIR 가 같은 표면을 정면 30~50 cm 에서 관측 | canonical 360 s × 3~5회, 온도가 오르내리는 구간 |
+| `bench_transition` | 탐지 파이프라인 end-to-end 반응 리허설 | 위 구도 + 사람이 조작하는 상태 변화(PC 부하, 창문 개방 등) | 조작 시각을 operator_note 에 **사람이** 기록. 자동 label 없음 |
+
+원칙은 §13 그대로다. 가열·부하·팬 등을 제어하는 코드는 만들지 않고 **수동 조작 + 수동 기록**만
+한다. CT1 은 §14 의 noise floor 상태로 남는다. bench 트라이얼은 `protocol_compliant` 와 무관하게
+official completed count 에 포함하지 않으며, 서버 import 시 `smoke_trials` 로 분류된다.
+
+2026-09-18 실행 기록:
+
+```
+normal_20260918T082429Z   bench_soak 8h 시도, tick ~200 에서 xcal 구도 전환을 위해 operator 중단 (aborted, 부분 파일 보존)
+normal_20260918T082944Z / 083557Z / 084207Z   bench_thermal_xcal 1~3/3, canonical 360 s completed -> 관측만, 보정 불가 조건 (연구노트 #19 §7)
+normal_20260918T120817Z   bench_soak 8h 시도 #2, 21:08 KST 시작 (xcal 구도 유지)
+```

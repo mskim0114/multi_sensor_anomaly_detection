@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <title>현장 센서 모니터 · Factory Safety</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><div><span class="eyebrow">FACTORY SAFETY / JETSON</span><h1>현장 센서 모니터</h1></div></div>
+      <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection-label">서버 연결 대기</span><span class="separator"></span><time id="last-update">—</time></div>
+    </header>
+
+    <div id="replay-banner" class="banner replay" hidden>기록 재생 · 실시간 수집 아님 <span>저장된 측정값을 표시합니다.</span></div>
+    <div id="notice" class="banner notice" role="status" aria-live="polite">대시보드에 연결하고 있습니다.</div>
+
+    <section class="operation panel" aria-label="수집 제어 및 상태">
+      <div class="operation-main"><div class="session-heading"><span id="session-dot" class="dot"></span><h2 id="session-status">수집 상태 확인 중</h2><span id="current-badge" class="tag">데이터 대기</span></div><p id="session-detail">센서 스냅샷과 수집 상태를 불러옵니다.</p></div>
+      <div class="operation-numbers"><div><span class="label">스냅샷</span><strong id="sequence">—</strong></div><div><span class="label">틱 지터</span><strong id="jitter">—<small> ms</small></strong></div><div><span class="label">미리보기 경과</span><strong id="preview-age">—</strong></div></div>
+      <div class="controls"><button id="start-button" class="button primary" type="button" disabled><span aria-hidden="true">▶</span> 수집 시작</button><button id="stop-button" class="button secondary" type="button" disabled><span aria-hidden="true">■</span> 중지</button></div>
+      <p id="control-result" class="control-result" role="status" aria-live="polite" hidden></p>
+    </section>
+
+    <main>
+      <div class="primary-grid">
+        <section class="panel thermal-panel" aria-labelledby="thermal-title">
+          <div class="panel-heading"><div><span class="eyebrow">THERMAL IMAGE</span><h2 id="thermal-title">열화상 <span class="sensor-model">FLIR</span></h2></div><span id="flir-status" class="tag">대기</span></div>
+          <div class="thermal-stage">
+            <canvas id="thermal-canvas" width="160" height="120" aria-label="FLIR 열화상 환산값" role="img" hidden></canvas>
+            <div id="thermal-empty" class="thermal-empty"><span class="empty-reticle" aria-hidden="true"></span><strong>열화상 프레임 대기</strong><span>수신한 센서 프레임이 여기에 표시됩니다.</span></div>
+            <div class="image-topline"><span>160 × 120</span><span id="frame-number">FRAME —</span></div>
+            <div id="thermal-overlay" class="thermal-overlay" hidden></div>
+            <div class="image-bottomline"><span id="thermal-freshness">프레임 수신 전</span><span>온도 환산값 · 정확도 미검증</span></div>
+          </div>
+          <div class="thermal-legend"><span id="palette-min">— °C</span><div class="palette" aria-label="프레임별 자동 색상 범위"></div><span id="palette-max">— °C</span></div>
+          <p class="palette-note">프레임별 자동 색상 범위 · raw / 100 − 273.15</p>
+          <div class="thermal-stats"><div><span class="label">최저 환산값</span><strong id="thermal-min">—</strong><small>°C</small></div><div><span class="label">평균 환산값</span><strong id="thermal-mean">—</strong><small>°C</small></div><div><span class="label">최고 환산값</span><strong id="thermal-max">—</strong><small>°C</small></div></div>
+        </section>
+
+        <section class="trends" aria-label="주요 센서 측정값 및 추이">
+          <article class="panel metric-card ntc"><div class="metric-heading"><h2>접촉 온도 <span class="sensor-model">NTC</span></h2><span id="ntc-status" class="tag">대기</span></div><div class="metric-value"><strong id="ntc-value">—</strong><span>°C</span></div><canvas id="ntc-chart" class="trend-chart" aria-label="NTC 접촉 온도 최근 스냅샷 추이" role="img"></canvas><div class="metric-footer"><span id="ntc-range">측정값 대기</span><span>최근 120 스냅샷</span></div></article>
+          <article class="panel metric-card ct"><div class="metric-heading"><h2>전류 <span class="sensor-model">CT1</span></h2><span id="ct1-status" class="tag">대기</span></div><div class="metric-value"><strong id="ct-value">—</strong><span>A RMS</span></div><canvas id="ct-chart" class="trend-chart" aria-label="CT1 명목 환산 전류 최근 스냅샷 추이" role="img"></canvas><div class="metric-footer"><span id="ct-range">측정값 대기</span><span>명목 환산값</span></div></article>
+          <article class="panel metric-card pm"><div class="metric-heading"><h2>초미세먼지 <span class="sensor-model">SPS30</span></h2><span id="sps30-status" class="tag">대기</span></div><div class="metric-value"><strong id="pm-value">—</strong><span>μg/m³ <small>PM2.5</small></span></div><canvas id="pm-chart" class="trend-chart" aria-label="PM2.5 최근 스냅샷 추이" role="img"></canvas><div class="metric-footer"><span id="pm-range">측정값 대기</span><span id="sps30-freshness">수신 전</span></div></article>
+          <article class="panel metric-card co2"><div class="metric-heading"><h2>이산화탄소 <span class="sensor-model">SCD30</span></h2><span id="scd30-status" class="tag">대기</span></div><div class="metric-value"><strong id="co2-value">—</strong><span>ppm</span></div><canvas id="co2-chart" class="trend-chart" aria-label="SCD30 이산화탄소 최근 스냅샷 추이" role="img"></canvas><div class="metric-footer"><span id="co2-range">측정값 대기</span><span id="scd30-freshness">수신 전</span></div></article>
+        </section>
+      </div>
+
+      <div class="secondary-grid">
+        <section class="panel detail-panel" aria-labelledby="environment-title"><div class="panel-heading"><div><span class="eyebrow">ENVIRONMENT</span><h2 id="environment-title">환경 측정값</h2></div><span id="bme680-status" class="tag">BME680 대기</span></div><dl class="environment-grid"><div><dt>BME680 온도</dt><dd><strong id="bme-temperature">—</strong><span>°C</span></dd></div><div><dt>BME680 상대습도</dt><dd><strong id="bme-humidity">—</strong><span>%</span></dd></div><div><dt>BME680 기압</dt><dd><strong id="bme-pressure">—</strong><span>hPa</span></dd></div><div><dt>BME680 가스 저항</dt><dd><strong id="bme-gas">—</strong><span>Ω</span></dd></div><div><dt>SCD30 온도</dt><dd><strong id="scd-temperature">—</strong><span>°C</span></dd></div><div><dt>SCD30 상대습도</dt><dd><strong id="scd-humidity">—</strong><span>%</span></dd></div></dl><p class="detail-note">SCD30은 기본 약 2초 주기로 갱신됩니다. 새 값이 없는 틱의 이전 값 유지는 정상일 수 있습니다.</p></section>
+
+        <section class="panel detail-panel" aria-labelledby="detail-title"><div class="panel-heading"><div><span class="eyebrow">SENSOR DETAIL</span><h2 id="detail-title">입자 · 전류 상세</h2></div></div><dl class="compact-metrics"><div><dt>PM1.0</dt><dd><strong id="pm1-value">—</strong> <span>μg/m³</span></dd></div><div><dt>PM4.0</dt><dd><strong id="pm4-value">—</strong> <span>μg/m³</span></dd></div><div><dt>PM10</dt><dd><strong id="pm10-value">—</strong> <span>μg/m³</span></dd></div><div><dt>CT1 전압 RMS</dt><dd><strong id="ct-vrms">—</strong> <span>V</span></dd></div><div><dt>CT1 표본 수 / 실제 샘플링률</dt><dd><strong id="ct-sampling">—</strong></dd></div><div><dt>CT1 클리핑</dt><dd id="ct-clipping">—</dd></div></dl></section>
+
+        <section class="panel detail-panel" aria-labelledby="acquisition-title"><div class="panel-heading"><div><span class="eyebrow">ACQUISITION</span><h2 id="acquisition-title">기록 상태</h2></div><span id="quality-tag" class="tag">확인 대기</span></div><dl class="compact-metrics"><div><dt>저장 스냅샷</dt><dd id="snapshot-count">—</dd></div><div><dt>다음 시작 · 수집 시간</dt><dd id="duration">—</dd></div><div><dt>다음 시작 · CT 원시 저장</dt><dd id="ct-raw">—</dd></div><div><dt>열화상 수집 주기</dt><dd id="thermal-rate">—</dd></div></dl><div class="output-path"><span class="label">기본 출력 경로</span><code id="output-dir">—</code></div><div class="output-path"><span class="label">현재 기록 경로</span><code id="run-dir">—</code></div><p id="quality-detail" class="detail-note">센서 상태와 프레임 유효성을 확인합니다.</p></section>
+      </div>
+
+      <section class="disabled-strip" aria-label="비활성 센서"><span class="label">추가 채널</span><span><i class="dot" aria-hidden="true"></i> SGP30 <b id="sgp30-status">비활성</b></span><span><i class="dot" aria-hidden="true"></i> CT2 <b id="ct2-status">비활성</b></span><span><i class="dot" aria-hidden="true"></i> CT3 <b id="ct3-status">비활성</b></span><span><i class="dot" aria-hidden="true"></i> CT4 <b id="ct4-status">비활성</b></span><span class="disabled-note">미수집 채널은 — 로 표시</span></section>
+    </main>
+    <footer><span>JETSON · LOCAL SENSOR VIEW</span><span id="footer-state">실제 수신값만 표시합니다.</span></footer>
+  </div>
+</body>
+</html>

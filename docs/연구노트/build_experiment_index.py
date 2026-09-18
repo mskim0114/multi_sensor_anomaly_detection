@@ -143,6 +143,59 @@ def legacy_rows() -> list[dict]:
     return rows
 
 
+def run_rows_for_plan(e: dict) -> list[dict]:
+    """One row per completed run listed in a plan entry's `result_dirs`.
+
+    §11: a plan may map to several seed runs, and run ids must not be confused with the
+    hypothesis id. Numbers come from each run's results.json (never typed by hand); a
+    directory that does not exist yet yields no row, so a plan stays visibly incomplete.
+    """
+    rows = []
+    for rel in e.get("result_dirs") or []:
+        path = REPO_ROOT / rel / "results.json"
+        if not path.is_file():
+            continue
+        d = json.loads(path.read_text())
+        prov = d.get("provenance") or {}
+        seed = d.get("seed", d.get("args", {}).get("seed"))
+        rows.append({
+            "experiment_id": f"{e['experiment_id']}/seed{seed}",
+            "hypothesis_id": e.get("hypothesis_id") or NO_RECORD,
+            "status": "completed",
+            "purpose": e.get("purpose") or "",
+            "data_version": e.get("data_version") or "",
+            "raw_manifest_sha256": e.get("raw_manifest_sha256") or "",
+            "annotation_version": e.get("annotation_version") or "",
+            "split_manifest_sha256": e.get("split_manifest_sha256") or "",
+            "quality_policy_version": e.get("quality_policy_version") or "",
+            "input_schema_version": e.get("input_schema_version") or "",
+            "code_commit": prov.get("git_commit") or NO_RECORD,
+            "git_dirty": str(prov["git_dirty"]) if prov.get("git_dirty") is not None else NO_RECORD,
+            "environment_profile": prov.get("environment_profile") or NO_RECORD,
+            "environment_record": (f"{prov.get('hostname')} py{prov.get('python_version')} "
+                                   f"torch{prov.get('torch_version')} cuda{prov.get('torch_cuda')} "
+                                   f"{prov.get('gpu_name')}") if prov else NO_RECORD,
+            "config_path": prov.get("command") or NO_RECORD,
+            "seeds": str(seed),
+            "seed_controls_init": str(d.get("seed_controls_init", NO_RECORD)),
+            "primary_metric": e.get("primary_metric") or "val_macro_f1",
+            "primary_metric_value": d.get("val_f1_macro", NO_RECORD),
+            "secondary_metrics": "; ".join(x for x in [
+                f"val_accuracy={d.get('val_accuracy')}" if d.get("val_accuracy") is not None else "",
+                f"nm_errors={nm_errors(d.get('confusion_matrix'))}",
+                f"best_epoch={d.get('best_epoch', NO_RECORD)}",
+                f"init_sha256={str(d.get('initial_state_sha256', NO_RECORD))[:16]}",
+                f"started={prov.get('started_utc','')}", f"finished={prov.get('finished_utc','')}",
+            ] if x),
+            "comparison": e.get("comparison") or "",
+            "stopping_rule": e.get("stopping_rule") or "",
+            "result_location": rel,
+            "limitations": e.get("limitations") or "",
+            "decision": e.get("decision") or "",
+        })
+    return rows
+
+
 def plan_rows() -> list[dict]:
     try:
         import yaml
@@ -151,6 +204,10 @@ def plan_rows() -> list[dict]:
     plan = yaml.safe_load(PLAN_YAML.read_text())
     rows = []
     for e in plan.get("experiments") or []:
+        run_rows = run_rows_for_plan(e)
+        rows.extend(run_rows)
+        if run_rows and len(run_rows) >= len(e.get("seeds") or []) and e.get("status") == "completed":
+            continue  # 모든 seed 의 실행 행이 있으면 계획 행은 생략한다
         seeds = e.get("seeds")
         rows.append({
             "experiment_id": e["experiment_id"],

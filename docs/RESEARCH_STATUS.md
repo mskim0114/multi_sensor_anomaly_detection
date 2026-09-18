@@ -1,6 +1,6 @@
 # RESEARCH STATUS
 
-최종 갱신: 2026-09-18 · 기준 HEAD `ee4136f` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
+최종 갱신: 2026-09-18 · 기준 HEAD `be16342` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
 
 > **이 문서는 현재 단계·최우선 작업·blocker만 담는다.** 배포/환경/데이터 획득의 canonical
 > 현황은 [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)에 있고 여기서
@@ -31,7 +31,8 @@
 | **G2i** 국소 코드 결함 수정 | **완료** | F04·F03·F14a 적용 + 정적 검증. 연구노트 #16 §10 |
 | **G1-S** 서버 원시 재현 | **PASS** (2026-09-18, 서버 clone `572cff8`) | manifest 85 OK · 60/49/11 · tick-quality 일치 · raw 전후 불변 · **NPZ 2,280 배열 Jetson 과 동일, `baseline_stats.json` 바이트 동일**. 연구노트 #17 §6 |
 | **G2d** AI Hub 데이터 검증 | **PASS** (2026-09-18, SSD 작업 사본) | L2 전수 파싱(CSV·BIN·JSON 각 111,870) 실패 0 · L3 대응·규약·timestamp 111,870 일치 · L4 session 303/39, window 9,313/1,157, 장비 32/4 교집합 0, Δ=1 s. `session_index.py` 강제 재생성으로 확인. 연구노트 #17 §7 |
-| G2e~G2g 수정 적용·재실행 | blocked | G1-S + G2d 선행 |
+| **G2e** V2+ 3-seed 재실행 (EXP-20260907-002) | **완료** (2026-09-18, 첫 서버 GPU 학습) | F1 0.954825/0.952084/0.956400 (mean 0.954436, std 0.001783) vs legacy mean 0.955659. provenance·초기 가중치 hash 기록. [연구노트 #18](연구노트/연구노트_18_G2e_V2plus_재실행.md) |
+| G2f~G2g 2³ ablation·K-fold | 미착수 | G2e 기준 실행 확보로 착수 가능 |
 | G3 현장 문제 정의 | 미착수 | 로봇 소유기관 확인 필요 |
 | G4~G7 | 미착수 | — |
 
@@ -45,8 +46,8 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 
 | # | 작업 | 통과 조건 | 막는 것 |
 |---|---|---|---|
-| 1 | **G2e** 수정 전후 V2+ 재실행 (EXP-20260907-002) — 첫 서버 GPU 학습 | seed 42/123/456 · 동일 예산·scheduler · 결과는 서버 `results/` 새 디렉터리(논문 run 사본 덮어쓰기 금지) · 실행 기록에 git_commit·initial_state_sha256 | 사용자 학습 승인 |
-| 2 | **N15 열화상 범위 이탈 원인 조사** | 정규화 범위(30.98~146.10) 밖 프레임의 분포·장비·시점 확인. 논문 `:133` 정정 여부 판단 | 없음 — 읽기 전용 |
+| 1 | **동일 seed 재실행 1회** — bit-level 재현성 직접 증명 | seed 42 재실행의 초기 가중치 sha256 = `58f43109…` 이고 F1 동일(또는 cuDNN 비결정성 범위) | 사용자 학습 승인 (~20분) |
+| 2 | **EXP-20260907-003** 2³ ablation 동일 예산·scheduler·3 seed (8 조건 × 3 = 24 run, 각 ~20분 → GPU 2장 약 4시간) | interaction 추정 가능 여부 판정. V2 도 30 epoch 로 재실행 | 사용자 학습 승인 |
 | 3 | **B-7** 센서 데이터 서버 import 도구 복원 | 다음 import 를 같은 manifest 스키마로 재현 가능 | 없음 |
 
 ---
@@ -92,6 +93,9 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
   Validation 14.04 / 138.96 °C. 논문 `:133` "약 31~146 °C, clipping 불필요" 및 `ThermalStats(30.98, 146.10)` 과 불일치.
   범위 밖은 Training 프레임 212개(픽셀 0.029 %), Validation 31개(픽셀 0.15 %). 음수 프레임 11개는 물리적으로 불가능한 값.
   무결성 문제는 아니며 원인·학습 영향 미확인 → 연구노트 #17 §7.1, claim_evidence CE-047
+- **N16 G2e 재실행 결과** — clean revision `be16342`, seed 42/123/456, 각 ~20분. F1 mean 0.954436 (std 0.001783) vs
+  legacy 0.955659 (std 0.000467), Δ −0.0012. best epoch 24/29/26 (legacy 는 2개가 best@30). plateau LR 감소 시점이
+  seed 마다 다름(8 또는 13). **논문 수치를 대체하지 않는다**(D-020) → 연구노트 #18
 - **N14 `monai_env` 는 수술 영상 프로젝트용 공유 env 다** — 2025-12 생성, 336 패키지(monai·pydicom·SimpleITK·transformers). 기존 논문 실험이 이 위에서 돌았으나 정책상 전용 venv 로 교체(D-019). pin 은 그대로 옮겨 비교 가능성 유지 → 연구노트 #17 §6.3
 
 **지표 표기.** `49/60 = 81.7 %`는 **v1 윈도 유효율**이다. 판단 가용률이나 전 센서 정상 관측
@@ -113,6 +117,7 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 | [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md) | 서버 이관 canonical |
 | [SERVER_ENVIRONMENT.md](SERVER_ENVIRONMENT.md) | 서버 실측 (PARTIAL) |
 | [연구노트 #17](연구노트/연구노트_17_서버_스토리지_이관_및_실측.md) | 서버 실측·스토리지 이관·센서 데이터 보관 근거 |
+| [연구노트 #18](연구노트/연구노트_18_G2e_V2plus_재실행.md) | G2e V2+ 3-seed 재실행 결과 |
 | [LOCAL_REVIEW_20260910.md](LOCAL_REVIEW_20260910.md) | Codex 09-10 경로·캐시·RNG 수정 검증 |
 | [SENSOR_COLLECTION_REVIEW_20260917.md](SENSOR_COLLECTION_REVIEW_20260917.md) | Codex 09-17 수집기 재작성·`collect.sh` 검증 |
 | [JETSON_SENSOR_DASHBOARD.md](JETSON_SENSOR_DASHBOARD.md) | Codex 09-17 로컬 대시보드 |

@@ -441,12 +441,18 @@ Jetson 원본의 지문이며, 서버에서 재생성하는 것은 검증이 아
 2× RTX 6000(driver 580.178.04, `nvidia-smi` 정상) · 187 GiB · 루트 디스크 32 %(이관 후) ·
 `monai_env` 에 torch 2.6.0+cu124 · **`$HOME/venvs/factory_training` 없음**.
 
-**2026-09-18 추가 확인.** `monai_env` 에서 `src/` 가 요구하는 패키지 11개(torch 2.6.0+cu124,
-torchvision 0.21.0, numpy 2.2.6, sklearn 1.8.0, matplotlib 3.10.8, seaborn 0.13.2, pyyaml 6.0.3,
-onnx 1.20.0, onnxruntime 1.24.4, tqdm 4.67.1, pandas 2.3.3)가 전부 import 되고 CUDA 2장이 인식된다.
-**설치 없이 학습이 가능하다.** 남은 것은 `requirements-server.txt` 작성과, 이 env 를 SERVER-TRAINING
-으로 채택할지의 정책 결정(decisions O-108)이다. 결정 전에 패키지를 설치하지 않는다.
-참고: numpy 가 2.2.6 이라 Jetson 의 1.26.4 고정과 다르다. 두 프로파일의 numpy 를 맞추지 않는다.
+**2026-09-18 확정.** 전용 venv `$HOME/venvs/factory_training` 을 만들고 `requirements-server.txt`
+(pin 11개, 기존 결과를 낸 `monai_env` 의 버전을 그대로 옮김)로 설치했다. pin 11/11 일치, CUDA 12.4,
+RTX 6000 ×2 인식, `src` 패키지 import OK, V2Plus 2,849,940 params. 상세는
+[SERVER_ENVIRONMENT.md](SERVER_ENVIRONMENT.md) (상태 READY). `monai_env` 는 다른 프로젝트용 공유 env 라
+쓰지 않는다(decisions D-019). numpy 2.2.6 은 Jetson 1.26.4 와 다르며 맞추지 않는다.
+
+학습 실행은 항상 이 venv 로 한다:
+
+```bash
+cd /home/keti/projects/factory_safety
+~/venvs/factory_training/bin/python -m src.train_v2plus --seed 42 ...
+```
 
 ```
 hostname / OS / kernel / 아키텍처
@@ -488,8 +494,9 @@ canonical server venv 는 `$HOME/venvs/factory_training` 이다. **이미 존재
   지정한다. 서버의 실제 경로·권한·학습 의존성 검증은 여전히 audit 대상이다.
   수정·검증 범위는 [LOCAL_REVIEW_20260910.md](LOCAL_REVIEW_20260910.md)를 참조한다
 - `src/data/__init__.py` 가 `torch` 를 import 한다. Jetson 에는 torch 가 없어서 window
-  builder 를 파일 경로로 로드하도록 작성했다. 서버에서는 `python3 -m src.data.scripts.build_windows`
-  형식도 동작할 것으로 예상되지만 **검증되지 않았다.** package 구조를 바꾸지 않는다
+  builder 를 파일 경로로 로드하도록 작성했다. **서버에서는 `-m src.data.scripts.build_windows` 형식이
+  동작함을 2026-09-18 `factory_training` venv 에서 확인했다**(dry-run 5/1800/60/49/11 PASS).
+  package 구조는 바꾸지 않는다
 
 ---
 

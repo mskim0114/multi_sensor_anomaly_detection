@@ -1,20 +1,27 @@
-# SERVER-TRAINING direct dependencies.
+# SERVER-TRAINING direct dependencies for src/ (training, evaluation, ONNX export).
 #
-# PENDING: populate only after server environment audit.
+# Versions are pinned to the exact set that produced the existing results on the
+# training workstation (the shared `monai_env`, Python 3.12, CUDA 12.4), so new runs
+# stay comparable with the legacy V1~V2+ numbers. See docs/SERVER_ENVIRONMENT.md and
+# decisions.md D-019 for why a dedicated venv replaces the shared one.
 #
-# This file is intentionally empty of actual pins.
+# Install into the canonical venv only (never into system Python, never with sudo):
+#   /home/keti/miniconda3/bin/python3.12 -m venv "$HOME/venvs/factory_training"
+#   "$HOME/venvs/factory_training/bin/pip" install --upgrade pip
+#   "$HOME/venvs/factory_training/bin/pip" install -r requirements-server.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cu124
 #
-# The environment that produced it was a Jetson Orin Nano (aarch64, L4T R36.5.0).
-# Guessing server-side versions from a Jetson would be wrong on every axis that
-# matters: CPU architecture and wheel tags, CUDA version, the PyTorch build
-# channel (Jetson uses NVIDIA-specific wheels, servers use PyPI/conda), cuDNN,
-# NCCL and GPU topology.
-#
-# Audit procedure and the fields to fill in: docs/SERVER_ENVIRONMENT.md
-# Environment policy: docs/ENVIRONMENT_POLICY.md
-#
-# Target venv: $HOME/venvs/factory_training
-# Code area  : src/
-#
-# Do NOT install Jetson sensor packages here
-# (sensirion-*, onnxruntime-gpu Jetson wheel, Jetson.GPIO).
+# Jetson runtime packages (sensirion, Jetson.GPIO, onnxruntime-gpu for aarch64) are
+# NOT listed here on purpose. Do not mix the two profiles.
+
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+numpy==2.2.6
+scikit-learn==1.8.0
+matplotlib==3.10.8
+seaborn==0.13.2
+PyYAML==6.0.3
+onnx==1.20.0
+onnxruntime==1.24.4
+tqdm==4.67.1
+pandas==2.3.3

@@ -1,6 +1,6 @@
 # RESEARCH STATUS
 
-최종 갱신: 2026-09-18 · 기준 HEAD `572cff8` (push 완료) · 브랜치 `feature/jetson-sensor-integration`
+최종 갱신: 2026-09-18 · 기준 HEAD `3a8fa4b` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
 
 > **이 문서는 현재 단계·최우선 작업·blocker만 담는다.** 배포/환경/데이터 획득의 canonical
 > 현황은 [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)에 있고 여기서
@@ -45,9 +45,9 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 
 | # | 작업 | 통과 조건 | 막는 것 |
 |---|---|---|---|
-| 1 | **O-108 결정** — 학습 환경을 `monai_env` 로 확정할지 | `src/` 의존 11개 전부 import 확인, CUDA 2장 인식(연구노트 #17 §6). 설치 없이 사용 가능 | 사용자 판단 |
-| 2 | **G2d** 서버 SSD 작업 사본 L2→L4 검증 (재추출 없음) | handoff §13-7 STEP 10~12. **L2 전수 통과 없이 L4 숫자 일치만으로 성공 선언 금지** | O-108 결정 후 `monai_env` 로 실행 |
-| 3 | **G2e** 수정 전후 V2+ 재실행 (EXP-20260907-002) | 동일 예산·동일 scheduler·다중 seed. 결과는 서버 `results/` (논문 run 사본 위에 새 디렉터리) | G2d PASS |
+| 1 | **G2d** 서버 SSD 작업 사본 L2→L4 검증 (재추출 없음) | handoff §13-7 STEP 10~12. **L2 전수 통과 없이 L4 숫자 일치만으로 성공 선언 금지.** `factory_training` venv 로 실행 | 없음 — 즉시 가능 |
+| 2 | **G2e** 수정 전후 V2+ 재실행 (EXP-20260907-002) | 동일 예산·동일 scheduler·seed 42/123/456. 결과는 서버 `results/` 에 새 디렉터리(논문 run 사본 덮어쓰기 금지) | G2d PASS |
+| 3 | **B-7** 센서 데이터 서버 import 도구 복원 | 다음 import 를 같은 manifest 스키마로 재현 가능 | 없음 |
 
 ---
 
@@ -57,7 +57,7 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 |---|---|---|---|
 | **B-1** | **범위 축소:** Jetson 사본의 `extracted/`만 0바이트. **서버 사본은 온전**(Training/Validation 6종 모두 0바이트 0, 18 GB) | Jetson 에서의 재학습·재현만 불가. 서버는 L2~L4 검증 후 가능 | 서버 사본 L2~L4 검증 (handoff §13-7). Jetson 사본은 폐기/교체 대상 |
 | **B-2** | 옛 절대경로는 9/10 checkout 기준으로 수정. 경로·캐시 국소 검증 통과 | 서버의 데이터 위치·권한·학습 진입점 통합 검증 대기 | 실제 서버 audit 및 실행 검증 (handoff §9) |
-| **B-3** | **대부분 해소:** preflight + `monai_env` 의존성 확인(torch 2.6.0+cu124, torchvision 0.21, sklearn 1.8, onnx 1.20, onnxruntime 1.24 등 11개 전부). 남은 것: `requirements-server.txt` 작성, venv 정책 결정 | 학습 착수 가능. 정책 확정만 남음 | O-108 결정 |
+| ~~B-3~~ | **해소(09-18):** 전용 venv `factory_training` 생성·검증(pin 11/11, CUDA 2장), `requirements-server.txt` 확정, `SERVER_ENVIRONMENT.md` READY | — | — |
 | **B-4** | 이상 사건 0건 + 현장 모델(ModelAdapter) 미준비 | 사건 탐지율·선행시간·현장 오경보율 **계산 불가** | 이상 trial 확보(로봇 소유기관) + B0 이후 |
 | **B-5** | AI Hub CT1~4 물리 정의가 공급자 배포 패키지에 없음 | 현장 CT 설계·legacy 재사용 판단 근거 부족 | 공급자 확인 |
 | **B-6** | 공식 F1 averaging 방식·보고 split 확정 불가 (Jetson 의 `train_manager.py` 0바이트, docker 잘림). **서버에 docker 61 GB 완전본 존재** — 내부 미검증 | 공급자 보고치와의 직접 비교 불가 | 서버 docker 이미지에서 `/app/trainers/` 복구 시도, 또는 공급자 확인 |
@@ -88,6 +88,7 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 - **N11 HDD 는 학습 읽기용으로 부적합** — 무작위 소파일(bin 153 KB + csv 82 B) 읽기 HDD 51 샘플/s vs SSD 13,287 샘플/s. 1 epoch 이 558,780 파일 읽기. `extracted/` 18 GB 작업 사본을 SSD 에 두고 HDD 는 불변 아카이브 → 연구노트 #17 §6
 - **N12 서버 G1-S PASS** — 회계 60/49/11 일치, NPZ 2,280 배열 동일, `baseline_stats.json` 바이트 동일. NPZ 파일 해시는 zip 타임스탬프로 달라지므로 **파일 해시가 아닌 배열 단위**가 재현 기준 → 연구노트 #17 §6
 - **N13 서버 기존 clone 의 `results/v2plus` 는 논문 run 이 아니다** — F1 0.9551277 best@21 (08-06 Qwen 이후 재실행). 논문 run(0.9550 best@27)은 Jetson 사본이며 새 clone `results/` 로 전송 → 연구노트 #17 §6
+- **N14 `monai_env` 는 수술 영상 프로젝트용 공유 env 다** — 2025-12 생성, 336 패키지(monai·pydicom·SimpleITK·transformers). 기존 논문 실험이 이 위에서 돌았으나 정책상 전용 venv 로 교체(D-019). pin 은 그대로 옮겨 비교 가능성 유지 → 연구노트 #17 §6.3
 
 **지표 표기.** `49/60 = 81.7 %`는 **v1 윈도 유효율**이다. 판단 가용률이나 전 센서 정상 관측
 시간으로 환산하지 않는다. 판단 가용률은 현장 모델 부재로 계산 불가(B-4).

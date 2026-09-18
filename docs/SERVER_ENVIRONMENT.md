@@ -7,11 +7,37 @@
 ## 상태
 
 ```
-PARTIAL: read-only preflight 완료 (2026-09-17), 패키지·requirements audit 미완료
+READY: 전용 venv 생성·검증 완료 (2026-09-18). requirements-server.txt 확정
 ```
 
-아래 "실측" 절은 2026-09-17 서버에 SSH 로 접속해 읽기 전용으로 확인한 값이다. 추측이 아니다.
-아직 확정하지 않은 것: 학습 환경으로 쓸 venv 결정, `src/` 의존성 목록, `requirements-server.txt`.
+아래 "실측" 절은 2026-09-17~18 서버에 SSH 로 접속해 확인한 값이다. 추측이 아니다.
+
+## 학습 환경 — `$HOME/venvs/factory_training` (2026-09-18 생성)
+
+```
+생성      /home/keti/miniconda3/bin/python3.12 -m venv /home/keti/venvs/factory_training
+설치      pip install -r requirements-server.txt --extra-index-url https://download.pytorch.org/whl/cu124
+          PIP_EXIT=0 · 11:38:33 ~ 11:41:26 · 루트 디스크(nvme1n1p4) · 5.6 GB · 패키지 53개
+검증      pin 11/11 일치 · torch.version.cuda 12.4 · cuda.is_available True · Quadro RTX 6000 ×2
+          import src.data / src.models.v2_plus / src.data.window_builder OK
+          V2Plus(lags=[1,5,10]) 파라미터 2,849,940 (논문 수치와 일치)
+          python -m src.data.scripts.build_windows --dry-run  5/1800/60/49/11 PASS   <- -m 형식 검증됨
+          DataConfig 기본 경로가 clone 기준으로 SSD 작업 사본을 가리킴
+```
+
+| 패키지 | pin | 출처 |
+|---|---|---|
+| torch / torchvision | 2.6.0+cu124 / 0.21.0+cu124 | download.pytorch.org/whl/cu124 |
+| numpy | 2.2.6 | PyPI |
+| scikit-learn / pandas | 1.8.0 / 2.3.3 | PyPI |
+| matplotlib / seaborn | 3.10.8 / 0.13.2 | PyPI |
+| PyYAML / tqdm | 6.0.3 / 4.67.1 | PyPI |
+| onnx / onnxruntime | 1.20.0 / 1.24.4 | PyPI |
+
+pin 은 기존 결과(V1~V2+, 논문)를 낸 공유 env `monai_env` 의 버전을 그대로 옮긴 것이다. 그래서
+새 실행이 기존 수치와 비교 가능하다. `monai_env`(수술 영상 프로젝트용, 336 패키지, 9.7 GB)는
+더 이상 이 프로젝트의 학습에 쓰지 않는다(decisions D-019). numpy 2.2.6 은 Jetson 의 1.26.4 고정과
+다르며 두 프로파일을 맞추지 않는다.
 
 ## 실측 (2026-09-17, keti@10.252.219.59)
 
@@ -24,7 +50,7 @@ PARTIAL: read-only preflight 완료 (2026-09-17), 패키지·requirements audit 
 | 루트 디스크 | 908 GB · **이관 후 269 GB 사용 / 593 GB 여유 / 32 %** (이관 전 97 %) |
 | 데이터 디스크 | SSD `/mnt/data-ssd` 1 TB(비어 있음) · HDD `/mnt/data-hdd` 7.3 TB(2.9 TB 여유). UUID fstab, `nofail`. **boot-time 마운트 미검증** |
 | Python | 시스템 3.10 (torch 없음) · `/home/keti/monai_env` 3.12.13 |
-| torch 환경 | **`$HOME/venvs/factory_training` 없음.** `/home/keti/monai_env` (python venv, miniconda 3.12 base) 에 torch **2.6.0+cu124**, `torch.cuda.is_available()=True` |
+| torch 환경 | **`$HOME/venvs/factory_training` 생성·검증 완료 (위 절).** 기존 `/home/keti/monai_env` 는 수술 영상 프로젝트용 공유 env — 참조만 |
 | conda envs | etc / stock / time-llm / uni2ts — torch 없음 |
 | Docker | 29.6.0 · compose 5.1.4 · keti 접근 가능 · 이미지 23 GB |
 | 저장소 clone | `/home/keti/factory_safety` = private `mskim0114/factory_safety` main `5feabb5` (+ `public-upstream` 원격) |
@@ -33,8 +59,7 @@ PARTIAL: read-only preflight 완료 (2026-09-17), 패키지·requirements audit 
 근거와 이관 과정: [연구노트 #17](연구노트/연구노트_17_서버_스토리지_이관_및_실측.md),
 `~/review_runs/20260917_monitoring/server_preflight.json` (Jetson 보관).
 
-**미결.** `monai_env` 를 SERVER-TRAINING 환경으로 채택할지, 정책대로 `factory_training` 을 새로 만들지는
-결정되지 않았다(decisions O-108). 결정 전에는 `monai_env` 에 패키지를 설치하지 않는다.
+**결정됨(2026-09-18, D-019).** 정책대로 전용 `factory_training` 을 만들었고 `monai_env` 는 건드리지 않았다.
 
 ## 왜 처음에 비워 두었는가
 

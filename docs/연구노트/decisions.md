@@ -196,6 +196,22 @@
 - **근거:** 연구노트 #17 §6. 새 clone 은 G1-S PASS 로 동작 검증됨.
 - **재검토 조건:** 두 저장소 정책(O-109)이 정해지면 하나로 합칠 수 있다.
 
+## D-019 · SERVER-TRAINING 은 전용 venv `factory_training`, `monai_env` 는 쓰지 않는다 — ACTIVE (2026-09-18)
+
+- **결정:** `/home/keti/venvs/factory_training`(Python 3.12.13, 루트 디스크, 5.6 GB, 53 패키지)을 만들고
+  `requirements-server.txt` 의 pin 11개로 설치했다. pin 은 기존 결과를 낸 `monai_env` 의 버전을
+  그대로 옮겨 비교 가능성을 유지한다. 새 학습 결과는 이 env 에서만 낸다.
+- **대안:** `monai_env` 채택 → 수술 영상 프로젝트(physical-ai-research)용 공유 env(336 패키지, monai·
+  pydicom·SimpleITK·transformers 포함). 다른 프로젝트의 pip 변경이 우리 torch/numpy 를 바꿀 수 있고,
+  `requirements-server.txt` 가 300여 개 무관 패키지로 오염되며, 실험 기록의 environment_record 가
+  우리가 통제하지 않는 env 를 가리킨다.
+- **근거:** ENVIRONMENT_POLICY §1(프로파일 전용 venv). 검증: pin 11/11 일치, CUDA 12.4 · RTX 6000 ×2,
+  `src` 패키지 import OK, V2Plus 2,849,940 params, `-m src.data.scripts.build_windows --dry-run` PASS.
+  연구노트 #17 §6.3.
+- **부수:** handoff §9 의 "`-m` 형식은 검증되지 않았다" 는 이제 검증됨으로 바뀐다.
+- **재검토 조건:** torch/CUDA 를 올려야 할 때 — 그때는 새 pin 과 기존 결과 재현 여부를 함께 기록한다.
+  `monai_env` 는 O-107 과 무관하게 그대로 둔다.
+
 ---
 
 ## OPEN — 결정하지 않은 것
@@ -210,6 +226,5 @@
 | O-105 | 산업 수용 기준 (허용 오경보·필요 선행시간·최저 탐지율) | 현장 담당자 합의 |
 | O-106 | partner platform 사양 | `CONSORTIUM_DATA_PLATFORM_QUESTIONS.md` P01~P20 |
 | O-107 | `physical-ai-research/.git` 61 GB (pack 59 GB + 미완료 tmp_pack 3개) 정리 여부 — `git gc`·tmp_pack 삭제는 이력 작업 | 사용자 판단 (연구노트 #17 §3) |
-| O-108 | SERVER-TRAINING 환경: 기존 `monai_env` 채택 vs `$HOME/venvs/factory_training` 신설. **09-18 확인: `monai_env` 에 `src/` 의존 11개 전부 있고 CUDA 2장 인식 — 설치 없이 학습 가능.** 권고: `monai_env` 채택 후 `requirements-server.txt` 를 그 env 의 실제 버전으로 작성 | 사용자 판단. 결정 전 패키지 설치 금지 |
 | O-109 | 서버 clone(`5feabb5`, private main)에 Jetson 작업 브랜치를 어떻게 반영할지 — merge / checkout / 두 저장소 동기화 정책 | 사용자 판단 (B-9) |
 | O-110 | 센서 데이터 자동 업로드 서비스 도입 여부와 시점 (현재 1회 수동 import 만) | 사용자 판단 (B-7 도구 복원 선행) |

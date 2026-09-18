@@ -2,15 +2,19 @@
 """Train V2+ model (Multi-Scale TempDiff + Channel Attention + SupCon Loss).
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.train_v2plus
     python -m src.train_v2plus --epochs 30 --supcon-weight 0.3
 """
 
+import sys
 import argparse
+import contextlib
+import hashlib
 import json
 import logging
 import os
+import random
 import time
 from pathlib import Path
 
@@ -19,6 +23,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.paths import project_path
 
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.v2_plus import V2Plus, SupConLoss
@@ -38,7 +46,7 @@ def enable_fast_math():
     torch.backends.cudnn.benchmark = True
     logger.info("Fast math enabled: TF32 matmul, TF32 cudnn, cudnn benchmark=True")
 
-RESULTS_DIR = "/home/keti/factory_safety/results/v2plus"
+RESULTS_DIR = project_path("results/v2plus")
 
 
 def train_one_epoch(model, loader, ce_criterion, supcon_criterion,
@@ -93,8 +101,28 @@ def train_one_epoch(model, loader, ce_criterion, supcon_criterion,
     return avg_loss, acc, f1
 
 
+def state_dict_sha256(model) -> str:
+    """Fingerprint of the parameters as currently initialised.
+
+    Recorded so a later run can prove it started from the same weights; §11 of the
+    research brief requires the initial-weight hash and no run had it before.
+    """
+    h = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        h.update(name.encode())
+        h.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+    return h.hexdigest()
+
+
 @torch.no_grad()
-def evaluate(model, loader, ce_criterion, device):
+def evaluate(model, loader, ce_criterion, device, use_amp=False):
+    """Validation pass. `use_amp` must mirror the training precision.
+
+    This used to enter CUDA autocast unconditionally, which made `--amp` a no-op for
+    evaluation and left fp32 training paired with fp16 evaluation. Near-tie argmaxes on
+    the Normal/Mild boundary can flip under fp16, so evaluation precision now follows the
+    flag that the run was launched with.
+    """
     model.eval()
     total_loss = 0.0
     all_preds, all_labels = [], []
@@ -104,9 +132,7 @@ def evaluate(model, loader, ce_criterion, device):
         thermal = batch["thermal"].to(device, non_blocking=True)
         labels = batch["label"].to(device, non_blocking=True)
 
-        # Use autocast for consistent mixed precision during eval
-        # (harmless in fp32 mode; keeps AMP-trained + fp32-trained eval symmetric)
-        with torch.amp.autocast("cuda"):
+        with (torch.amp.autocast("cuda") if use_amp else contextlib.nullcontext()):
             logits = model(sensor, thermal)
             loss = ce_criterion(logits, labels)
 
@@ -133,6 +159,9 @@ def main():
                         help="Weight for SupCon loss (0=CE only, 1=SupCon only)")
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--gpu", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Global RNG seed. Set BEFORE the model is built, so it "
+                             "controls the initial weights as well as the sample order.")
     parser.add_argument("--amp", action="store_true",
                         help="Enable Automatic Mixed Precision for faster training")
     parser.add_argument("--fast", action="store_true",
@@ -157,6 +186,7 @@ def main():
     # Data
     cfg = DataConfig()
     cfg.batch_size = args.batch_size
+    cfg.seed = args.seed
     dm = ManufacturingDataModule(cfg)
     dm.setup()
 
@@ -165,6 +195,14 @@ def main():
 
     logger.info(f"Train: {len(dm.train_dataset)} windows, {len(train_loader)} batches")
     logger.info(f"Val: {len(dm.val_dataset)} windows, {len(val_loader)} batches")
+
+    # Seeds are set here, before any parameter is allocated. Setting them later would
+    # leave the initial weights on the process-default RNG (see 연구노트 #16, F03).
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     # Model
     model = V2Plus(
@@ -176,7 +214,9 @@ def main():
     ).to(device)
 
     param_count = sum(p.numel() for p in model.parameters())
+    init_state_sha256 = state_dict_sha256(model)
     logger.info(f"Model parameters: {param_count:,}")
+    logger.info(f"Initial weight sha256: {init_state_sha256}")
     logger.info(f"Temporal diff lags: {lags}")
     logger.info(f"SupCon weight: {args.supcon_weight}")
 
@@ -216,7 +256,7 @@ def main():
         )
 
         val_loss, val_acc, val_f1, val_preds, val_labels = evaluate(
-            model, val_loader, ce_criterion, device,
+            model, val_loader, ce_criterion, device, use_amp=args.amp,
         )
 
         scheduler.step(val_loss)
@@ -254,7 +294,7 @@ def main():
     ckpt = torch.load(os.path.join(RESULTS_DIR, "best_model.pt"), weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     val_loss, val_acc, val_f1, val_preds, val_labels = evaluate(
-        model, val_loader, ce_criterion, device,
+        model, val_loader, ce_criterion, device, use_amp=args.amp,
     )
 
     logger.info(f"Best epoch: {ckpt['epoch']}")
@@ -269,7 +309,7 @@ def main():
     logger.info(f"Confusion Matrix:\n{cm}")
 
     # Compare with V2
-    v2_path = "/home/keti/factory_safety/results/ablation_v2/results.json"
+    v2_path = project_path("results/ablation_v2/results.json")
     if os.path.exists(v2_path):
         with open(v2_path) as f:
             v2 = json.load(f)
@@ -289,6 +329,9 @@ def main():
         "confusion_matrix": cm.tolist(),
         "args": vars(args),
         "model_params": param_count,
+        "seed": args.seed,
+        "seed_controls_init": True,
+        "initial_state_sha256": init_state_sha256,
     }
     with open(os.path.join(RESULTS_DIR, "results.json"), "w") as f:
         json.dump(results, f, indent=2)

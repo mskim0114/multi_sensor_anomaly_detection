@@ -43,7 +43,11 @@ class TimesBlock(nn.Module):
         freq_magnitudes[:, 0] = 0  # remove DC component
 
         _, top_indices = torch.topk(freq_magnitudes, self.top_k, dim=1)  # (B, top_k)
-        periods = T // (top_indices + 1)  # convert freq index to period
+        # rFFT bin k corresponds to period T/k. The DC bin is zeroed above but stays in
+        # the array, so the index needs no +1 offset: a length-30 period-10 sine peaks at
+        # bin 3 and must map back to 10, not 7. clamp(min=1) guards the zeroed DC bin,
+        # which topk can still return when every other magnitude is 0.
+        periods = T // top_indices.clamp(min=1)  # convert freq index to period
         periods = periods.clamp(min=2, max=T)
 
         # Use the most common period across the batch

@@ -14,11 +14,12 @@ Experiments:
     lag_1_3_7, lag_1_10_20: Different lag combinations
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.train_paper_experiments --all
     python -m src.train_paper_experiments --exp v2a
 """
 
+import sys
 import argparse
 import json
 import logging
@@ -31,13 +32,18 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.paths import project_path
+
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.v2_plus import V2Plus, SupConLoss, SEBlock
 from src.models.ablation_variants import LSTMWithTemporalDiff
+from src.train_v2plus import state_dict_sha256
 
 logger = logging.getLogger(__name__)
 
-RESULTS_BASE = "/home/keti/factory_safety/results/paper_experiments"
+RESULTS_BASE = project_path("results/paper_experiments")
 
 
 # ========== Model Variants ==========
@@ -234,12 +240,20 @@ def evaluate(model, loader, criterion, device):
     return avg_loss, acc, f1, np.array(all_preds), np.array(all_labels)
 
 
-def run_experiment(exp_name, model, device, epochs, lr, batch_size,
+def run_experiment(exp_name, model_factory, device, epochs, lr, batch_size,
                    use_supcon=False, supcon_weight=0.3, seed=42):
+    """Run one experiment.
+
+    `model_factory` is a zero-argument callable, not an instance. The instance used to be
+    built by the caller before `run_experiment` ran, which meant the seed set below could
+    not control the initial weights, and consecutive experiments inherited whatever RNG
+    state the previous one left behind (see 연구노트 #16, F03). Building the model here,
+    after seeding, makes the initial weights a function of `seed`.
+    """
     results_dir = os.path.join(RESULTS_BASE, exp_name)
     Path(results_dir).mkdir(parents=True, exist_ok=True)
 
-    # Set seeds
+    # Set seeds BEFORE any parameter is allocated.
     torch.manual_seed(seed)
     np.random.seed(seed)
     if torch.cuda.is_available():
@@ -253,8 +267,11 @@ def run_experiment(exp_name, model, device, epochs, lr, batch_size,
     train_loader = dm.train_dataloader()
     val_loader = dm.val_dataloader()
 
-    model = model.to(device)
+    model = model_factory().to(device)
     param_count = sum(p.numel() for p in model.parameters())
+    init_state_sha256 = state_dict_sha256(model)
+    logger.info(f"[{exp_name}] seed={seed} params={param_count:,} "
+                f"init_sha256={init_state_sha256}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss(weight=dm.class_weights.to(device))
@@ -301,6 +318,8 @@ def run_experiment(exp_name, model, device, epochs, lr, batch_size,
         "val_f1_macro": float(val_f1), "val_accuracy": float(val_acc),
         "confusion_matrix": cm.tolist(), "normal_mild_errors": nm_errors,
         "params": param_count, "seed": seed,
+        "seed_controls_init": True,
+        "initial_state_sha256": init_state_sha256,
     }
     with open(os.path.join(results_dir, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
@@ -314,41 +333,41 @@ EXPERIMENTS = {
     # Major 1: V2+ ablation separation
     "v2a": lambda dev: run_experiment(
         "v2a_multiscale_only",
-        V2MultiScaleOnly(lags=[1, 5, 10]),
+        lambda: V2MultiScaleOnly(lags=[1, 5, 10]),
         dev, epochs=20, lr=1e-3, batch_size=16),
     "v2b": lambda dev: run_experiment(
         "v2b_se_only",
-        V2SEOnly(),
+        lambda: V2SEOnly(),
         dev, epochs=20, lr=1e-3, batch_size=16),
     "v2c": lambda dev: run_experiment(
         "v2c_supcon_only",
-        V2SupConOnly(),
+        lambda: V2SupConOnly(),
         dev, epochs=20, lr=1e-3, batch_size=16, use_supcon=True, supcon_weight=0.3),
 
     # Major 2: Sensor-only
     "sensor_only": lambda dev: run_experiment(
         "v2plus_sensor_only",
-        V2PlusSensorOnly(lags=[1, 5, 10]),
+        lambda: V2PlusSensorOnly(lags=[1, 5, 10]),
         dev, epochs=30, lr=1e-3, batch_size=16, use_supcon=True, supcon_weight=0.3),
 
     # Major 3: Repeated runs
     "seed123": lambda dev: run_experiment(
         "v2plus_seed123",
-        V2Plus(lags=[1, 5, 10]),
+        lambda: V2Plus(lags=[1, 5, 10]),
         dev, epochs=30, lr=1e-3, batch_size=16, use_supcon=True, supcon_weight=0.3, seed=123),
     "seed456": lambda dev: run_experiment(
         "v2plus_seed456",
-        V2Plus(lags=[1, 5, 10]),
+        lambda: V2Plus(lags=[1, 5, 10]),
         dev, epochs=30, lr=1e-3, batch_size=16, use_supcon=True, supcon_weight=0.3, seed=456),
 
     # Minor 6: Lag sensitivity
     "lag_1_3_7": lambda dev: run_experiment(
         "lag_1_3_7",
-        V2Plus(lags=[1, 3, 7]),
+        lambda: V2Plus(lags=[1, 3, 7]),
         dev, epochs=30, lr=1e-3, batch_size=16, use_supcon=True, supcon_weight=0.3),
     "lag_1_10_20": lambda dev: run_experiment(
         "lag_1_10_20",
-        V2Plus(lags=[1, 10, 20]),
+        lambda: V2Plus(lags=[1, 10, 20]),
         dev, epochs=30, lr=1e-3, batch_size=16, use_supcon=True, supcon_weight=0.3),
 }
 

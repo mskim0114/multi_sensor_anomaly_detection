@@ -179,6 +179,23 @@
 - **근거:** handoff §13-6. 서버 extracted 6종 모두 0바이트 0.
 - **재검토 조건:** 서버 사본이 L2(파싱) 검증에서 실패할 때 → 그때는 서버 zip 684개로 재추출.
 
+## D-017 · 학습 읽기용 데이터는 SSD 작업 사본, HDD 는 불변 아카이브 — ACTIVE (2026-09-18)
+
+- **결정:** AI Hub `extracted/`(18 GB)의 작업 사본을 `/mnt/data-ssd/keti_data/factory_safety/aihub_extracted/`
+  에 두고 작업 clone 의 `data/aihub/datasets/extracted` 가 그것을 가리킨다. HDD 사본은 아카이브로만 쓴다.
+- **대안:** HDD 에서 직접 읽기 → 무작위 소파일 읽기 51 샘플/s. 1 epoch 558,780 파일이라 I/O 병목.
+- **근거:** handoff §13-8, 연구노트 #17 §6. SSD 사본은 HDD 와 수·바이트 동일(459,873 · 17,795,317,991 B).
+- **재검토 조건:** SSD 여유(891 GB) 부족 시, 또는 데이터가 SSD 를 넘을 때.
+
+## D-018 · 서버 작업 clone 은 Jetson 과 같은 경로에 새로 만든다 — ACTIVE (2026-09-18)
+
+- **결정:** `/home/keti/projects/factory_safety` 에 public 저장소 feature 브랜치를 새로 clone 한다.
+  기존 `/home/keti/factory_safety`(private main `5feabb5`, `docs/특허` dirty 51)는 건드리지 않는다.
+- **대안:** 기존 clone 에 feature 브랜치를 checkout → 특허 문서 51개를 stash/commit 해야 하고 실수 시
+  유실 위험. 기존 clone 의 `results/` 도 논문 run 이 아닌 재실행분이라 섞이면 혼란.
+- **근거:** 연구노트 #17 §6. 새 clone 은 G1-S PASS 로 동작 검증됨.
+- **재검토 조건:** 두 저장소 정책(O-109)이 정해지면 하나로 합칠 수 있다.
+
 ---
 
 ## OPEN — 결정하지 않은 것
@@ -193,6 +210,6 @@
 | O-105 | 산업 수용 기준 (허용 오경보·필요 선행시간·최저 탐지율) | 현장 담당자 합의 |
 | O-106 | partner platform 사양 | `CONSORTIUM_DATA_PLATFORM_QUESTIONS.md` P01~P20 |
 | O-107 | `physical-ai-research/.git` 61 GB (pack 59 GB + 미완료 tmp_pack 3개) 정리 여부 — `git gc`·tmp_pack 삭제는 이력 작업 | 사용자 판단 (연구노트 #17 §3) |
-| O-108 | SERVER-TRAINING 환경: 기존 `monai_env`(torch 2.6.0+cu124) 채택 vs 정책대로 `$HOME/venvs/factory_training` 신설 | 사용자 판단. 결정 전 패키지 설치 금지 |
+| O-108 | SERVER-TRAINING 환경: 기존 `monai_env` 채택 vs `$HOME/venvs/factory_training` 신설. **09-18 확인: `monai_env` 에 `src/` 의존 11개 전부 있고 CUDA 2장 인식 — 설치 없이 학습 가능.** 권고: `monai_env` 채택 후 `requirements-server.txt` 를 그 env 의 실제 버전으로 작성 | 사용자 판단. 결정 전 패키지 설치 금지 |
 | O-109 | 서버 clone(`5feabb5`, private main)에 Jetson 작업 브랜치를 어떻게 반영할지 — merge / checkout / 두 저장소 동기화 정책 | 사용자 판단 (B-9) |
 | O-110 | 센서 데이터 자동 업로드 서비스 도입 여부와 시점 (현재 1회 수동 import 만) | 사용자 판단 (B-7 도구 복원 선행) |

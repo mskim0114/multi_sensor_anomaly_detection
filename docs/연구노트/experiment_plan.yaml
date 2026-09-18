@@ -100,9 +100,10 @@ experiments:
 
   - experiment_id: EXP-20260907-008
     hypothesis_id: not_applicable
-    status: planned
-    purpose: G1-S 서버 원시 재현. 학습 실행이 아니며 전처리 재현 검증
-    blocked_by: [B-3]
+    status: completed
+    purpose: G1-S 서버 원시 재현. 학습 실행이 아니며 전처리 재현 검증. 2026-09-18 PASS (연구노트 #17 §6.4)
+    result_location: server:/home/keti/projects/factory_safety/processed/development_baseline_v1
+    code_commit: 572cff8
     seeds: not_applicable
     primary_metric: window_accounting
     comparison: Jetson G1-J 결과 60/49/11, 구조오류 0

@@ -157,10 +157,20 @@ def plan_rows() -> list[dict]:
             "hypothesis_id": e.get("hypothesis_id") or NO_RECORD,
             "status": e.get("status") or "planned",
             "purpose": e.get("purpose") or "",
-            "data_version": "", "raw_manifest_sha256": "", "annotation_version": "",
-            "split_manifest_sha256": "", "quality_policy_version": "",
-            "input_schema_version": "", "code_commit": "", "git_dirty": "",
-            "environment_profile": "", "environment_record": "", "config_path": "",
+            # A plan entry that has since completed may carry provenance of its own
+            # (e.g. the G1-S reproduction, which has no results.json). Pass those
+            # through verbatim; everything unstated stays empty, never guessed.
+            "data_version": e.get("data_version") or "",
+            "raw_manifest_sha256": e.get("raw_manifest_sha256") or "",
+            "annotation_version": e.get("annotation_version") or "",
+            "split_manifest_sha256": e.get("split_manifest_sha256") or "",
+            "quality_policy_version": e.get("quality_policy_version") or "",
+            "input_schema_version": e.get("input_schema_version") or "",
+            "code_commit": e.get("code_commit") or "",
+            "git_dirty": e.get("git_dirty") or "",
+            "environment_profile": e.get("environment_profile") or "",
+            "environment_record": e.get("environment_record") or "",
+            "config_path": e.get("config_path") or "",
             "seeds": (", ".join(map(str, seeds)) if isinstance(seeds, list) else (seeds or "")),
             "seed_controls_init": "true (수정안 적용 후)",
             "primary_metric": e.get("primary_metric") or "",
@@ -168,7 +178,7 @@ def plan_rows() -> list[dict]:
             "secondary_metrics": "",
             "comparison": e.get("comparison") or "",
             "stopping_rule": e.get("stopping_rule") or "",
-            "result_location": "",
+            "result_location": e.get("result_location") or "",
             "limitations": "; ".join(filter(None, [
                 e.get("limitations"),
                 ("blocked_by=" + ",".join(e["blocked_by"])) if e.get("blocked_by") else "",

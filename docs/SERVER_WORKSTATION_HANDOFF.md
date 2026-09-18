@@ -351,6 +351,22 @@ git checkout feature/jetson-sensor-integration
 기존 클론이 있으면 `git pull --ff-only` 만 쓴다. `git reset` / `git clean` / force checkout /
 rebase 로 작업물을 날리지 않는다.
 
+**2026-09-18 서버 실제 레이아웃.** 서버에는 clone 이 둘이다. 혼동하지 않는다.
+
+```
+/home/keti/projects/factory_safety     작업 clone. public 저장소 feature 브랜치 572cff8. Jetson 과 같은 경로
+                                       remote origin = public, remote private = factory_safety (fetch 용)
+  data/aihub/{models,docs}             -> HDD 아카이브 심볼릭 링크
+  data/aihub/datasets/<zip들>          -> HDD 아카이브 심볼릭 링크
+  data/aihub/datasets/extracted        -> /mnt/data-ssd/keti_data/factory_safety/aihub_extracted (SSD 작업 사본)
+  dataset/_smoke                       -> HDD sensor_data import 의 smoke_trials (baseline 5 trial 포함)
+  results/                             Jetson 논문 run 산출물 사본 (48 파일, 363 MB)
+  processed/development_baseline_v1    G1-S 서버 실행 산출물
+
+/home/keti/factory_safety              기존 clone. private main 5feabb5 + docs/특허 dirty 51. 건드리지 않는다.
+                                       results/ 는 08-06 Qwen 이후 재실행분(논문 run 아님)
+```
+
 ### STEP 2 — branch / commit 확인
 
 ```bash
@@ -425,9 +441,12 @@ Jetson 원본의 지문이며, 서버에서 재생성하는 것은 검증이 아
 2× RTX 6000(driver 580.178.04, `nvidia-smi` 정상) · 187 GiB · 루트 디스크 32 %(이관 후) ·
 `monai_env` 에 torch 2.6.0+cu124 · **`$HOME/venvs/factory_training` 없음**.
 
-아직 남은 audit 항목은 아래 중 **패키지 목록·`src/` 의존성·`requirements-server.txt`** 이고,
-학습 환경을 `monai_env` 로 할지 정책대로 새 venv 를 만들지는 **결정되지 않았다**(decisions O-108).
-서버 agent 는 그 결정 전에 패키지를 설치하지 않는다.
+**2026-09-18 추가 확인.** `monai_env` 에서 `src/` 가 요구하는 패키지 11개(torch 2.6.0+cu124,
+torchvision 0.21.0, numpy 2.2.6, sklearn 1.8.0, matplotlib 3.10.8, seaborn 0.13.2, pyyaml 6.0.3,
+onnx 1.20.0, onnxruntime 1.24.4, tqdm 4.67.1, pandas 2.3.3)가 전부 import 되고 CUDA 2장이 인식된다.
+**설치 없이 학습이 가능하다.** 남은 것은 `requirements-server.txt` 작성과, 이 env 를 SERVER-TRAINING
+으로 채택할지의 정책 결정(decisions O-108)이다. 결정 전에 패키지를 설치하지 않는다.
+참고: numpy 가 2.2.6 이라 Jetson 의 1.26.4 고정과 다르다. 두 프로파일의 numpy 를 맞추지 않는다.
 
 ```
 hostname / OS / kernel / 아키텍처
@@ -532,6 +551,22 @@ valid = 49   invalid = 11       structural errors = 0
 ```
 
 그리고 **preprocessing 전후 raw checksum 이 동일해야 한다.** §8 을 다시 돌려 확인한다.
+
+### 2026-09-18 서버 실행 결과 — G1-S PASS
+
+```
+서버 clone 572cff8, python /home/keti/monai_env/bin/python (numpy 2.2.6)
+STEP 5   LC_ALL=C sha256sum -c   85 OK, 0 FAILED           (서버 locale 이 한국어라 LC_ALL=C 없이는 'OK' 문자열 매칭이 안 됨)
+STEP 6   --dry-run 후 정식 실행   trials 5 · snapshots 1800 · windows 60 · valid 49 · invalid 11 · 구조오류 0
+         tick-quality 재계산 일치 · invalid 사유 flir_stale 11 · 출력 38.55 MB
+STEP 7   전후 raw 85 OK · processed/ 는 git 무시
+```
+
+**Jetson 산출물과의 동등성은 배열 단위로 판정했다.** NPZ 60개 × 38 배열 = 2,280개 전부 동일,
+`windows.jsonl` 60 레코드는 환경 종속 3필드(`source_trial_path`, `npz_sha256`, `npz_bytes` 중 sha 만 다름,
+bytes 는 동일)를 제외하고 동일, `baseline_stats.json` 은 바이트 동일, manifest 의 totals·quality_policy·
+channel_boundary 동일. **NPZ 파일 SHA-256 은 zip 엔트리 타임스탬프 때문에 달라지므로 파일 해시로
+재현을 판정하지 않는다.** 연구노트 #17 §6.
 
 ### PASS 전 금지 (STOP boundary)
 
@@ -800,6 +835,27 @@ STEP 13  server clone 을 작업 브랜치로 갱신 (현재 5feabb5 는 09-10 �
 
 STEP 10 을 건너뛰고 STEP 12 만 통과했다고 재학습을 시작하지 않는다.
 Jetson 사본(0바이트)은 복구 대상이 아니라 **폐기 또는 서버 사본으로 교체** 대상이다.
+
+### 13-8. 학습 읽기는 SSD 작업 사본에서 한다 (2026-09-18)
+
+`dataset.py` 는 window 마다 30개 tick 의 csv(82 B)+bin(153 KB) 파일을 개별로 읽는다. train 9,313
+window 면 **1 epoch 에 558,780 파일 읽기**다. 무작위 소파일 읽기 실측:
+
+```
+HDD  /mnt/data-hdd   1,500쌍  29.6 s   ->     51 샘플/s,     8 MB/s   (page cache 일부 히트 가능)
+SSD  /mnt/data-ssd   1,500쌍   0.11 s  -> 13,287 샘플/s, 2,044 MB/s   (rsync 직후라 cache 히트 가능)
+```
+
+두 수치 모두 냉각 상태가 아니지만 차이가 250배라 결론은 바뀌지 않는다. RAM 187 GiB 라 첫 epoch 뒤에는
+전체가 캐시되지만 첫 epoch 와 캐시 축출 시 HDD 는 I/O 병목이다. 따라서:
+
+```
+HDD  /mnt/data-hdd/keti_data/factory_safety/aihub/           불변 아카이브 (zip · extracted · models · docs)
+SSD  /mnt/data-ssd/keti_data/factory_safety/aihub_extracted/ 학습 읽기용 작업 사본 (459,873 파일 · 17,795,317,991 B · HDD 와 동일)
+```
+
+작업 clone 의 `data/aihub/datasets/extracted` 는 SSD 를 가리키고 나머지는 HDD 를 가리킨다.
+SSD 사본이 손상되면 HDD 에서 다시 만든다. SSD 사본을 아카이브로 취급하지 않는다.
 
 ---
 

@@ -843,6 +843,21 @@ STEP 13  server clone 을 작업 브랜치로 갱신 (현재 5feabb5 는 09-10 �
 STEP 10 을 건너뛰고 STEP 12 만 통과했다고 재학습을 시작하지 않는다.
 Jetson 사본(0바이트)은 복구 대상이 아니라 **폐기 또는 서버 사본으로 교체** 대상이다.
 
+**2026-09-18 서버 실행 결과 — G2d PASS** (SSD 작업 사본, `factory_training` venv, 88 s)
+
+```
+L2  Training/Validation csv·bin·json 각 99,476 / 12,394 · 0바이트 0 · CSV 헤더+1행+8필드 전수 OK ·
+    BIN np.load (120,160) float64 전수 OK · JSON state·duration_time('1') 전수 OK · 실패 0
+L3  csv/bin/json basename 차집합 양방향 0 · 파일명 규약 위반 0 · 파일명↔JSON timestamp 111,870 일치 · 실패 0
+L4  session_index.py 강제 재생성: train 303 session / 32 장비 / 9,313 window · val 39 / 4 / 1,157 ·
+    인접 Δ 전부 1 s (99,173 + 12,355 쌍) · window span 전부 29 s · 장비 교집합 0 · 실패 0
+전후 SSD 사본 지문 동일 (d4c6b1bb42d01b02)
+```
+
+스크립트·결과: 서버 `~/review_runs/20260918_g2d/{verify_g2d.py,result.json,run.log}`. 1차 실행은 배포 JSON 의
+`meta_info` 가 list 인 것을 dict 로 가정해 L3 에서 중단됐고(`run_attempt1_failed.log`), 수정 후 재실행했다.
+부수 관측: BIN 값 범위가 Training −110.29~172.06 °C 로 `ThermalStats(30.98, 146.10)` 을 벗어난다(STATUS N15).
+
 ### 13-8. 학습 읽기는 SSD 작업 사본에서 한다 (2026-09-18)
 
 `dataset.py` 는 window 마다 30개 tick 의 csv(82 B)+bin(153 KB) 파일을 개별로 읽는다. train 9,313

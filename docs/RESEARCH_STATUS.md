@@ -1,6 +1,6 @@
 # RESEARCH STATUS
 
-최종 갱신: 2026-09-18 · 기준 HEAD `3a8fa4b` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
+최종 갱신: 2026-09-18 · 기준 HEAD `ee4136f` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
 
 > **이 문서는 현재 단계·최우선 작업·blocker만 담는다.** 배포/환경/데이터 획득의 canonical
 > 현황은 [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)에 있고 여기서
@@ -30,7 +30,7 @@
 | **G2h** 논문 확정 오류 정정 | **완료** | `paper_draft.md` 27+/22−, [claim_evidence.csv](논문/claim_evidence.csv) `applied_status` |
 | **G2i** 국소 코드 결함 수정 | **완료** | F04·F03·F14a 적용 + 정적 검증. 연구노트 #16 §10 |
 | **G1-S** 서버 원시 재현 | **PASS** (2026-09-18, 서버 clone `572cff8`) | manifest 85 OK · 60/49/11 · tick-quality 일치 · raw 전후 불변 · **NPZ 2,280 배열 Jetson 과 동일, `baseline_stats.json` 바이트 동일**. 연구노트 #17 §6 |
-| **G2d** AI Hub 데이터 검증 | **L1 급 통과, L2~L4 대기** | 서버 사본 온전. SSD 작업 사본(459,873 파일·17.8 GB) HDD 와 수·바이트 동일. 파싱·대응·집계 검증은 미실행. handoff §13-6·§13-7 |
+| **G2d** AI Hub 데이터 검증 | **PASS** (2026-09-18, SSD 작업 사본) | L2 전수 파싱(CSV·BIN·JSON 각 111,870) 실패 0 · L3 대응·규약·timestamp 111,870 일치 · L4 session 303/39, window 9,313/1,157, 장비 32/4 교집합 0, Δ=1 s. `session_index.py` 강제 재생성으로 확인. 연구노트 #17 §7 |
 | G2e~G2g 수정 적용·재실행 | blocked | G1-S + G2d 선행 |
 | G3 현장 문제 정의 | 미착수 | 로봇 소유기관 확인 필요 |
 | G4~G7 | 미착수 | — |
@@ -45,8 +45,8 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 
 | # | 작업 | 통과 조건 | 막는 것 |
 |---|---|---|---|
-| 1 | **G2d** 서버 SSD 작업 사본 L2→L4 검증 (재추출 없음) | handoff §13-7 STEP 10~12. **L2 전수 통과 없이 L4 숫자 일치만으로 성공 선언 금지.** `factory_training` venv 로 실행 | 없음 — 즉시 가능 |
-| 2 | **G2e** 수정 전후 V2+ 재실행 (EXP-20260907-002) | 동일 예산·동일 scheduler·seed 42/123/456. 결과는 서버 `results/` 에 새 디렉터리(논문 run 사본 덮어쓰기 금지) | G2d PASS |
+| 1 | **G2e** 수정 전후 V2+ 재실행 (EXP-20260907-002) — 첫 서버 GPU 학습 | seed 42/123/456 · 동일 예산·scheduler · 결과는 서버 `results/` 새 디렉터리(논문 run 사본 덮어쓰기 금지) · 실행 기록에 git_commit·initial_state_sha256 | 사용자 학습 승인 |
+| 2 | **N15 열화상 범위 이탈 원인 조사** | 정규화 범위(30.98~146.10) 밖 프레임의 분포·장비·시점 확인. 논문 `:133` 정정 여부 판단 | 없음 — 읽기 전용 |
 | 3 | **B-7** 센서 데이터 서버 import 도구 복원 | 다음 import 를 같은 manifest 스키마로 재현 가능 | 없음 |
 
 ---
@@ -88,6 +88,10 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 - **N11 HDD 는 학습 읽기용으로 부적합** — 무작위 소파일(bin 153 KB + csv 82 B) 읽기 HDD 51 샘플/s vs SSD 13,287 샘플/s. 1 epoch 이 558,780 파일 읽기. `extracted/` 18 GB 작업 사본을 SSD 에 두고 HDD 는 불변 아카이브 → 연구노트 #17 §6
 - **N12 서버 G1-S PASS** — 회계 60/49/11 일치, NPZ 2,280 배열 동일, `baseline_stats.json` 바이트 동일. NPZ 파일 해시는 zip 타임스탬프로 달라지므로 **파일 해시가 아닌 배열 단위**가 재현 기준 → 연구노트 #17 §6
 - **N13 서버 기존 clone 의 `results/v2plus` 는 논문 run 이 아니다** — F1 0.9551277 best@21 (08-06 Qwen 이후 재실행). 논문 run(0.9550 best@27)은 Jetson 사본이며 새 clone `results/` 로 전송 → 연구노트 #17 §6
+- **N15 열화상 BIN 값 범위가 논문·정규화 범위를 벗어난다** — 전수 검사에서 Training min −110.29 °C / max 172.06 °C,
+  Validation 14.04 / 138.96 °C. 논문 `:133` "약 31~146 °C, clipping 불필요" 및 `ThermalStats(30.98, 146.10)` 과 불일치.
+  범위 밖은 Training 프레임 212개(픽셀 0.029 %), Validation 31개(픽셀 0.15 %). 음수 프레임 11개는 물리적으로 불가능한 값.
+  무결성 문제는 아니며 원인·학습 영향 미확인 → 연구노트 #17 §7.1, claim_evidence CE-047
 - **N14 `monai_env` 는 수술 영상 프로젝트용 공유 env 다** — 2025-12 생성, 336 패키지(monai·pydicom·SimpleITK·transformers). 기존 논문 실험이 이 위에서 돌았으나 정책상 전용 venv 로 교체(D-019). pin 은 그대로 옮겨 비교 가능성 유지 → 연구노트 #17 §6.3
 
 **지표 표기.** `49/60 = 81.7 %`는 **v1 윈도 유효율**이다. 판단 가용률이나 전 센서 정상 관측

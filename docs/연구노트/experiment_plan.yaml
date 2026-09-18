@@ -110,3 +110,18 @@ experiments:
     stopping_rule: 회계 불일치 시 즉시 중단(build_windows.py exit 3)
     limitations: 서버 환경 audit 및 raw 전송 선행
     decision: null
+
+  - experiment_id: EXP-20260918-001
+    hypothesis_id: not_applicable
+    status: completed
+    purpose: G2d AI Hub SSD 작업 사본 L2~L4 계층 검증. 학습 아님. 2026-09-18 PASS (연구노트 #17 §7)
+    data_version: aihub_71802_released_subset (SSD working copy, 459,873 files, 17,795,317,991 B)
+    code_commit: ee4136f
+    environment_profile: SERVER-TRAINING (factory_training venv)
+    result_location: server:/home/keti/review_runs/20260918_g2d/result.json
+    seeds: not_applicable
+    primary_metric: layered_verification
+    comparison: L4 기대값 303/39 session, 9313/1157 window, 장비 32/4
+    stopping_rule: 어느 층이든 실패 시 FAIL
+    limitations: 값 범위 검사는 통계만 수집 (N15). 원본 공급자 체크섬과의 대조는 아님
+    decision: PASS

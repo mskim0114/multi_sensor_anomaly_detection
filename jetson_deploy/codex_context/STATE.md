@@ -1,8 +1,10 @@
-# STATE.md — 프로젝트 현재 상태
+# STATE.md — 2026-05-22 상태 기록
 
 **스냅샷 시점**: 2026-05-22 (USB로 Jetson에 이동된 시점)
 **작성자**: PC 측 Claude (claude-opus-4-7) 세션
-**Jetson 측 Codex가 이 파일을 매번 시작할 때 갱신·확인할 것.**
+**기록 보관용. 현재 상태는 [루트 RESEARCH_STATUS.md](../../docs/RESEARCH_STATUS.md)를 확인한다.**
+아래 “지금 할 일”과 실행 명령은 당시 기록이며, 현재 작업은
+[루트 AGENTS.md](../../AGENTS.md)와 [환경 정책](../../docs/ENVIRONMENT_POLICY.md)을 따른다.
 
 ---
 

@@ -43,6 +43,10 @@ from types import ModuleType
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# The CLI loads this file directly to avoid src.data's torch imports. Its
+# config leaf still needs the lightweight src.paths module from this checkout.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 PROCESSED_SCHEMA_VERSION = 1
 

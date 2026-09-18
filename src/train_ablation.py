@@ -2,11 +2,12 @@
 """Run ablation study: train all variants and compare.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.train_ablation
     python -m src.train_ablation --variant 2
 """
 
+import sys
 import argparse
 import json
 import logging
@@ -18,6 +19,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.paths import project_path
 
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.ablation_variants import (
@@ -77,7 +82,7 @@ def evaluate(model, loader, criterion, device):
 
 def train_variant(variant_id: int, gpu: int = 1):
     name, model_cls, hparams = VARIANTS[variant_id]
-    results_dir = f"/home/keti/factory_safety/results/ablation_v{variant_id}"
+    results_dir = project_path(f"results/ablation_v{variant_id}")
     Path(results_dir).mkdir(parents=True, exist_ok=True)
 
     device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
@@ -194,8 +199,8 @@ def main():
 
     # Load baseline and CATFT results
     for path, label in [
-        ("/home/keti/factory_safety/results/baseline/results.json", "V1: Baseline LSTM"),
-        ("/home/keti/factory_safety/results/catft/results.json", "V5: Full CATFT"),
+        (project_path("results/baseline/results.json"), "V1: Baseline LSTM"),
+        (project_path("results/catft/results.json"), "V5: Full CATFT"),
     ]:
         if os.path.exists(path):
             with open(path) as f:

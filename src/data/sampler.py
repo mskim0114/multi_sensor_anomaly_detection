@@ -9,8 +9,14 @@ from torch.utils.data import WeightedRandomSampler
 from .dataset import ManufacturingDataset
 
 
-def build_weighted_sampler(dataset: ManufacturingDataset) -> WeightedRandomSampler:
-    """Build a WeightedRandomSampler that balances class frequencies."""
+def build_weighted_sampler(
+    dataset: ManufacturingDataset, *, seed: int
+) -> WeightedRandomSampler:
+    """Balance classes with an RNG independent of model initialization.
+
+    The generator advances between epochs; constructing a new sampler with
+    the same seed replays the sequence without reseeding global torch state.
+    """
     labels = dataset.get_all_labels()
     class_counts = np.bincount(labels, minlength=4).astype(np.float64)
     class_weights = 1.0 / class_counts
@@ -20,6 +26,7 @@ def build_weighted_sampler(dataset: ManufacturingDataset) -> WeightedRandomSampl
         weights=torch.from_numpy(sample_weights).double(),
         num_samples=len(labels),
         replacement=True,
+        generator=torch.Generator().manual_seed(seed),
     )
 
 

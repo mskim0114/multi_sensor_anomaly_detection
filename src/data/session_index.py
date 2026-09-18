@@ -7,16 +7,21 @@ sessions, and caches the result as a pickle for fast reuse.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import pickle
 import re
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Bump when session grouping or label extraction semantics change.
+INDEX_CACHE_VERSION = 1
 
 
 @dataclass
@@ -204,6 +209,48 @@ def build_session_index(
     return index
 
 
+def _index_provenance(
+    source_dir: str, label_dir: str, split: str, gap_threshold: int
+) -> dict:
+    """Fingerprint index inputs without opening sensor/thermal data.
+
+    Index membership depends on recognized CSV names; labels depend on JSON
+    contents. Size, mtime and ctime detect ordinary label edits/restores without
+    parsing every JSON on a cache hit. This is cache invalidation metadata, NOT
+    a cryptographic proof of dataset integrity; raw manifest checks remain required.
+    """
+    source = Path(source_dir).expanduser().resolve()
+    labels = Path(label_dir).expanduser().resolve()
+    with os.scandir(source) as entries:
+        basenames = sorted(
+            entry.name[:-4] for entry in entries
+            if entry.name.endswith(".csv") and entry.is_file()
+            and _parse_basename(entry.name[:-4]) is not None
+        )
+    wanted = {bn + ".json" for bn in basenames}
+    label_stats = {}
+    with os.scandir(labels) as entries:
+        for entry in entries:
+            if entry.name in wanted and entry.is_file():
+                stat = entry.stat()
+                label_stats[entry.name] = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    signature = hashlib.sha256()
+    for bn in basenames:
+        name = bn + ".json"
+        if name not in label_stats:
+            raise FileNotFoundError(f"Missing label for indexed sample: {labels / name}")
+        signature.update(json.dumps([bn, *label_stats[name]], separators=(",", ":")).encode())
+        signature.update(b"\n")
+    return {
+        "version": INDEX_CACHE_VERSION,
+        "source_dir": str(source),
+        "label_dir": str(labels),
+        "split": split,
+        "gap_threshold": gap_threshold,
+        "input_signature": signature.hexdigest(),
+    }
+
+
 def load_or_build_index(
     source_dir: str,
     label_dir: str,
@@ -212,21 +259,46 @@ def load_or_build_index(
     gap_threshold: int = 120,
     force_rebuild: bool = False,
 ) -> DatasetIndex:
-    """Load cached index or build and cache."""
+    """Reuse a local, trusted cache only when its index inputs still match.
+
+    Legacy bare DatasetIndex pickles and invalid caches are rebuilt. Never
+    accept cache pickles from an untrusted source. This cache does not validate
+    CSV/BIN contents or replace the dataset integrity gate.
+    """
+    provenance = _index_provenance(source_dir, label_dir, split, gap_threshold)
     cache_path = Path(cache_dir) / f"session_index_{split}.pkl"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     if cache_path.exists() and not force_rebuild:
-        logger.info(f"Loading cached index from {cache_path}")
-        with open(cache_path, "rb") as f:
-            index = pickle.load(f)
-        logger.info(f"Loaded: {index.summary()}")
-        return index
+        try:
+            with cache_path.open("rb") as f:
+                cached = pickle.load(f)
+            if (isinstance(cached, dict)
+                    and cached.get("provenance") == provenance
+                    and isinstance(cached.get("index"), DatasetIndex)
+                    and cached["index"].split == split):
+                index = cached["index"]
+                logger.info(f"Loaded matching cache: {index.summary()}")
+                return index
+            logger.warning(f"Rebuilding legacy or stale index cache: {cache_path}")
+        except (OSError, EOFError, pickle.UnpicklingError, AttributeError, ImportError,
+                ValueError, TypeError) as exc:
+            logger.warning(f"Rebuilding unreadable index cache {cache_path}: {exc}")
 
     index = build_session_index(source_dir, label_dir, split, gap_threshold)
+    if _index_provenance(source_dir, label_dir, split, gap_threshold) != provenance:
+        raise RuntimeError("Index inputs changed during build; no cache was written")
 
-    with open(cache_path, "wb") as f:
-        pickle.dump(index, f)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=cache_path.parent,
+                                         prefix=cache_path.name + ".", delete=False) as f:
+            temporary = Path(f.name)
+            pickle.dump({"provenance": provenance, "index": index}, f)
+        os.replace(temporary, cache_path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
     logger.info(f"Saved index to {cache_path}")
 
     return index

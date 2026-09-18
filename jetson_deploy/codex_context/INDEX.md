@@ -1,10 +1,12 @@
 # INDEX — 빠른 파일 탐색
 
+이 인덱스의 아래 코드·문서는 2026-05 기록 보관용 스냅샷이다.
+
 ## "지금 뭘 해야 해?"
-→ [`STATE.md`](STATE.md) § B
+→ [루트 RESEARCH_STATUS.md](../../docs/RESEARCH_STATUS.md)
 
 ## "프로젝트 한눈에 보기"
-→ [`AGENTS.md`](AGENTS.md) (Codex가 자동 로드, 사람도 먼저 읽으면 좋음)
+→ [루트 AGENTS.md](../../AGENTS.md) 및 [현재 README](../../README.md)
 
 ## 데이터셋
 | 질문 | 파일 |

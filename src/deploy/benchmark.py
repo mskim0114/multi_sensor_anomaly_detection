@@ -5,7 +5,7 @@ Compares: PyTorch (GPU) vs ONNX Runtime (CPU) vs ONNX Runtime (GPU)
 Also validates that accuracy is preserved after conversion.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.deploy.benchmark
     python -m src.deploy.benchmark --num-warmup 10 --num-runs 100
 """
@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 import time
 
@@ -21,14 +22,15 @@ import onnxruntime as ort
 import torch
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.paths import project_path
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.ablation_variants import LSTMWithTemporalDiff
 
-CKPT_PATH = "/home/keti/factory_safety/results/ablation_v2/best_model.pt"
-ONNX_PATH = "/home/keti/factory_safety/results/deploy/model_v2.onnx"
-OUTPUT_DIR = "/home/keti/factory_safety/results/deploy"
+CKPT_PATH = project_path("results/ablation_v2/best_model.pt")
+ONNX_PATH = project_path("results/deploy/model_v2.onnx")
+OUTPUT_DIR = project_path("results/deploy")
 
 
 def benchmark_pytorch(model, sensor, thermal, device, num_warmup=5, num_runs=50):

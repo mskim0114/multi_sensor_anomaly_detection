@@ -14,7 +14,7 @@ Architecture:
                               AlertManager (threshold → action)
 
 Usage (simulation mode with validation data):
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python src/deploy/realtime_pipeline.py --simulate
     python src/deploy/realtime_pipeline.py --simulate --interval 1.0
 """
@@ -23,6 +23,7 @@ import argparse
 import json
 import logging
 import os
+from pathlib import Path
 import sys
 import time
 from collections import deque
@@ -32,8 +33,9 @@ from typing import Optional
 import numpy as np
 import onnxruntime as ort
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.paths import project_path
 from src.data.config import DataConfig, SensorStats, ThermalStats
 from src.data.normalization import SensorNormalizer, ThermalNormalizer
 
@@ -43,7 +45,7 @@ STATE_NAMES = ["Normal", "Mild", "Moderate", "Severe"]
 STATE_COLORS = {0: "\033[92m", 1: "\033[93m", 2: "\033[33m", 3: "\033[91m"}
 RESET = "\033[0m"
 
-ONNX_PATH = "/home/keti/factory_safety/results/deploy/model_v2plus.onnx"
+ONNX_PATH = project_path("results/deploy/model_v2plus.onnx")
 
 
 @dataclass
@@ -317,7 +319,7 @@ def run_simulation(config: DataConfig, interval: float = 1.0, max_steps: int = 1
             time.sleep(interval)
 
     # Save log
-    log_path = "/home/keti/factory_safety/results/deploy/simulation_log.json"
+    log_path = project_path("results/deploy/simulation_log.json")
     pipeline.save_log(log_path)
     print(f"\n{'='*60}")
     print(f"Simulation complete. {step} predictions made.")

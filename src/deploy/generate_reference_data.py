@@ -6,25 +6,27 @@ to a portable .npz file. The Jetson then runs ONNX on the same inputs and
 checks prediction match rate.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.deploy.generate_reference_data
 """
 
 import os
+from pathlib import Path
 import sys
 
 import numpy as np
 import onnxruntime as ort
 import torch
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.paths import project_path
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.v2_plus import V2Plus
 
-CKPT_PATH = "/home/keti/factory_safety/results/v2plus/best_model.pt"
-ONNX_PATH = "/home/keti/factory_safety/jetson_deploy/model/model_v2plus.onnx"
-OUT_DIR = "/home/keti/factory_safety/jetson_deploy/reference"
+CKPT_PATH = project_path("results/v2plus/best_model.pt")
+ONNX_PATH = project_path("jetson_deploy/model/model_v2plus.onnx")
+OUT_DIR = project_path("jetson_deploy/reference")
 
 # How many samples to include. Full val set is ~1862 windows.
 # Keep all so we can reproduce F1; 30 floats x 8 + 30 x 120 x 160 per sample.

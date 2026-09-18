@@ -8,10 +8,12 @@ from typing import Optional
 
 import yaml
 
+from src.paths import project_path
+
 
 SENSOR_CHANNELS = ["NTC", "PM1.0", "PM2.5", "PM10", "CT1", "CT2", "CT3", "CT4"]
 
-_BASE = "/home/keti/factory_safety/data/aihub/datasets/extracted"
+_BASE = project_path("data/aihub/datasets/extracted")
 
 
 @dataclasses.dataclass
@@ -41,7 +43,7 @@ class DataConfig:
     train_label_dir: str = f"{_BASE}/Training/라벨링데이터"
     val_source_dir: str = f"{_BASE}/Validation/원천데이터"
     val_label_dir: str = f"{_BASE}/Validation/라벨링데이터"
-    cache_dir: str = "/home/keti/factory_safety/cache"
+    cache_dir: str = project_path("cache")
 
     # --- Sliding window ---
     window_size: int = 30
@@ -74,6 +76,12 @@ class DataConfig:
 
     # --- Reproducibility ---
     seed: int = 42
+
+    def __post_init__(self) -> None:
+        # YAML and constructor overrides use the same checkout-relative semantics.
+        for name in ("train_source_dir", "train_label_dir", "val_source_dir",
+                     "val_label_dir", "cache_dir"):
+            setattr(self, name, project_path(getattr(self, name)))
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> DataConfig:

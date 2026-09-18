@@ -2,11 +2,12 @@
 """Export V2+ model to ONNX and benchmark.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.deploy.export_v2plus_onnx
 """
 
 import os
+from pathlib import Path
 import sys
 import time
 
@@ -16,13 +17,14 @@ import onnxruntime as ort
 import torch
 from sklearn.metrics import accuracy_score, f1_score
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.paths import project_path
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.v2_plus import V2Plus
 
-CKPT_PATH = "/home/keti/factory_safety/results/v2plus/best_model.pt"
-OUTPUT_DIR = "/home/keti/factory_safety/results/deploy"
+CKPT_PATH = project_path("results/v2plus/best_model.pt")
+OUTPUT_DIR = project_path("results/deploy")
 
 
 def main():

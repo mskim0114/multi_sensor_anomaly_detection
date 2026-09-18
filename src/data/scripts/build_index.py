@@ -8,10 +8,11 @@ Usage:
 
 import argparse
 import logging
+from pathlib import Path
 import sys
 from collections import Counter
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from src.data.config import DataConfig
 from src.data.session_index import load_or_build_index

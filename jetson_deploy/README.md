@@ -1,154 +1,83 @@
-# Jetson Orin Nano Deployment Package
+# Jetson Orin Nano 수집·추론 검증 패키지
 
-이 패키지는 **두 가지 용도**를 담고 있습니다.
-1. **ONNX 추론 검증** — `model/`, `reference/`, `scripts/`, `results/`
-2. **Jetson Codex CLI 컨텍스트** — `codex_context/` (프로젝트 전체 자산)
+이 디렉터리는 실제 센서 수집, trial 기록, ONNX 추론 검증을 담당한다.
+현장 데이터와 기존 모델을 연결하는 ModelAdapter 및 이상 사건 데이터는 아직 준비되지 않았다.
+`04_realtime_pipeline.py`는 저장된 검증 입력으로 만든 합성 스트림의 처리 시간을 측정한다.
 
-새 Jetson Orin Nano를 처음 세팅할 때는 먼저 상위 문서
-[`../docs/Jetson_Orin_Nano_초기세팅_가이드.md`](../docs/Jetson_Orin_Nano_초기세팅_가이드.md)를 기준으로 OS/권한/GPU/센서 검증을 진행하세요.
+현재 작업 기준은 [루트 AGENTS.md](../AGENTS.md),
+[환경 정책](../docs/ENVIRONMENT_POLICY.md),
+[연구 상태](../docs/RESEARCH_STATUS.md),
+[서버 이관 절차](../docs/SERVER_WORKSTATION_HANDOFF.md)다.
+`codex_context/`는 2026-05-22 기록 보관용 스냅샷이며 현재 실행 지침으로 사용하지 않는다.
 
-현장 설치 센서 조합에 대응되는 학습 데이터셋은 아직 없습니다. 현재 ONNX 모델은 Jetson GPU 추론과 파이프라인 검증용 기준 모델이며, 실제 현장 판정 모델은 센서 로그 수집과 라벨링 이후 재학습해야 합니다. 세부 전략은 [`../docs/이상상태_시나리오_및_데이터수집전략.md`](../docs/이상상태_시나리오_및_데이터수집전략.md)를 기준으로 합니다.
+| 경로 | 역할 |
+|---|---|
+| `run_python.sh`, `check_environment.py` | 전용 가상환경 실행, 의존성·장치·실행 provider 목록 점검 |
+| `scripts/01_check_environment.py` | 과거 명령 호환용 진입점. 위 래퍼와 현재 checker로 위임 |
+| `scripts/02`~`05` | 지연시간, PC 예측 일치, 합성 스트림, 결과 요약 |
+| `scripts/06`~`10` | 열화상·SPS30·NTC·CT·BME680 개별 진단 |
+| `scripts/11_collect_sensors.py`, `sensors/` | 1 Hz 동기 원시 데이터 수집 |
+| `collect.sh`, `collect.py` | 백그라운드 수집 start / stop / status, foreground run, dashboard |
+| `dashboard.py`, `dashboard_web/` | [로컬 열화상·센서 대시보드](../docs/JETSON_SENSOR_DASHBOARD.md), 수집 시작·중지 |
+| `scripts/12_run_trial.py` | 사전 점검 및 실험 메타데이터가 포함된 trial 수집 |
+| `model/`, `reference/` | 기존 ONNX/TensorRT 파일과 기준 입력 |
+| `results/` | 측정·검증 기록. Git 추적 대상에서 제외 |
+| `codex_context/` | 과거 문서·코드 스냅샷 |
 
-1차 설치에서는 센서를 추가하지 않고 기존 모델 입력과 맞는 `PureThermal`, `NTC/ADS1115`, `SPS30`, `DHS20P400A-CL420` 조합을 우선 검증합니다. BME680, SGP30, SCD30은 후보로만 기록하고 현장 데이터 수집이 안정화된 뒤 2차로 검토합니다.
-
-## 패키지 구성
-
-```
-jetson_deploy/
-├── README.md                           # ← 지금 이 파일
-│
-├── model/
-│   └── model_v2plus.onnx              # V2+ 학습 모델 (11 MB)
-├── reference/
-│   ├── val_reference.npz              # 전체 val set (1157 samples, 1.4 GB)
-│   └── val_reference_small.npz        # Stratified 100 samples (134 MB) — 4-class 균등
-├── scripts/
-│   ├── 01_check_environment.py        # Jetson 환경/패키지 확인
-│   ├── 02_benchmark_latency.py        # 추론 latency 벤치마크
-│   ├── 03_verify_accuracy.py          # PC ↔ Jetson 예측 일치 검증
-│   ├── 04_realtime_pipeline.py        # 실시간 스트리밍 시뮬레이션
-│   ├── 05_summary.py                  # 결과 통합 요약
-│   ├── 06_capture_purethermal.py      # PureThermal UVC 캡처
-│   ├── 07_read_sps30.py               # SPS30 미세먼지 I2C 읽기
-│   └── 08_read_ntc_ads1115.py         # ADS1115 기반 NTC 온도 읽기
-├── requirements-jetson.txt             # Jetson 사용자 공간 Python 패키지
-├── results/                           # 스크립트 실행 결과 JSON 저장됨
-│
-└── codex_context/                     # ★ Codex CLI 작업 디렉토리 ★
-    ├── AGENTS.md                      # Codex 자동 로드 (프로젝트 1페이지)
-    ├── STATE.md                       # 현재 상태 + 다음 작업
-    ├── INDEX.md                       # 빠른 파일 인덱스
-    ├── HOW_TO_USE_CODEX.md            # Codex 사용 가이드 (먼저 읽을 것)
-    ├── docs/                          # 연구노트 11편 + 논문 + 센서 가이드 + 에러로그
-    └── code/                          # v2_plus.py, 데이터 파이프라인, deploy 등 핵심 코드
-```
-
-## 사전 준비 (Jetson에서 1회만)
-
-### 1. ONNX Runtime 설치
-JetPack 6.x + Python 3.10 환경 기준.
+Jetson에서는 저장소 루트에서 실행한다. 아래 경로는 이 장비의 위치이며 다른 장비에서는
+실제 checkout 경로를 사용한다.
 
 ```bash
-# 옵션 A: pip (CUDA EP 포함)
-pip3 install onnxruntime-gpu numpy
-
-# 옵션 B: Jetson 공식 wheel (TensorRT EP 포함, 추천)
-# https://elinux.org/Jetson_Zoo#ONNX_Runtime
-# 에서 본인 JetPack 버전에 맞는 .whl 다운로드 후
-pip3 install onnxruntime_gpu-*.whl
+cd /home/keti/projects/factory_safety
+./jetson_deploy/run_python.sh jetson_deploy/check_environment.py
 ```
 
-### 2. 패키지 Jetson으로 옮기기
-USB 드라이브 사용 시:
-```bash
-# PC 측 (이 디렉토리에서)
-cd /home/keti/factory_safety
-tar czf jetson_deploy.tar.gz jetson_deploy/
+래퍼는 `$HOME/venvs/factory_runtime`과 `PYTHONNOUSERSITE=1`을 적용한다.
+새 장비의 환경 생성은 [환경 정책](../docs/ENVIRONMENT_POLICY.md)의 `setup_jetson_env.sh` 절차를 따른다.
+학습용 PyTorch 환경과 JetPack 제공 CUDA/TensorRT/OpenCV 패키지를 혼합하지 않는다.
 
-# USB에 복사 후 Jetson에서
-tar xzf jetson_deploy.tar.gz
-cd jetson_deploy
-```
+환경 점검은 모듈 import, 장치 노드·권한, ONNX Runtime provider 목록을 검사한다.
+**센서 실측이나 모델 추론은 실행하지 않는다.** provider가 목록에 있다는 사실만으로
+그 provider의 실제 추론이 성공한다고 판단하지 않는다.
 
-## 실행 순서
-
-### Step 1. 환경 점검
-```bash
-python3 scripts/01_check_environment.py
-```
-**기대 출력:** `onnxruntime` 설치 확인, `CUDAExecutionProvider` 또는 `TensorrtExecutionProvider` 사용 가능 표시.
-
-### Step 2. Latency 벤치마크
-```bash
-python3 scripts/02_benchmark_latency.py --runs 200
-```
-**목표:** mean < 5ms (single inference, batch=1).
-사용 가능한 모든 EP(TensorRT > CUDA > CPU 우선순위)에 대해 측정.
-
-### Step 3. 정확도 일치 검증
-```bash
-# 빠른 검증 (100 samples, stratified)
-python3 scripts/03_verify_accuracy.py --small
-
-# 전체 검증 (1157 samples)
-python3 scripts/03_verify_accuracy.py
-```
-**기대값:**
-- Pred match rate (Jetson vs PC ONNX) **≥ 99%**
-- Macro-F1 ≈ 0.95 (전체), ≈ 0.96 (stratified small)
-- Severe class F1 = 1.0
-
-### Step 4. 실시간 파이프라인 시뮬레이션
-```bash
-python3 scripts/04_realtime_pipeline.py --n 300 --stride 10
-```
-30-window 슬라이딩 + 10-frame stride로 추론. FPS / per-window latency 측정.
-
-### Step 5. 결과 통합
-```bash
-python3 scripts/05_summary.py
-```
-모든 결과를 `results/jetson_summary.json` 으로 통합 + 콘솔에 요약 출력.
-
-## 결과 해석
-
-### Latency 목표
-| 항목 | PC (RTX 6000) | Jetson Orin Nano (목표) |
-|------|--------------:|------------------------:|
-| ONNX CPU | ~4.3 ms | < 15 ms |
-| ONNX CUDA | ~4.4 ms | < 5 ms |
-| ONNX TensorRT FP16 | - | **< 2 ms** (다음 단계) |
-
-### 정확도 검증
-ONNX는 수학적으로 결정론적이므로 Jetson EP가 표준 구현이라면 PC와 **완전 일치(100%)** 가 정상.
-1% 이상 차이가 나면 ONNX opset 호환성 또는 EP 비결정성 문제 (특히 TensorRT FP16 활성화 시).
-
-## 다음 단계 (이번 검증 통과 후)
-
-1. **TensorRT 엔진 변환** — `trtexec --onnx=model_v2plus.onnx --saveEngine=v2plus.trt --fp16` 으로 < 2ms 달성
-2. **전력/온도 모니터링** — `tegrastats` 백그라운드 측정
-3. **실제 센서 연결** — NTC/PM/CT 센서 → I2C/SPI/ADC 입력 파이프라인
-4. **현장 데이터 수집** — 정상 운전 로그, 안전 검증 이벤트, 라벨링
-5. **현장 적용 모델 재학습** — 새 센서 feature vector 확정 후 ONNX/TensorRT 재배포
-
-## Codex CLI 작업
-
-Jetson 측에서 Codex CLI로 추가 작업을 할 때는 **반드시 `codex_context/` 디렉토리에서 실행**하세요. 이 폴더의 `AGENTS.md` 가 자동 로드되어 Codex가 프로젝트 전체 맥락을 알고 시작합니다.
+아래 명령은 기존 모델·reference의 별도 추론 검증 절차다. 실행하면 `results/` 기록을 갱신한다.
+새 모델 학습·export 및 현장 모델 입력 결정은 서버 이관 문서의 선행 조건을 따른다.
 
 ```bash
-cd jetson_deploy/codex_context
-codex
-# 첫 prompt 예시:
-# > STATE.md §B 의 첫 작업부터 시작하자.
+# 기본 벤치마크: 사용 가능한 CUDA와 CPU. TensorRT EP는 기본 제외.
+./jetson_deploy/run_python.sh jetson_deploy/scripts/02_benchmark_latency.py --runs 200
+
+# 기준 샘플과 PC 예측 일치 검증
+./jetson_deploy/run_python.sh jetson_deploy/scripts/03_verify_accuracy.py --small --provider cuda
+
+# 저장된 reference로 구성한 합성 스트림
+./jetson_deploy/run_python.sh jetson_deploy/scripts/04_realtime_pipeline.py --n 300 --stride 10 --provider cuda
+
+# 저장된 결과 통합
+./jetson_deploy/run_python.sh jetson_deploy/scripts/05_summary.py
 ```
 
-자세한 사용법은 [`codex_context/HOW_TO_USE_CODEX.md`](codex_context/HOW_TO_USE_CODEX.md) 참고.
+ONNX Runtime의 TensorRT EP는 현재 모델 첫 추론에서 SIGSEGV가 기록되어 있다.
+독립 `trtexec` 실행과 ONNX Runtime TensorRT EP 실행은 구분한다.
+기존 측정 결과와 해당 문제의 범위는 [JETSON_ENVIRONMENT.md](../docs/JETSON_ENVIRONMENT.md)를 참고한다.
+모델·provider·입력·정밀도에 따른 출력 차이를 기록하며 예측 일치율을 현장 정확도로 해석하지 않는다.
 
-## 문제 해결
+센서 수집은 [JETSON_SENSOR_COLLECTION.md](../docs/JETSON_SENSOR_COLLECTION.md),
+trial 규약은 [JETSON_DATASET_PROTOCOL.md](../docs/JETSON_DATASET_PROTOCOL.md)를 따른다.
 
-| 증상 | 원인/해결 |
-|------|----------|
-| `libnvinfer.so.10: cannot open` | TensorRT 미설치 → `sudo apt install nvidia-tensorrt` |
-| `Failed to create CUDAExecutionProvider` | onnxruntime-cpu 설치됨 → onnxruntime-gpu 재설치 |
-| Pred match rate < 99% | ONNX opset 호환성 점검, FP16 비활성화 후 재실행 |
-| Latency > 10ms (CUDA) | Jetson power mode 확인: `sudo nvpmodel -q` → MAXN 모드로 변경 |
+```bash
+./jetson_deploy/collect.sh start
+./jetson_deploy/collect.sh status
+./jetson_deploy/collect.sh stop
+```
+
+기본값은 공통 1 Hz 기록·열화상 1장/초 저장·SGP30 비활성화다. 시작한 수집은 SSH 연결이
+끝나도 유지되며 `stop`은 마지막 파일 저장과 검증이 끝날 때까지 기다린다.
+
+현재 개발용 baseline의 관측 스칼라는 NTC·PM 3채널·CT1이며 CT2~CT4는 없다.
+모델 입력으로 연결하기 전에 채널·단위·정규화·품질 처리 계약을 확정해야 한다.
+
+서버로 이관할 때 코드와 raw 데이터는 각각 전달한다. Git clone만으로 `dataset/`,
+`processed/`, 모델 및 reference가 모두 준비되지 않으므로
+[SERVER_WORKSTATION_HANDOFF.md](../docs/SERVER_WORKSTATION_HANDOFF.md)의 자산·checksum 절차를 따른다.
+현재 후속 작업은 서버 환경 audit, 데이터 복구·재현, 실센서 입력 설계 및 모델 연결 순서다.

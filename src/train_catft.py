@@ -2,11 +2,12 @@
 """Train the CATFT (Cross-Attention Temporal Fusion Transformer) model.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.train_catft
     python -m src.train_catft --epochs 30 --lr 5e-4
 """
 
+import sys
 import argparse
 import json
 import logging
@@ -19,12 +20,16 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.paths import project_path
+
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.catft import CATFT
 
 logger = logging.getLogger(__name__)
 
-RESULTS_DIR = "/home/keti/factory_safety/results/catft"
+RESULTS_DIR = project_path("results/catft")
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device, max_grad_norm=1.0):
@@ -210,7 +215,7 @@ def main():
     logger.info(f"Confusion Matrix:\n{confusion_matrix(val_labels, val_preds)}")
 
     # Compare with baseline
-    baseline_path = "/home/keti/factory_safety/results/baseline/results.json"
+    baseline_path = project_path("results/baseline/results.json")
     if os.path.exists(baseline_path):
         with open(baseline_path) as f:
             baseline = json.load(f)

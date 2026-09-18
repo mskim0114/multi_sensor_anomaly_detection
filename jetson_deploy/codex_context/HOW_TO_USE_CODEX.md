@@ -1,5 +1,9 @@
 # Jetson Codex CLI 사용 가이드
 
+> **2026-05 기록 보관용. 아래 설치 위치와 실행 지침은 현재 권장 절차가 아니다.**
+> 현재는 저장소 루트에서 [AGENTS.md](../../AGENTS.md),
+> [환경 정책](../../docs/ENVIRONMENT_POLICY.md), [현재 상태](../../docs/RESEARCH_STATUS.md)를 따른다.
+
 이 폴더(`codex_context/`)는 Jetson 위 Codex CLI에게 **이 프로젝트의 모든 맥락**을 전달하기 위한 패키지입니다.
 PC 쪽 Claude가 지금까지 만든 모든 자산(코드·결과·논문·연구노트)이 한 곳에 정리되어 있습니다.
 

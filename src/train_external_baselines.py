@@ -2,10 +2,11 @@
 """Train external SOTA baselines (TimesNet, PatchTST) for comparison.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.train_external_baselines --all
 """
 
+import sys
 import argparse
 import json
 import logging
@@ -18,12 +19,16 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.paths import project_path
+
 from src.data import DataConfig, ManufacturingDataModule
 from src.models.external_baselines import TimesNetClassifier, PatchTSTClassifier
 
 logger = logging.getLogger(__name__)
 
-RESULTS_BASE = "/home/keti/factory_safety/results/external_baselines"
+RESULTS_BASE = project_path("results/external_baselines")
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):

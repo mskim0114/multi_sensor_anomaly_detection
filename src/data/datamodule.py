@@ -122,7 +122,7 @@ class ManufacturingDataModule:
         sampler = None
         shuffle = True
         if self.config.use_weighted_sampler:
-            sampler = build_weighted_sampler(self.train_dataset)
+            sampler = build_weighted_sampler(self.train_dataset, seed=self.config.seed)
             shuffle = False  # mutually exclusive with sampler
 
         return DataLoader(

@@ -5,7 +5,7 @@ Loads the best model (V2: LSTM+TemporalDiff) and runs inference on
 validation samples, displaying sensor plots, thermal images, and predictions.
 
 Usage (run from terminal, not from Claude):
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python src/demo_inference.py
     python src/demo_inference.py --num-samples 10
     python src/demo_inference.py --save-dir results/demo  # save images instead of display
@@ -13,6 +13,7 @@ Usage (run from terminal, not from Claude):
 
 import argparse
 import os
+from pathlib import Path
 import sys
 
 import matplotlib
@@ -34,8 +35,9 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 import torch
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.paths import project_path
 from src.data import DataConfig, ManufacturingDataModule
 from src.data.normalization import SensorNormalizer, ThermalNormalizer
 from src.models.ablation_variants import LSTMWithTemporalDiff
@@ -47,7 +49,7 @@ SENSOR_NAMES = ["NTC (°C)", "PM1.0", "PM2.5", "PM10", "CT1 (A)", "CT2 (A)", "CT
 
 def load_model(device):
     model = LSTMWithTemporalDiff(sensor_dim=8, hidden_dim=128, num_layers=3, num_classes=4)
-    ckpt_path = "/home/keti/factory_safety/results/ablation_v2/best_model.pt"
+    ckpt_path = project_path("results/ablation_v2/best_model.pt")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
@@ -165,7 +167,7 @@ def main():
     # Determine output mode
     save_mode = args.save_dir is not None or not GUI_AVAILABLE
     if not GUI_AVAILABLE and args.save_dir is None:
-        args.save_dir = "/home/keti/factory_safety/results/demo"
+        args.save_dir = project_path("results/demo")
         print(f"GUI not available. Saving images to {args.save_dir}/")
 
     if args.save_dir:

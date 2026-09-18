@@ -2,12 +2,13 @@
 """Generate all figures for the paper.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python src/generate_paper_figures.py
 """
 
 import json
 import os
+from pathlib import Path
 import sys
 
 import matplotlib
@@ -17,9 +18,11 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 import seaborn as sns
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-OUT_DIR = "/home/keti/factory_safety/docs/논문/figures"
+from src.paths import project_path
+
+OUT_DIR = project_path("docs/논문/figures")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Style

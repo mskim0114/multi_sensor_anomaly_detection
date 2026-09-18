@@ -1,7 +1,11 @@
 # AGENTS.md — Factory Safety Project (Jetson side context)
 
-> 이 파일은 **Codex CLI가 자동으로 로드하는 컨텍스트**입니다.
-> Jetson Orin Nano에서 이 디렉토리를 작업 폴더로 두고 `codex` 를 실행하면 본 내용이 매 세션의 system instructions에 주입됩니다.
+> **2026-05-22 기록 보관용 스냅샷. 아래의 작업 규칙·실행 명령·현재 상태 표시는 당시 기록이다.**
+> 현재 작업에는 [저장소 루트 AGENTS.md](../../AGENTS.md),
+> [환경 정책](../../docs/ENVIRONMENT_POLICY.md),
+> [현재 상태](../../docs/RESEARCH_STATUS.md)를 우선 적용한다.
+> 아래의 설치·하드웨어·학습 지시를 현재 작업 지시로 실행하지 않는다.
+> 이 스냅샷의 STATE.md를 현재 상태로 계속 갱신하지 않고 루트 docs/에 기록한다.
 
 ---
 

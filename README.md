@@ -1,5 +1,18 @@
 # 제조공장 멀티모달 센서 이상상태 예측 AI
 
+## 실행 전 필수 문서
+
+- [AGENTS.md](AGENTS.md)
+- [ENVIRONMENT_POLICY.md](docs/ENVIRONMENT_POLICY.md)
+- [RESEARCH_STATUS.md](docs/RESEARCH_STATUS.md)
+- [SERVER_WORKSTATION_HANDOFF.md](docs/SERVER_WORKSTATION_HANDOFF.md)
+
+작업 루트(root cwd): `/home/keti/projects/factory_safety`
+
+현재 상태는 실측 데이터 기반 현장 모델 파이프라인이 준비되지 않았고(`ModelAdapter` 미완료),
+또한 이상 사건 데이터도 미확보(`B-4`) 상태입니다. RESEARCH_STATUS의 현재 상태를 반드시 확인하고,
+데이터 축적/재학습 전단계로 진행하세요.
+
 ## Jetson Orin Nano 배포/초기 세팅
 
 새 Jetson Orin Nano 보드를 받을 때는 아래 문서를 기준으로 OS, JetPack, GPU 추론, 센서 연결을 순서대로 검증한다.
@@ -12,17 +25,23 @@
 
 중요 전제: 실제 설치 환경과 추가 센서 조합에 대응되는 학습 데이터셋은 아직 없다. 현재 ONNX 모델은 Jetson GPU 추론과 파이프라인 검증용 기준 모델로 사용하고, 현장 이상상태 판정 모델은 정상 데이터 수집과 라벨링 이후 재학습한다.
 
-현재 실행 방침: 센서 추가는 보류하고, 기존 모델 입력 구조와 맞는 `PureThermal 열화상`, `NTC 10K + ADS1115`, `SPS30 미세먼지`, `DHS20P400A-CL420 전류` 4종을 먼저 연결/검증/수집한다. BME680, SGP30, SCD30은 1차 현장 데이터 수집이 안정화된 뒤 필요성이 확인되면 추가한다.
+현재 수집 구성과 배선은 [JETSON_SENSOR_COLLECTION.md](docs/JETSON_SENSOR_COLLECTION.md)를 따른다.
+개발용 baseline은 NTC·PM 3채널·CT1·열화상을 기록하고 SCD30/BME680을 context로 보관한다.
+기존 모델이 요구하는 CT2~CT4는 없으며, 실제 데이터와 모델 입력을 연결하는 설계가 남아 있다.
 
 ## 환경 설정
 
-```bash
-# 1. conda 환경 활성화
-conda activate monai_env
+Jetson에서는 저장소 루트에서 전용 래퍼를 사용한다.
 
-# 2. 프로젝트 디렉토리 이동
-cd /home/keti/factory_safety
+```bash
+cd /home/keti/projects/factory_safety
+./jetson_deploy/run_python.sh jetson_deploy/check_environment.py
 ```
+
+서버의 아래 학습·데모·AI Hub 처리 예시는 **서버 환경 audit와 데이터 복구·재현 완료 후**
+`$HOME/venvs/factory_training` 환경에서 실행한다. Jetson 런타임에 학습 의존성을 설치하지 않는다.
+기본 입출력 경로는 현재 checkout을 기준으로 정해진다. `DataConfig`와 YAML에 지정한 상대
+데이터·캐시 경로도 checkout 기준이며, 외부 저장소에는 절대경로를 지정한다.
 
 ## 추론 데모 실행
 
@@ -87,7 +106,7 @@ factory_safety/
 │   │   ├── multimodal_lstm.py          #   베이스라인 LSTM
 │   │   ├── catft.py                    #   Cross-Attention Transformer
 │   │   └── ablation_variants.py        #   Ablation 변형 모델
-│   ├── deploy/                         # 배포 (TensorRT, ONNX) [작업 예정]
+│   ├── deploy/                         # ONNX export·기준 입력 생성·배포 검증
 │   ├── train_baseline.py               # 베이스라인 학습
 │   ├── train_catft.py                  # CATFT 학습
 │   ├── train_ablation.py               # Ablation study
@@ -107,6 +126,6 @@ factory_safety/
 │   ├── figures/                        #   보고서용 이미지
 │   └── 오류_및_해결_로그.md              #   트러블슈팅 기록
 ├── data/aihub/
-│   └── datasets/extracted/             # 데이터셋 (18GB)
+│   └── datasets/extracted/             # AI Hub 데이터: 현재 0바이트 파일 복구 필요
 └── cache/                              # 세션 인덱스 캐시
 ```

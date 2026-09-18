@@ -9,11 +9,12 @@ Usage:
 import argparse
 import logging
 import os
+from pathlib import Path
 import sys
 
 import numpy as np
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from src.data.config import DataConfig
 

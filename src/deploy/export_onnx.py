@@ -2,24 +2,26 @@
 """Export the best model (V2: LSTM+TemporalDiff) to ONNX format.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.deploy.export_onnx
     python -m src.deploy.export_onnx --simplify
 """
 
 import argparse
+from pathlib import Path
 import sys
 
 import numpy as np
 import onnx
 import torch
 
-sys.path.insert(0, "/home/keti/factory_safety")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.paths import project_path
 from src.models.ablation_variants import LSTMWithTemporalDiff
 
-CKPT_PATH = "/home/keti/factory_safety/results/ablation_v2/best_model.pt"
-OUTPUT_DIR = "/home/keti/factory_safety/results/deploy"
+CKPT_PATH = project_path("results/ablation_v2/best_model.pt")
+OUTPUT_DIR = project_path("results/deploy")
 
 
 def main():

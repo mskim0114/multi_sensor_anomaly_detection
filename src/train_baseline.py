@@ -2,11 +2,12 @@
 """Train the Multimodal LSTM baseline model.
 
 Usage:
-    cd /home/keti/factory_safety
+    cd <repository-root>
     python -m src.train_baseline
     python -m src.train_baseline --epochs 20 --lr 0.001
 """
 
+import sys
 import argparse
 import json
 import logging
@@ -19,12 +20,16 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.paths import project_path
+
 from src.data import DataConfig, ManufacturingDataModule
 from src.models import MultimodalLSTM
 
 logger = logging.getLogger(__name__)
 
-RESULTS_DIR = "/home/keti/factory_safety/results/baseline"
+RESULTS_DIR = project_path("results/baseline")
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):

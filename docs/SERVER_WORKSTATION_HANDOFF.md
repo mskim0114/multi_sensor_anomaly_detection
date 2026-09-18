@@ -132,6 +132,18 @@ provenance 가 끊긴다. 전달 후 §8 을 반드시 통과시킨다.
 `processed/` 는 전달하지 않는다. 서버에서 §10 으로 재생성하고 Jetson 결과와 대조하는 것이
 바로 첫 서버 milestone 이다.
 
+**AI Hub legacy dataset 은 또 다른 소스다.** 위 두 소스(GitHub, development baseline raw)만으로는
+기존 연구를 재현할 수 없다. AI Hub 자산의 현재 상태와 전송·검증 절차는 **§13** 에 있다.
+**2026-09-17 확인: 서버에는 이미 온전한 사본이 있다**(§13-6). Jetson 에서 zip 을 다시 보낼 필요는 없다.
+
+**서버의 프로젝트 데이터는 HDD 에 있고 원래 경로는 심볼릭 링크다** (2026-09-17 이관, 연구노트 #17).
+
+```
+/home/keti/factory_safety/data/aihub  ->  /mnt/data-hdd/keti_data/factory_safety/aihub
+```
+코드가 참조하는 경로는 바뀌지 않았다. 새 데이터도 루트 디스크가 아니라 `/mnt/data-hdd/keti_data/` 또는
+`/mnt/data-ssd/keti_data/` 아래에 둔다.
+
 ---
 
 ## 4. 2026 development baseline (5 trials)
@@ -408,9 +420,14 @@ Jetson 원본의 지문이며, 서버에서 재생성하는 것은 검증이 아
 
 ## 9. Server environment audit (STEP 3)
 
-**Jetson 에서 서버 사양을 추측해 채우지 않았다.** `docs/SERVER_ENVIRONMENT.md` 는 의도적으로
-`PENDING SERVER ENVIRONMENT AUDIT` 상태다. 서버 agent 의 첫 작업은 실제 workstation 에서
-아래를 확인하고 그 문서를 채우는 것이다.
+**2026-09-17 갱신.** read-only preflight 를 SSH 로 수행해 하드웨어·디스크·GPU·torch 환경을 실측했고
+[SERVER_ENVIRONMENT.md](SERVER_ENVIRONMENT.md) 에 기록했다(상태 `PARTIAL`). 요약:
+2× RTX 6000(driver 580.178.04, `nvidia-smi` 정상) · 187 GiB · 루트 디스크 32 %(이관 후) ·
+`monai_env` 에 torch 2.6.0+cu124 · **`$HOME/venvs/factory_training` 없음**.
+
+아직 남은 audit 항목은 아래 중 **패키지 목록·`src/` 의존성·`requirements-server.txt`** 이고,
+학습 환경을 `monai_env` 로 할지 정책대로 새 venv 를 만들지는 **결정되지 않았다**(decisions O-108).
+서버 agent 는 그 결정 전에 패키지를 설치하지 않는다.
 
 ```
 hostname / OS / kernel / 아키텍처
@@ -447,9 +464,10 @@ canonical server venv 는 `$HOME/venvs/factory_training` 이다. **이미 존재
 ### 알려진 미해결 사항
 
 - `requirements-server.txt` 는 아직 비어 있다. audit 결과로 채운다
-- `src/` 와 `configs/data_config.yaml` 이 `/home/keti/factory_safety/...` 를 하드코딩하고
-  있으나 Jetson 의 실제 경로는 `/home/keti/projects/factory_safety` 였다. 서버에서도 같은
-  문제가 나올 수 있다. **아직 수정하지 않았다** — audit 시 함께 확인한다
+- 2026-09-10 국소 수정으로 `src/` 기본 입출력 경로는 현재 checkout 기준이 되었다.
+  `DataConfig`/YAML 상대 데이터·캐시 경로도 checkout 기준이며, 외부 데이터는 절대경로로
+  지정한다. 서버의 실제 경로·권한·학습 의존성 검증은 여전히 audit 대상이다.
+  수정·검증 범위는 [LOCAL_REVIEW_20260910.md](LOCAL_REVIEW_20260910.md)를 참조한다
 - `src/data/__init__.py` 가 `torch` 를 import 한다. Jetson 에는 torch 가 없어서 window
   builder 를 파일 경로로 로드하도록 작성했다. 서버에서는 `python3 -m src.data.scripts.build_windows`
   형식도 동작할 것으로 예상되지만 **검증되지 않았다.** package 구조를 바꾸지 않는다
@@ -586,7 +604,206 @@ canonical 문서:
 
 ---
 
-## 13. 관련 문서
+## 13. AI Hub legacy dataset 자산 (재학습 blocker)
+
+기존 AI Hub 연구(V1~V2+, 논문)를 재현·재학습하려면 이 절이 먼저 해소돼야 한다.
+**§4의 development baseline 5 trial 과는 완전히 별개의 자료다.**
+
+### 13-1. `extracted/` 의 정확한 상태 — 파일은 있고 내용이 비어 있다
+
+"비어 있다"를 두 가지로 나눈다. **파일이 없는 것이 아니라, 파일이 존재하고 크기가 0바이트다.**
+디렉터리 4개 모두 존재하며 파일 목록도 온전하다.
+
+경로: `data/aihub/datasets/extracted/`  (2026-09-07 Jetson `keti-kms` 계측)
+
+| split / 종류 | 확장자 | 파일 존재 | 0바이트 | 정상(>0) |
+|---|---|---:|---:|---:|
+| Training / 원천데이터 | csv | 99,476 | **99,476** | 0 |
+| Training / 원천데이터 | bin | 99,476 | **99,476** | 0 |
+| Training / 라벨링데이터 | json | 99,476 | **99,476** | 0 |
+| Validation / 원천데이터 | csv | 12,394 | 12,391 | 3 |
+| Validation / 원천데이터 | bin | 12,394 | 12,390 | 4 |
+| Validation / 라벨링데이터 | json | 12,394 | 4,247 | **8,147** |
+
+```
+extracted 총 파일      459,873        (위 6종 336,510 + 그 밖의 파일)
+정상(>0) 파일          15,621
+extracted 총 용량      84 MB
+누락(파일명 없음)      0 - 파일 목록은 zip 내용과 일치한다
+```
+
+**누락은 0건이다.** 파일명 스켈레톤은 완전하고 대부분의 내용만 0바이트다. 그래서 파일명 기반
+분석(예: timestamp 정합 검사)은 가능했고 학습만 불가능하다.
+
+발견 당시 `src/data/config.py` 및 학습·export 진입점은 `/home/keti/factory_safety/...` 에
+하드코딩되어 있었다. 2026-09-10 국소 수정으로 checkout 기준 경로가 적용됐다.
+이 수정은 데이터 복구 성공을 의미하지 않으며, 서버 audit 시 실제 경로를 확인한다(§9).
+
+### 13-2. 압축 자산 — 존재·구조·내용을 분리해 검사했다
+
+경로: `data/aihub/datasets/` 이하. 세 검사를 **분리**한다.
+
+| 검사 | 방법 | 결과 |
+|---|---|---|
+| (a) 존재 | 파일 열거 | **684 / 684** |
+| (b) 구조 무결성 | `zipfile.is_zipfile` + central directory 파싱 (`infolist`) | **684 / 684 OK** |
+| (c) 내용 무결성 | 전 member CRC 검증 (`ZipFile.testzip`), 18.78 GB 압축해제 | **684 / 684 OK, 실패 0** (142 s) |
+
+(b)가 통과해도 (c)가 통과한다는 뜻이 아니다. 두 결과를 각각 기록한다.
+
+| 위치 | zip | 압축 크기 | member |
+|---|---:|---:|---:|
+| `Training/01.원천데이터` | 303 | 4.91 GB | 198,952 |
+| `Training/02.라벨링데이터` | 303 | 0.08 GB | 99,476 |
+| `Validation/01.원천데이터` | 38 | 0.62 GB | 24,788 |
+| `Validation/02.라벨링데이터` | 38 | 0.01 GB | 12,394 |
+| `Other/Other.zip` | 1 | 0.11 GB | 124,263 |
+| `Sample.zip` (저장소 루트 `datasets/`) | 1 | 0.32 GB | 18,822 |
+| **합계** | **684** | **6.05 GB** | **478,695** |
+
+member 수가 `extracted/` 파일 수와 일치한다: Training 원천 198,952 = csv 99,476 + bin 99,476,
+Training 라벨 99,476, Validation 원천 24,788 = 12,394 × 2, Validation 라벨 12,394.
+비압축 크기 합계는 central directory 신고값 기준 **18.78 GB**다.
+
+### 13-3. Manifest — 무엇을 증명하고 무엇을 증명하지 않는가
+
+```
+docs/manifests/aihub_zips.sha256      684 checksum + 29줄 주석
+경로 기준                              dataset root = <repo>/data/aihub/datasets
+검증                                   cd <repo>/data/aihub/datasets &&                                        sha256sum -c ../../../docs/manifests/aihub_zips.sha256
+Jetson 결과                            684 OK, FAILED 0, exit 0
+```
+
+**증명한다:** 이 장비가 2026-09-07에 보유한 684개 zip의 바이트 지문. 서버로 전송한 뒤 같은
+명령으로 재검증하면 **전송 중 손상·누락**을 판정할 수 있다.
+
+**증명하지 않는다:**
+
+- **공급자 원본과 동일하다는 것.** AI Hub가 배포한 체크섬을 확보하지 못했으므로 원본 대조가
+  불가능하다. 이 manifest는 **현재 보유 파일의 지문**이며 출처 증명이 아니다.
+- 압축 내용이 손상되지 않았다는 것 — 그것은 §13-2 (b)(c)의 별도 검사다.
+- 데이터셋의 과학적 정합성 — §13-4의 계층 검증이 필요하다.
+
+경로 683개에 공백이 포함되어 있다(`67.제조현장 이송장치의 ...`). `sha256sum -c`는 2-space
+구분자 뒤 전체를 파일명으로 취급하므로 그대로 동작한다(Jetson에서 684 OK 확인).
+
+### 13-4. 재추출 검증 기준 — 계층별로 분리한다
+
+**상위 계층이 통과해도 하위 계층을 건너뛰지 않는다.** 각 계층의 결과를 따로 기록한다.
+
+**L1 — 압축 무결성**
+
+```
+[L1-a] 684개 파일 존재
+[L1-b] 684개 전부 is_zipfile + central directory 파싱
+[L1-c] 684개 전부 CRC 검증(testzip) 통과
+[L1-d] sha256sum -c 로 aihub_zips.sha256 684 OK   <- 전송 손상 판정
+```
+L1-d 실패는 전송 문제다. 재전송한다. **checksum 을 다시 생성해 맞추지 않는다.**
+
+**L2 — 추출된 파일의 크기와 파싱 가능성**
+
+```
+[L2-a] 추출 파일 수가 member 수와 일치        Training csv/bin 각 99,476, json 99,476
+                                              Validation csv/bin 각 12,394, json 12,394
+[L2-b] 0바이트 파일 0건                        <- 현재 상태의 재발 여부
+[L2-c] CSV 파싱: 헤더 1행 + 데이터 1행, 8개 필드,
+       헤더가 NTC,PM1.0,PM2.5,PM10,CT1,CT2,CT3,CT4
+[L2-d] BIN 파싱: np.load 성공, shape (120,160), dtype 확인
+[L2-e] JSON 파싱: annotations[0].tagging[0].state 존재, meta_info.duration_time 존재
+```
+L2는 전수 검사를 권한다(파일당 수십~수백 KB). 표본 검사로 대체하면 **표본 수와 선정 방식을
+기록**한다.
+
+**L3 — CSV / BIN / JSON 대응**
+
+```
+[L3-a] basename 집합이 세 종류에서 완전히 일치 (차집합 양방향 0건)
+[L3-b] 파일명 규약 준수: ^(agv|oht)\d+_\d{4}_\d{6}$
+[L3-c] 파일명 timestamp 와 JSON meta_info.collection_date/collection_time 일치
+[L3-d] 고아 파일 0건 (csv 있고 bin 없음 등)
+```
+
+**L4 — split / session / window 집계**
+
+```
+[L4-a] split 별 파일 수      Training 99,476 · Validation 12,394
+[L4-b] 장비 집합             Training 32대(agv01-16, oht01-16) · Validation 4대(agv17,18, oht17,18)
+                             교집합 0
+[L4-c] session 수            gap_threshold=120 s 로 Training 303 · Validation 39
+[L4-d] window 수             window 30 / step 10 으로 Training 9,313 · Validation 1,157
+[L4-e] 세션 내 인접 간격      전 인접쌍 Δ=1 s, 30행 window span 29 s
+```
+
+**중요 — 숫자 일치만으로 복구 성공을 선언하지 않는다.**
+
+- L4-c/L4-d 의 session·window 수 일치는 **원시 데이터 내용의 무결성을 입증하지 않는다.**
+  세션 경계와 윈도 수는 CSV 파일명 및 시간 간격으로 정해져 CSV/BIN 내용이 비어 있어도
+  그 수만 같을 수 있다. 다만 현재 `session_index.py`는 인덱스를 새로 만들 때 JSON 라벨을
+  실제로 파싱하며, 라벨이 비어 있거나 잘못되면 실패한다. 기존 캐시의 생성 당시 데이터
+  상태와 라벨 오염 여부는 확인되지 않았다. 이전 문서의 “현재 캐시가 0바이트 상태에서
+  생성됐다”는 단정은 2026-09-10 재검토에서 철회했다.
+- 따라서 **L4 통과는 L2 전수 통과를 전제로만 의미가 있다.** L2 없이 L4만 보고하는 것은
+  복구 검증이 아니다.
+- **실패했을 때 기대 숫자에 맞추려고 파일을 제외하지 않는다.** 예: L2-c 파싱 실패 파일을
+  버려서 L4-d 를 1,157 에 맞추는 행위를 금지한다. 불일치는 불일치로 보고하고 원인을 조사한다.
+- 기대값과 다른 수가 나오면 **그 수가 맞을 가능성도 함께 검토한다.** 이전 집계 자체가
+  0바이트 상태에서 산출된 값이므로 절대 기준이 아니다.
+
+### 13-5. 공식 공급자 자산의 결손
+
+같은 0바이트 문제가 공급자 배포 코드에도 있다.
+
+```
+models/AI모델/1.모델소스코드/models/.../*.py            8개 전부 0바이트
+models/AI모델/1.모델소스코드/trainers/train_manager.py   0바이트
+models/AI모델/3.도커이미지/docker44_1.tar               Jetson: 17.9 GB 저장 / 내부 선언 56.8 GB -> 잘림
+                                                        서버:  61 GB 완전본 존재 (2026-09-17 확인, 내부 미검증)
+models/AI모델/2.AI학습모델파일/best_model.pth            11,339,490 bytes 정상
+docs/AI모델_문서파일/**                                  정상 (readme, PDF, requirements)
+```
+
+그 결과 **공식 F1 averaging 방식과 보고 split 을 확정할 수 없다**(blocker B-6).
+공식 아키텍처는 `best_model.pth` state_dict 로 복원했다 — Multimodal LSTM+CNN,
+2,833,412 params, attention 텐서 0개. 우리 V1 과 동일하다(§6, 연구노트 #16 §3.1).
+
+### 13-6. 서버에는 이미 온전한 사본이 있다 (2026-09-17 확인)
+
+§13-1~13-4 는 **Jetson 사본** 기준이다. 서버 `/home/keti/factory_safety/data/aihub/` 를 확인한 결과
+**0바이트 문제는 Jetson 사본에만 있었다.**
+
+```
+서버 extracted/   Training   csv 99,476 · bin 99,476 · json 99,476    0바이트 0
+                  Validation csv 12,394 · bin 12,394 · json 12,394    0바이트 0
+                  총 18 GB · mtime 2025-03-10 · 표본 csv 82 B, bin 153,728 B
+서버 zip           684개 (Jetson 과 동일 구성, sha256 대조는 미실행)
+서버 docker        61 GB 완전본
+현재 위치          /mnt/data-hdd/keti_data/factory_safety/aihub (링크 경유, 연구노트 #17 §3)
+```
+
+**이것은 존재·크기 기준이다.** L2(파싱)·L3(대응)·L4(집계) 검증은 아직 하지 않았다. 숫자가 맞는다는
+사실만으로 복구 완료를 선언하지 않는다(§13-4 원칙 그대로).
+
+### 13-7. 서버 first-run 에 추가되는 단계 (2026-09-17 개정)
+
+§7 의 STEP 1~7 은 development baseline 용이다. AI Hub 재학습에는 다음이 더 필요하다.
+**서버 사본이 온전하므로 zip 전송·재추출 단계는 생략하고 검증으로 바로 간다.**
+
+```
+STEP 8   (생략) zip 전송 · 재추출 - 서버 사본 사용. Jetson zip 과의 sha256 대조는 선택
+STEP 9   L1 검증  서버 zip 684개 구조·CRC (선택; extracted 를 쓰므로 필수 아님)
+STEP 10  L2 검증  extracted 파일 수 · 0바이트 0건 · CSV 8필드 / BIN (120,160) / JSON state 파싱   <- 전수
+STEP 11  L3 검증  basename 3종 대응 · 파일명 규약 · timestamp 일치 · 고아 0건
+STEP 12  L4 검증  split · 장비 32/4 · session 303/39 · window 9,313/1,157 · Δ=1 s
+STEP 13  server clone 을 작업 브랜치로 갱신 (현재 5feabb5 는 09-10 경로 수정 미포함) 후 session index 재생성
+```
+
+STEP 10 을 건너뛰고 STEP 12 만 통과했다고 재학습을 시작하지 않는다.
+Jetson 사본(0바이트)은 복구 대상이 아니라 **폐기 또는 서버 사본으로 교체** 대상이다.
+
+---
+
+## 14. 관련 문서
 
 | 문서 | 내용 |
 |---|---|
@@ -599,10 +816,14 @@ canonical 문서:
 | [JETSON_ENVIRONMENT.md](JETSON_ENVIRONMENT.md) | Jetson 실측 환경 |
 | [DATA_PLATFORM_ARCHITECTURE.md](DATA_PLATFORM_ARCHITECTURE.md) | 2027 3-node 아키텍처 |
 | [CONSORTIUM_DATA_PLATFORM_QUESTIONS.md](CONSORTIUM_DATA_PLATFORM_QUESTIONS.md) | partner 확인 질문 P01~P20 |
+| [manifests/development_baseline_20260904.sha256](manifests/development_baseline_20260904.sha256) | development baseline raw 85 파일 지문 (§8) |
+| [manifests/aihub_zips.sha256](manifests/aihub_zips.sha256) | AI Hub 압축 자산 684 파일 지문 (§13) |
+| [RESEARCH_STATUS.md](RESEARCH_STATUS.md) | 연구 gate 현황·blocker |
+| [연구노트 #16](연구노트/연구노트_16_외부검토_실측검증.md) | 외부 검토 실측 검증 상세 근거 |
 
 ---
 
-## 14. 이 문서가 하지 않는 것
+## 15. 이 문서가 하지 않는 것
 
 - 서버 하드웨어/소프트웨어 사양을 적지 않는다 (§9 audit 전까지 TBD)
 - model schema 방향을 결정하지 않는다 (§11)

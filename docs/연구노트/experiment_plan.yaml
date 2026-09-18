@@ -1,0 +1,111 @@
+# 실험 계획 manifest
+#
+# 업무 지침 §10: "계획·blocked 실행에는 결과 파일이 아직 없으므로 별도 계획 manifest를 근거로
+# 인덱스를 생성하고 결과 필드는 비워 둔다. 계획에 가짜 results.json을 만들지 않는다."
+#
+# 완료 실행은 이 파일에 넣지 않는다. results/**/results.json 에서 자동 추출한다.
+# 인덱스 재생성: python3 docs/연구노트/build_experiment_index.py
+#
+# 필드는 업무 지침 §11 스키마를 따른다. 값이 없으면 null, 해당 없으면 not_applicable.
+# 모르는 값을 현재 환경 값으로 소급 입력하지 않는다.
+
+experiments:
+
+  - experiment_id: EXP-20260907-001
+    hypothesis_id: AIHUB-H3
+    status: blocked
+    purpose: F04 주기식 수정(T//top_indices) 적용 후 TimesNet 축약변형 재평가
+    blocked_by: [B-1, B-3]
+    seeds: [42]
+    primary_metric: val_macro_f1
+    comparison: 수정 전 TimesNet 0.9189 (results/external_baselines/TimesNet)
+    stopping_rule: 기존 실행과 동일 epoch·동일 split
+    limitations: 축약 변형이며 공식 TimesNet 과의 비교가 아니다 (EXP-20260907-004 참조)
+    decision: null
+
+  - experiment_id: EXP-20260907-002
+    hypothesis_id: AIHUB-H1
+    status: blocked
+    purpose: F03 seed factory 수정 후 V2+ 3-seed 재실행. 재현 가능한 초기 가중치 확보
+    blocked_by: [B-1, B-3]
+    seeds: [42, 123, 456]
+    primary_metric: val_macro_f1
+    comparison: 기존 0.955000 / 0.9560237 / 0.9559546 (동일 seed 라벨, 초기화는 미통제였음)
+    stopping_rule: 기존과 동일 30 epoch
+    limitations: 초기 가중치가 달라지므로 값 일치가 아니라 분포 비교만 가능
+    decision: null
+
+  - experiment_id: EXP-20260907-003
+    hypothesis_id: AIHUB-H1
+    status: blocked
+    purpose: 2^3 ablation(multiscale x SE x SupCon) 동일 예산·다중 seed 재실행. interaction 추정
+    blocked_by: [B-1, B-3]
+    seeds: [42, 123, 456]
+    primary_metric: val_macro_f1
+    comparison: 현재 단독 3개(20 epoch) vs full(30 epoch) 예산 불일치를 제거
+    stopping_rule: 전 조건 동일 상한 + 동일 scheduler + 동일 early stopping patience. lr 시계열을 반드시 기록
+    limitations: >-
+      2요소 조합 3개가 신규이므로 기존 표와 직접 이어 붙일 수 없다.
+      기존 V2 실행은 lr 시계열이 기록되지 않아 schedule 동일성을 사후 확인할 수 없으므로
+      V2 도 이 실험에서 함께 재실행해야 한다 (기존 0.943008 을 그대로 인용하지 않는다)
+    decision: null
+
+  - experiment_id: EXP-20260907-004
+    hypothesis_id: AIHUB-H3
+    status: blocked
+    purpose: 공식 TimesNet 구현(thuml/Time-Series-Library)으로 동일 데이터·동일 예산 재평가
+    blocked_by: [B-1, B-3]
+    seeds: [42]
+    primary_metric: val_macro_f1
+    comparison: 우리 축약 구현 0.9189
+    stopping_rule: 동일 epoch·동일 튜닝 예산
+    limitations: 외부 의존성 추가가 필요하므로 서버 audit 후 호환성 확인 선행
+    decision: null
+
+  - experiment_id: EXP-20260907-005
+    hypothesis_id: FIELD-HA
+    status: blocked
+    purpose: thermal 최소 인코더 비교. fc_thermal 2,457,728 파라미터의 필요성 판정
+    blocked_by: [B-1, B-3]
+    seeds: [42, 123, 456]
+    primary_metric: val_macro_f1
+    comparison: sensor-only 0.9513425 / full 0.955 대비. 마지막 프레임·ROI 온도·핫스폿 면적 순
+    stopping_rule: 동일 예산
+    limitations: legacy 데이터 기준 판정이며 현장 데이터 판정이 아니다
+    decision: null
+
+  - experiment_id: EXP-20260907-006
+    hypothesis_id: AIHUB-H1
+    status: blocked
+    purpose: 장비 그룹 K-fold 내부 validation 구성. val 4대(agv17,agv18,oht17,oht18) 최종 동결
+    blocked_by: [B-1, B-3]
+    seeds: [42]
+    primary_metric: val_macro_f1
+    comparison: 현행 단일 val 4대 반복 사용 대비. 장비 단위 bootstrap 신뢰구간
+    stopping_rule: fold 별 동일 예산
+    limitations: 유효 독립 표본이 장비 32대(train)이며 신뢰구간이 넓을 수 있다
+    decision: null
+
+  - experiment_id: EXP-20260907-007
+    hypothesis_id: AIHUB-H2
+    status: blocked
+    purpose: F14b 이중 보정(sampler 1/n + weighted CE 1/n) 제거 영향 측정
+    blocked_by: [B-1, B-3]
+    seeds: [42, 123, 456]
+    primary_metric: val_macro_f1
+    comparison: sampler만 / CE weight만 / 둘 다(현행) 3조건
+    stopping_rule: 동일 예산
+    limitations: Severe recall 과 NM 오류가 동시에 움직이므로 단일 지표로 판정하지 않는다
+    decision: null
+
+  - experiment_id: EXP-20260907-008
+    hypothesis_id: not_applicable
+    status: planned
+    purpose: G1-S 서버 원시 재현. 학습 실행이 아니며 전처리 재현 검증
+    blocked_by: [B-3]
+    seeds: not_applicable
+    primary_metric: window_accounting
+    comparison: Jetson G1-J 결과 60/49/11, 구조오류 0
+    stopping_rule: 회계 불일치 시 즉시 중단(build_windows.py exit 3)
+    limitations: 서버 환경 audit 및 raw 전송 선행
+    decision: null

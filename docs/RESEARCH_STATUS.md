@@ -1,6 +1,6 @@
 # RESEARCH STATUS
 
-최종 갱신: 2026-09-21 · 기준 HEAD `38dc5c3` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
+최종 갱신: 2026-09-21 (오후) · 기준 HEAD `248a1a9` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
 
 > **이 문서는 현재 단계·최우선 작업·blocker만 담는다.** 배포/환경/데이터 획득의 canonical
 > 현황은 [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)에 있고 여기서
@@ -33,7 +33,7 @@
 | **G2d** AI Hub 데이터 검증 | **PASS** (2026-09-18, SSD 작업 사본) | L2 전수 파싱(CSV·BIN·JSON 각 111,870) 실패 0 · L3 대응·규약·timestamp 111,870 일치 · L4 session 303/39, window 9,313/1,157, 장비 32/4 교집합 0, Δ=1 s. `session_index.py` 강제 재생성으로 확인. 연구노트 #17 §7 |
 | **G2e** V2+ 3-seed 재실행 (EXP-20260907-002) | **완료** (2026-09-18, 첫 서버 GPU 학습) | F1 0.954825/0.952084/0.956400 (mean 0.954436, std 0.001783) vs legacy mean 0.955659. provenance·초기 가중치 hash 기록. [연구노트 #18](연구노트/연구노트_18_G2e_V2plus_재실행.md) |
 | **G2f** 2³ ablation (EXP-20260907-003) | **완료** (2026-09-18, 24 run, `4fac5bc` clean) | multiscale +0.0116 ± 0.0008, SupCon +0.0042 ± 0.0006, SE +0.0001 ± 0.0011. interaction 은 전체 이득의 23 %. [연구노트 #19](연구노트/연구노트_19_EXP003_2x3_ablation_및_재현성.md) |
-| G2g 장비 K-fold (EXP-20260907-006) | 미착수 | — |
+| **G2g** 장비 K-fold (EXP-20260907-006) | **완료** (2026-09-21, 4 fold, `248a1a9` clean, 결정론) | held-out 32대 mean F1 0.9546, 장비 std 0.0145, 95 % CI [0.9497, 0.9595]; Severe 506/511. [연구노트 #21](연구노트/연구노트_21_EXP006_장비_Kfold.md) |
 | **G2h-2** 논문 Table 8·§7.3·H1/H2 교체 (O-111) | **적용** (2026-09-21, D-023) | `paper_draft.md` — `+1.20%`·synergy·PENDING(EXP-003) 0건. [연구노트 #20](연구노트/연구노트_20_결정론_재현_SE추가seed_O111적용.md) §3 |
 | 결정론 재현 (EXP-20260921-001) | **PASS** | `--deterministic` seed 42 × 2 GPU: history 210/210 일치, 최종 가중치 sha256 동일, 경고 0. 연구노트 #20 §1 |
 | bench 데이터 (현장 아님) | **진행** (2026-09-18~) | soak #2 는 27분 만에 SCD30 I2C NACK 1회로 FAILED(정책대로, O-112). xcal 3회 관측(보정 불가 조건). [프로토콜 §15](JETSON_DATASET_PROTOCOL.md), 연구노트 #19 §7, #20 §4 |
@@ -52,7 +52,9 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 |---|---|---|---|
 | 1 | **O-112 수집기 오류 정책 결정** — context 센서(SCD30 등) I2C 오류 1회에 trial 전체를 FAILED 로 끝낼지 | 결정 후 bench_soak 8h 재실행 완주 | 사용자 결정 |
 | 2 | **bench_thermal_xcal 유효 조건 재실행** (NTC 위치 표시 + 부하 수동 on/off 직후 각 360 s) · **B-7** import 도구 복원 | NTC 변화 ≥ 5 °C 구간에서 기울기 추정 / import 재현 | 사용자 물리 조작 / 없음 |
-| 3 | **EXP-20260907-006** 장비 그룹 K-fold (학습) | 장비 단위 신뢰구간 | 사용자 학습 승인 |
+| 3 | **O-113 논문에 장비 단위 불확실성 병기·Severe 100 % 한정 정정 적용 여부** (문안: 연구노트 #21 §5) | 사용자 판단 | 사용자 결정 |
+
+완료(09-21 오후): EXP-006 K-fold 4 fold 완료 — 장비 간 std 는 seed std 의 8~24배, Severe 100 % 는 validation 4대 한정(held-out 32대 99.0 %).
 
 완료(09-21): 결정론 모드 bit-level 재현 PASS(EXP-20260921-001). SE 추가 seed 6 run — 부호 유지 **실패**(5/6 양, mean +0.0015 < std 0.0024):
 SE 기여 미확립(EXP-20260921-002). O-111 적용(D-023). 완료(09-18 야간): 동일 seed 재실행(N17), EXP-003 24 run.
@@ -121,6 +123,13 @@ SE 기여 미확립(EXP-20260921-002). O-111 적용(D-023). 완료(09-18 야간)
 - **N22 bench_soak 는 context 센서 오류 1회로 멈춘다** — SCD30 `I2cTransceiveError [Errno 121]` 1회(27분 시점)에 collector 가 설계대로
   정지(stopped_on_error). 그 전 1627 tick 은 missed 0, |jitter| max 0.85 ms, writer drop 0, FLIR stale 13 tick. 정책 결정 필요(O-112)
   → 연구노트 #20 §4
+- **N23 장비 단위 불확실성은 seed 단위의 8~24배다** — 장비 분리 4-fold(EXP-006, 32대, seed 42, 결정론): held-out 장비 F1 mean 0.954642,
+  std 0.014529, 95 % CI [0.949686, 0.959547] (half-width ±0.005 vs 논문 ±0.0006). 장비 범위 0.928(oht03)~0.978(agv16). AGV 0.960 > OHT 0.949
+  → 연구노트 #21 §3~4, D-025
+- **N24 Severe 100 % 탐지는 validation 4대에 한정된다** — held-out 32대 pooled Severe recall 506/511 = 99.0 %, 누락 5 window(oht05·oht09·oht03×2·agv08)
+  전부 Moderate 예측. 논문 결론 `:575` 정정안 → 연구노트 #21 §5, CE-048, O-113
+- **N25 24대 학습 모델의 frozen val F1 은 0.9461 ± 0.0032** — 32대 학습(0.9548)보다 0.009 낮음. agv18 이 일관되게 어려움(0.88~0.90). 원인(학습 장비 수 vs
+  구성) 미분리 → 연구노트 #21 §2·§4
 - **N14 `monai_env` 는 수술 영상 프로젝트용 공유 env 다** — 2025-12 생성, 336 패키지(monai·pydicom·SimpleITK·transformers). 기존 논문 실험이 이 위에서 돌았으나 정책상 전용 venv 로 교체(D-019). pin 은 그대로 옮겨 비교 가능성 유지 → 연구노트 #17 §6.3
 
 **지표 표기.** `49/60 = 81.7 %`는 **v1 윈도 유효율**이다. 판단 가용률이나 전 센서 정상 관측
@@ -145,6 +154,7 @@ SE 기여 미확립(EXP-20260921-002). O-111 적용(D-023). 완료(09-18 야간)
 | [연구노트 #18](연구노트/연구노트_18_G2e_V2plus_재실행.md) | G2e V2+ 3-seed 재실행 결과 |
 | [연구노트 #19](연구노트/연구노트_19_EXP003_2x3_ablation_및_재현성.md) | EXP-003 2³ ablation · seed 재현성 · bench 데이터 시작 |
 | [연구노트 #20](연구노트/연구노트_20_결정론_재현_SE추가seed_O111적용.md) | 결정론 bit-level 재현 · SE 6-seed · O-111 적용 · bench_soak #2 실패 |
+| [연구노트 #21](연구노트/연구노트_21_EXP006_장비_Kfold.md) | EXP-006 장비 분리 4-fold · 장비 단위 CI · Severe 100 % 한정 |
 | [LOCAL_REVIEW_20260910.md](LOCAL_REVIEW_20260910.md) | Codex 09-10 경로·캐시·RNG 수정 검증 |
 | [SENSOR_COLLECTION_REVIEW_20260917.md](SENSOR_COLLECTION_REVIEW_20260917.md) | Codex 09-17 수집기 재작성·`collect.sh` 검증 |
 | [JETSON_SENSOR_DASHBOARD.md](JETSON_SENSOR_DASHBOARD.md) | Codex 09-17 로컬 대시보드 |

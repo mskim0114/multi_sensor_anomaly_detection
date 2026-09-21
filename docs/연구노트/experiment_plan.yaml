@@ -165,15 +165,23 @@ experiments:
 
   - experiment_id: EXP-20260907-006
     hypothesis_id: AIHUB-H1
-    status: blocked
-    purpose: 장비 그룹 K-fold 내부 validation 구성. val 4대(agv17,agv18,oht17,oht18) 최종 동결
-    blocked_by: [B-1, B-3]
+    status: completed
+    purpose: 장비 분리 4-fold (Training 32대, agv/oht 균형) 로 처음 보는 장비에서의 F1 과 장비 단위 불확실성 측정. Validation 4대는 frozen(선택 불참, 보고만). 2026-09-21 18:32~19:14 KST (연구노트 #21)
     seeds: [42]
+    code_commit: 248a1a9
+    environment_profile: SERVER-TRAINING (factory_training venv, --deterministic)
+    result_dirs:
+      - results/kfold_devices/fold0_of4_seed42
+      - results/kfold_devices/fold1_of4_seed42
+      - results/kfold_devices/fold2_of4_seed42
+      - results/kfold_devices/fold3_of4_seed42
     primary_metric: val_macro_f1
-    comparison: 현행 단일 val 4대 반복 사용 대비. 장비 단위 bootstrap 신뢰구간
-    stopping_rule: fold 별 동일 예산
-    limitations: 유효 독립 표본이 장비 32대(train)이며 신뢰구간이 넓을 수 있다
-    decision: null
+    comparison: 단일 split V2+ (G2e 0.954825 / 결정론 0.954888 / 논문 0.9557 ± 0.0006). 장비 단위 bootstrap CI. 집계 aggregate_kfold.py
+    stopping_rule: fold 별 동일 30 epoch, best held-out macro-F1 checkpoint
+    limitations: seed 1개. 정규화 상수는 고정 학습셋 상수(fold 간 공유). fold 학습 장비 24대이므로 32대 모델의 직접 측정이 아니다
+    decision: >-
+      완료. fold held-out F1 0.947488/0.948953/0.956120/0.961247 (mean 0.953452 std 0.006421). 장비 32대 mean 0.954642 std 0.014529
+      95 % CI [0.949686, 0.959547]. Severe 506/511 (99.0 %). frozen val 0.946107 ± 0.003182. 장비 단위 불확실성 병기 (D-025), 논문 적용은 O-113
 
   - experiment_id: EXP-20260907-007
     hypothesis_id: AIHUB-H2

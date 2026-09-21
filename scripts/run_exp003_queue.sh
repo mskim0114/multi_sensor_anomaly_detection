@@ -21,8 +21,14 @@ mkdir -p "$EVID/logs"
 source "$VENV/bin/activate"
 cd "$ROOT"
 i=0
-for seed in 42 123 456; do
-  for ms in 0 1; do for se in 0 1; do for sc in 0 1; do
+# Override the default full design with EXP003_SEEDS="7 2026" and EXP003_CONDS="1 0 1;1 1 1"
+# (each condition is "ms se sc"); used for the SE follow-up seeds (연구노트 #20).
+SEEDS="${EXP003_SEEDS:-42 123 456}"
+CONDS="${EXP003_CONDS:-0 0 0;0 0 1;0 1 0;0 1 1;1 0 0;1 0 1;1 1 0;1 1 1}"
+IFS=';' read -r -a COND_LIST <<< "$CONDS"
+for seed in $SEEDS; do
+  for triple in "${COND_LIST[@]}"; do
+    read -r ms se sc <<< "$triple"
     if (( i % NLANES == LANE )); then
       cond="ms${ms}_se${se}_sc${sc}_seed${seed}"
       if [[ -f "results/factorial_ablation/${cond}/results.json" ]]; then
@@ -35,6 +41,6 @@ for seed in 42 123 456; do
       fi
     fi
     i=$((i+1))
-  done; done; done
+  done
 done
 echo "$(date +%T) lane$LANE finished"

@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +51,33 @@ def enable_fast_math():
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
     logger.info("Fast math enabled: TF32 matmul, TF32 cudnn, cudnn benchmark=True")
+
+def enable_deterministic():
+    """Ask PyTorch for deterministic kernels and record which ops cannot comply.
+
+    Same-seed re-runs reproduce the initial weights but not the trajectory (연구노트 #19
+    §5, N17). This switches on every determinism control PyTorch offers; ops that have no
+    deterministic CUDA kernel raise a UserWarning under warn_only=True, and those warnings
+    are collected so the run's results.json states exactly where determinism was not
+    available instead of implying it was.
+    """
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    seen: list[str] = []
+
+    def _capture(message, category, filename, lineno, file=None, line=None):
+        text = str(message)
+        if "deterministic" in text and text not in seen:
+            seen.append(text)
+            logger.warning(f"non-deterministic op: {text}")
+    warnings.showwarning = _capture
+    logger.info("Deterministic mode: cudnn.deterministic=True, benchmark=False, "
+                "use_deterministic_algorithms(True, warn_only=True), "
+                f"CUBLAS_WORKSPACE_CONFIG={os.environ['CUBLAS_WORKSPACE_CONFIG']}")
+    return seen
+
 
 # Default output location. Pass --results-dir to write a new run elsewhere; the paper
 # run lives here and must not be overwritten by later experiments.
@@ -210,7 +238,14 @@ def main():
     parser.add_argument("--fast", action="store_true",
                         help="Enable TF32 matmul + cudnn.benchmark. Introduces "
                              "non-determinism; do not use for paper-reproducibility runs.")
+    parser.add_argument("--deterministic", action="store_true",
+                        help="torch.use_deterministic_algorithms(True, warn_only=True) + "
+                             "cudnn.deterministic + CUBLAS_WORKSPACE_CONFIG. Ops without a "
+                             "deterministic kernel are logged, not silently ignored. "
+                             "Mutually exclusive with --fast.")
     args = parser.parse_args()
+    if args.deterministic and args.fast:
+        parser.error("--deterministic and --fast are mutually exclusive")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -220,6 +255,7 @@ def main():
 
     if args.fast:
         enable_fast_math()
+    nondeterministic_ops = enable_deterministic() if args.deterministic else None
 
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -382,6 +418,14 @@ def main():
         "seed_controls_init": True,
         "initial_state_sha256": init_state_sha256,
         "provenance": {**provenance, "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat()},
+        "deterministic": {
+            "requested": bool(args.deterministic),
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "use_deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+            "non_deterministic_ops_warned": nondeterministic_ops if nondeterministic_ops is not None else [],
+        },
     }
     with open(os.path.join(results_dir, "results.json"), "w") as f:
         json.dump(results, f, indent=2)

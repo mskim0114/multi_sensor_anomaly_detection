@@ -581,5 +581,5 @@ official completed count 에 포함하지 않으며, 서버 import 시 `smoke_tr
 ```
 normal_20260918T082429Z   bench_soak 8h 시도, tick ~200 에서 xcal 구도 전환을 위해 operator 중단 (aborted, 부분 파일 보존)
 normal_20260918T082944Z / 083557Z / 084207Z   bench_thermal_xcal 1~3/3, canonical 360 s completed -> 관측만, 보정 불가 조건 (연구노트 #19 §7)
-normal_20260918T120817Z   bench_soak 8h 시도 #2, 21:08 KST 시작 (xcal 구도 유지)
+normal_20260918T120817Z   bench_soak 8h 시도 #2 — 1627 tick(27분) 에서 SCD30 I2C NACK 1회로 FAILED (stopped_on_error 설계대로). 정책 결정 O-112 (연구노트 #20 §4)
 ```

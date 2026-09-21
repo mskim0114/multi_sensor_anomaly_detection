@@ -101,6 +101,44 @@ experiments:
       초기 가중치 sha256 동일. F1 0.954040 vs 0.954825 (Δ −0.0008), epoch 별 val F1 30 중 0 일치. 재현성 주장은
       "초기 가중치 + 결과 분포" 로 한정 (N17)
 
+  - experiment_id: EXP-20260921-001
+    hypothesis_id: AIHUB-H1
+    status: completed
+    purpose: --deterministic 모드 seed 42 V2+ 를 GPU 0/1 에서 독립 실행해 bit-level 재현 확인 (연구노트 #20 §1)
+    seeds: [42]
+    code_commit: 38dc5c3
+    environment_profile: SERVER-TRAINING (factory_training venv)
+    result_dirs:
+      - results/v2plus_det_seed42_a
+      - results/v2plus_det_seed42_b
+    primary_metric: val_macro_f1
+    comparison: 두 run 상호 비교 (history 210 값, 최종 model_state_dict sha256). 참고 비결정 G2e seed 42 0.954825
+    stopping_rule: G2e 와 동일 30 epoch
+    limitations: 속도 비용 미측정 (GPU 를 EXP-20260921-002 와 공유). 팩토리얼 러너에는 결정론 옵션 미구현
+    decision: >-
+      PASS. history 7종 × 30 epoch 210/210 일치, F1 0.954888 best@30 NM 32, 최종 가중치·optimizer 텐서 동일, 비결정 kernel 경고 0 (D-024, N20)
+
+  - experiment_id: EXP-20260921-002
+    hypothesis_id: AIHUB-H1
+    status: completed
+    purpose: SE 추가 기여(ms1_se1_sc1 − ms1_se0_sc1) 확인용 seed 3개 추가 (7, 2026, 31415). EXP-003 의 3 seed 와 합쳐 6 seed (연구노트 #20 §2)
+    seeds: [7, 2026, 31415]
+    code_commit: 38dc5c3
+    environment_profile: SERVER-TRAINING (factory_training venv)
+    result_dirs:
+      - results/factorial_ablation/ms1_se0_sc1_seed7
+      - results/factorial_ablation/ms1_se1_sc1_seed7
+      - results/factorial_ablation/ms1_se0_sc1_seed2026
+      - results/factorial_ablation/ms1_se1_sc1_seed2026
+      - results/factorial_ablation/ms1_se0_sc1_seed31415
+      - results/factorial_ablation/ms1_se1_sc1_seed31415
+    primary_metric: val_macro_f1
+    comparison: EXP-20260907-003 의 같은 두 조건 seed 42/123/456. 분석 se_followup.txt
+    stopping_rule: EXP-003 과 동일 프로토콜 (30 epoch, 비결정 모드)
+    limitations: 비결정 모드 잡음 ±0.001 이 개별 Δ 에 섞임. 통과 조건은 사전 명시(6 seed 부호 유지)
+    decision: >-
+      통과 조건 실패. ΔF1 mean +0.001470 std 0.002359, 양 5/6, seed 31415 −0.002715. SE 기여 미확립 (N21). 논문 §7.3 반영
+
   - experiment_id: EXP-20260907-004
     hypothesis_id: AIHUB-H3
     status: blocked

@@ -83,6 +83,26 @@ FLIR_AGE_WARN_MS = 500.0
 # part of the 2026 model input and is not required by the 2026 anomaly
 # scenarios, so the dataset does not wait on it. The implementation is kept.
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Acquisition failure policy (decisions.md D-026, opened as O-112).
+#
+# Model-input sensors produce the 8-channel vector and the thermal array that
+# src/data/config.py:SENSOR_CHANNELS defines. Losing one of them makes every
+# later tick unusable for the dataset, so the first error ends acquisition.
+#
+# Context sensors are stored for future work and are never part of the model
+# input (JETSON_DATASET_PROTOCOL.md section 13). Their first error is recorded
+# and the sensor is then disabled for the remainder of the run: it is never
+# polled again, so this is a one-way transition and not a retry. Acquisition
+# continues on the model-input sensors, and every later tick reports the
+# disabled sensor as status=error carrying that first error.
+#
+# A failing component that is not named a context sensor - the ADS1115 owner,
+# the bus 1 worker, the chunk writer - is fatal. Unknown means fatal.
+# --------------------------------------------------------------------------
+MODEL_INPUT_SENSORS = frozenset({"ntc", "ct1", "sps30", "flir"})
+CONTEXT_SENSORS = frozenset({"scd30", "bme680", "sgp30"})
+
 SENSOR_PROFILE_V1 = "jetson_factory_v1_2026"
 PROFILE_V1_REQUIRED = ("ads1115", "sps30", "scd30", "bme680", "flir")
 PROFILE_V1_DISABLED = ({"sensor": "sgp30", "reason": "hardware_stability_unresolved"},)
@@ -492,8 +512,15 @@ class Bus1Worker(threading.Thread):
                         })
                         self.scd30_state.ok("scd30.read_measurement_data")
                 except Exception as exc:
-                    self._fail(self.scd30_state, "scd30.poll_and_read", exc)
-                    return
+                    # Context sensor: disable it and keep serving SPS30, which
+                    # is a model input. `_scd` is cleared, so it is never polled
+                    # again and `scd30_state.last_error` makes every later tick
+                    # report status=error (see _observe_bus1).
+                    self.scd30_state.fail(exc)
+                    self._scd = None
+                    if self._on_error is not None:
+                        self._on_error("scd30.poll_and_read", exc,
+                                       self.scd30_state.last_successful_operation)
 
             if self._sps is not None:
                 try:
@@ -1166,6 +1193,8 @@ class SensorCollector:
         self.first_error: dict | None = None
         self.stopped_on_error = False
         self.shutdown_errors: list[dict] = []
+        # sensor -> first error record. Disabled for the rest of the run, not retried.
+        self.context_sensor_failures: dict[str, dict] = {}
 
         self.ads: Ads1115Owner | None = None
         self.writer = ChunkWriter(on_error=self._record_error)
@@ -1216,7 +1245,19 @@ class SensorCollector:
     # -- lifecycle ---------------------------------------------------------
     def _record_error(self, operation: str, exc: BaseException,
                       last_successful_operation: str | None = None) -> None:
+        """Record a failure and decide whether it ends the run.
+
+        A context sensor is disabled and the run continues; anything else is
+        fatal. The component is taken from the operation name ("scd30.read" ->
+        "scd30"), and a name that is not a known context sensor is fatal, so a
+        new failure path added later stops the run rather than being ignored.
+        """
         record = _error_record(operation, exc, last_successful_operation)
+        component = operation.split(".", 1)[0]
+        if component in CONTEXT_SENSORS:
+            with self._error_lock:
+                self.context_sensor_failures.setdefault(component, record)
+            return
         with self._error_lock:
             if self.first_error is None:
                 self.first_error = record
@@ -1280,7 +1321,8 @@ class SensorCollector:
                 raise InterruptedError("stop requested while awaiting sensor workers")
             frame, _, _ = self.thermal.latest()
             sps, scd = self.bus1.latest()
-            if frame is not None and sps is not None and scd is not None:
+            scd_settled = scd is not None or self.bus1.scd30_state.last_error is not None
+            if frame is not None and sps is not None and scd_settled:
                 return
             if self.thermal.startup_error and self.bus1.startup_error:
                 return
@@ -1291,10 +1333,20 @@ class SensorCollector:
         frame, _, _ = self.thermal.latest()
         sps, scd = self.bus1.latest()
         missing = [name for name, value in (
-            ("flir", frame), ("sps30", sps), ("scd30", scd),
+            ("flir", frame), ("sps30", sps),
         ) if value is None]
-        raise TimeoutError(
-            "required sensor workers produced no initial reading: " + ", ".join(missing))
+        if missing:
+            raise TimeoutError(
+                "model-input sensor workers produced no initial reading: "
+                + ", ".join(missing))
+        if scd is None and self.bus1.scd30_state.last_error is None:
+            # Context sensor, silent rather than failed: record why it is absent
+            # for the whole run instead of waiting on it or starting without a note.
+            exc = TimeoutError(
+                f"scd30 produced no initial reading within {timeout_s}s")
+            self.bus1.scd30_state.fail(exc)
+            self._record_error("scd30.await_first_reading", exc,
+                               self.bus1.scd30_state.last_successful_operation)
 
     def shutdown(self) -> None:
         with self._shutdown_lock:
@@ -1690,6 +1742,14 @@ class SensorCollector:
             "first_error": self.first_error,
             "preview": dict(self.preview_report),
             "stopped_on_error": self.stopped_on_error,
+            "context_sensor_failures": dict(self.context_sensor_failures),
+            "failure_policy": {
+                "model_input_sensors": sorted(MODEL_INPUT_SENSORS),
+                "context_sensors": sorted(CONTEXT_SENSORS),
+                "rule": ("an error on a model-input sensor ends acquisition; an error on "
+                         "a context sensor disables that sensor for the rest of the run "
+                         "and is never retried, and acquisition continues"),
+            },
             "shutdown_errors": list(self.shutdown_errors),
             "master": {
                 "snapshot_count": self.snapshot_count,

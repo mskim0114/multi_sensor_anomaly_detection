@@ -51,7 +51,7 @@ G1-S PASS도 일괄 승인이 아니며 현장 모델 입력 결정은 handoff �
 
 | # | 작업 | 통과 조건 | 막는 것 |
 |---|---|---|---|
-| 1 | **O-112 수집기 오류 정책 결정** — context 센서(SCD30 등) I2C 오류 1회에 trial 전체를 FAILED 로 끝낼지 | 결정 후 bench_soak 8h 재실행 완주 | 사용자 결정 |
+| 1 | **bench_soak 8h 완주 확인** (D-026 적용 후 첫 장시간 수집) | context 센서 오류가 나도 완주, `context_sensor_failures` 기록 | 없음 |
 | 2 | **bench_thermal_xcal 유효 조건 재실행** (NTC 위치 표시 + 부하 수동 on/off 직후 각 360 s) · **B-7** import 도구 복원 | NTC 변화 ≥ 5 °C 구간에서 기울기 추정 / import 재현 | 사용자 물리 조작 / 없음 |
 | 3 | **현장 데이터 축적 재개** — 감시 대상 장비 확정 전까지는 bench 목적에 한정 (§4 N26) | O-112 결정 후 soak 완주 | 사용자 결정 |
 

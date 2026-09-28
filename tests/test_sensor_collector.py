@@ -62,7 +62,12 @@ class CollectorErrorTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0][0], "sgp30.prime")
 
-    def test_bus1_failure_stops_worker_without_retry(self):
+    def test_bus1_scd30_failure_disables_it_and_keeps_serving_sps30(self):
+        """A context sensor on the shared bus must not take SPS30 down with it.
+
+        SCD30 is not a model input; SPS30 is. Before D-026 an SCD30 NACK
+        returned from the worker, so the particulate channel died with it.
+        """
         errors = []
         worker = collector.Bus1Worker(
             on_error=lambda operation, exc, previous: errors.append(operation))
@@ -74,17 +79,65 @@ class CollectorErrorTests(unittest.TestCase):
                 self.calls += 1
                 raise OSError(errno.EREMOTEIO, "synthetic SCD30 failure")
 
-        broken = BrokenScd()
+        class WorkingSps:
+            polls = 0
+
+            def read_data_ready_flag(self):
+                self.polls += 1
+                if self.polls >= 3:
+                    worker._stop_event.set()
+                return True
+
+            def read_measurement_values_float(self):
+                return [float(i) for i in range(10)]
+
+        broken, sps = BrokenScd(), WorkingSps()
 
         def setup():
             worker._scd = broken
-            worker._sps = None
+            worker._sps = sps
 
         with mock.patch.object(worker, "_setup", side_effect=setup):
             worker.run()
+
+        # polled once, then disabled: never retried
         self.assertEqual(broken.calls, 1)
+        self.assertIsNone(worker._scd)
         self.assertEqual(errors, ["scd30.poll_and_read"])
-        self.assertTrue(worker._stop_event.is_set())
+        # SPS30 kept running after the SCD30 failure
+        self.assertGreaterEqual(sps.polls, 3)
+        self.assertIsNotNone(worker.latest()[0])
+        self.assertIsNotNone(worker.scd30_state.last_error)
+
+    def test_context_sensor_error_is_recorded_without_stopping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = collector.SensorCollector(Path(tmp), 1, enable_sgp30=False)
+            for operation in ("scd30.poll_and_read", "bme680.read", "sgp30.iaq_measure"):
+                instance._record_error(operation, OSError(errno.EREMOTEIO, operation), None)
+            self.assertIsNone(instance.first_error)
+            self.assertFalse(instance.stopped_on_error)
+            self.assertFalse(instance._stop_event.is_set())
+            self.assertEqual(sorted(instance.context_sensor_failures),
+                             ["bme680", "scd30", "sgp30"])
+            # only the first error per sensor is kept
+            instance._record_error("scd30.poll_and_read", RuntimeError("second"), None)
+            self.assertEqual(instance.context_sensor_failures["scd30"]["errno"],
+                             errno.EREMOTEIO)
+            report = instance.timing_report()
+            self.assertIn("scd30", report["context_sensor_failures"])
+            self.assertEqual(report["failure_policy"]["context_sensors"],
+                             ["bme680", "scd30", "sgp30"])
+
+    def test_model_input_and_unknown_components_stay_fatal(self):
+        for operation in ("ads1115.read_ntc", "ads1115.ct_burst", "flir.read",
+                          "sps30.poll_and_read", "bus1.setup", "chunkwriter.write",
+                          "something_new.read"):
+            with tempfile.TemporaryDirectory() as tmp:
+                instance = collector.SensorCollector(Path(tmp), 1, enable_sgp30=False)
+                instance._record_error(operation, OSError(errno.EREMOTEIO, "x"), None)
+                self.assertTrue(instance.stopped_on_error, operation)
+                self.assertEqual(instance.first_error["operation"], operation)
+                self.assertEqual(instance.context_sensor_failures, {})
 
     def test_first_error_is_atomic_and_stops_collection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -167,8 +220,37 @@ class CollectorLifecycleTests(unittest.TestCase):
             instance.thermal = EmptyThermal()
             instance.bus1 = EmptyBus()
             with self.assertRaisesRegex(
-                    TimeoutError, "flir, sps30, scd30"):
+                    TimeoutError, "model-input sensor workers produced no initial "
+                                  "reading: flir, sps30"):
                 instance._await_workers(timeout_s=0)
+
+    def test_silent_scd30_is_recorded_not_a_startup_failure(self):
+        """SCD30 is a context sensor: startup proceeds and records why it is absent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = collector.SensorCollector(Path(tmp), 1, enable_sgp30=False)
+
+            class ReadyThermal:
+                startup_error = None
+
+                def latest(self):
+                    return np.zeros((120, 160), dtype=np.uint16), 0, 0
+
+            class SpsOnlyBus:
+                startup_error = None
+                scd30_state = collector.SensorState("scd30")
+
+                def latest(self):
+                    return collector.Reading({"pm1_0_ug_m3": 1.0}, 0), None
+
+            instance.thermal = ReadyThermal()
+            instance.bus1 = SpsOnlyBus()
+            instance._await_workers(timeout_s=0)
+
+            self.assertFalse(instance.stopped_on_error)
+            self.assertIsNone(instance.first_error)
+            self.assertIn("scd30", instance.context_sensor_failures)
+            self.assertEqual(instance.context_sensor_failures["scd30"]["operation"],
+                             "scd30.await_first_reading")
 
     def test_worker_readiness_wait_honours_stop_request(self):
         with tempfile.TemporaryDirectory() as tmp:

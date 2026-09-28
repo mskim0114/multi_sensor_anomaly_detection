@@ -355,6 +355,14 @@ def quality_summary(report: dict, planned_ticks: int) -> dict:
             "flir": report["flir"]["error_count"],
             "sgp30": report["sgp30"]["error_count"],
         },
+        # Context sensors that failed and were disabled for the rest of the run
+        # (collector policy D-026). Present here so a reader sees which context
+        # channels stop partway through without having to open timing_report.
+        "context_sensor_failures": {
+            name: {"operation": rec["operation"], "message": rec["message"],
+                   "timestamp_utc": rec["timestamp_utc"]}
+            for name, rec in (report.get("context_sensor_failures") or {}).items()
+        },
     }
 
 
@@ -370,9 +378,11 @@ def acceptance(qs: dict, planned_ticks: int) -> dict:
         reasons.append(f"missed master ticks {qs['missed_master_ticks']}")
     if qs["writer_dropped_chunks"] or qs["writer_errors"]:
         reasons.append("writer dropped chunks or write errors")
-    for name in ("ntc", "ct1", "sps30", "scd30", "bme680", "flir"):
+    # Only model-input sensors can fail a trial. A context sensor that dies
+    # partway through is recorded, not fatal (collector policy D-026).
+    for name in ("ntc", "ct1", "sps30", "flir"):
         if qs["sensor_error_counts"][name] and qs["valid_ticks"] == 0:
-            reasons.append(f"required sensor {name} produced no usable data")
+            reasons.append(f"model-input sensor {name} produced no usable data")
     return {"accepted": not reasons, "reasons": reasons}
 
 
@@ -711,6 +721,9 @@ def main() -> int:
     print(f"  thermal ticks    valid {qs['valid_ticks']}  invalid {qs['invalid_ticks']}  {qs['invalid_reason_counts'] or ''}")
     print(f"  30s windows      valid {qs['valid_30s_windows']}  invalid {qs['invalid_30s_windows']}  of {qs['total_30s_windows']}")
     print(f"  sensor errors    {qs['sensor_error_counts']}")
+    if qs["context_sensor_failures"]:
+        for name, rec in qs["context_sensor_failures"].items():
+            print(f"  context sensor   {name} DISABLED after {rec['operation']}: {rec['message']}")
     print(f"  protocol         compliant={experiment['protocol_compliant']}")
     if not acc["accepted"]:
         for r in acc["reasons"]:

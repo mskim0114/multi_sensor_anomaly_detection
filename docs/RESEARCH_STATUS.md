@@ -188,6 +188,7 @@ SE 기여 미확립(EXP-20260921-002). O-111 적용(D-023). 완료(09-18 야간)
 | [연구노트 #22](연구노트/연구노트_22_정상만_적응_weight_궤적.md) | 정상만 적응 시 weight 궤적 · 망각 예산 · Mild 붕괴 |
 | [연구노트 #23](연구노트/연구노트_23_CT_한개_채널예산.md) | CT 1개 현장 스키마 · 채널 예산 · CT 설치 위치 |
 | [연구노트 #24](연구노트/연구노트_24_데이터_규모_곡선.md) | 데이터 규모 곡선 · 양 대 장비 다양성 · 캠페인 최소 규모 |
+| [SYNTHETIC_ANOMALY_DESIGN.md](SYNTHETIC_ANOMALY_DESIGN.md) | 합성 이상 설계안 (Codex 인계용, 미착수) |
 | [LOCAL_REVIEW_20260910.md](LOCAL_REVIEW_20260910.md) | Codex 09-10 경로·캐시·RNG 수정 검증 |
 | [SENSOR_COLLECTION_REVIEW_20260917.md](SENSOR_COLLECTION_REVIEW_20260917.md) | Codex 09-17 수집기 재작성·`collect.sh` 검증 |
 | [JETSON_SENSOR_DASHBOARD.md](JETSON_SENSOR_DASHBOARD.md) | Codex 09-17 로컬 대시보드 |

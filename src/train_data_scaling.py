@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
@@ -56,6 +57,28 @@ logger = logging.getLogger(__name__)
 EXPERIMENT_ID = "EXP-20260928-003"
 RESULTS_BASE = "results/data_scaling"
 FIELD_CHANNELS = "NTC,PM1.0,PM2.5,PM10,CT2"
+
+
+def cap_sessions(index, per_machine: int, draw: int):
+    """Keep at most `per_machine` sessions of each machine, chosen reproducibly.
+
+    Lets a fixed window budget be spread over few machines or many, which is the
+    field campaign's real choice: watch one machine for a long time, or several
+    machines briefly.
+    """
+    from src.data.session_index import DatasetIndex
+    by_dev = {}
+    for sess in index.sessions:
+        by_dev.setdefault(sess.device_id, []).append(sess)
+    kept = []
+    for dev in sorted(by_dev):
+        pool = sorted(by_dev[dev], key=lambda s: s.session_id)
+        # Python's hash() of a string is salted per process, so it cannot seed a
+        # reproducible choice; derive the seed from the bytes instead.
+        rng = random.Random(int(hashlib.sha256(f"{dev}|{draw}".encode()).hexdigest()[:8], 16))
+        rng.shuffle(pool)
+        kept.extend(pool[:per_machine])
+    return DatasetIndex(sessions=sorted(kept, key=lambda s: s.session_id), split=index.split)
 
 
 def draw_machines(all_devices, n: int, draw: int) -> list[str]:
@@ -101,6 +124,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--machines", type=int, required=False, default=4)
     ap.add_argument("--draw", type=int, default=0)
+    ap.add_argument("--max-sessions-per-machine", type=int, default=None,
+                    help="cap sessions per machine so a fixed window budget can be spread "
+                         "across few machines or many")
     ap.add_argument("--channels", default=FIELD_CHANNELS)
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -120,7 +146,9 @@ def main() -> int:
     names = [SENSOR_CHANNELS[i] for i in channels]
     args._nondet = enable_deterministic() if args.deterministic else None
     results_dir = project_path(args.results_dir or
-                               f"{RESULTS_BASE}/n{args.machines:02d}_draw{args.draw}_seed{args.seed}")
+                               f"{RESULTS_BASE}/n{args.machines:02d}"
+        + (f"_s{args.max_sessions_per_machine}" if args.max_sessions_per_machine else "")
+        + f"_draw{args.draw}_seed{args.seed}")
     if os.path.exists(os.path.join(results_dir, "results.json")):
         logger.error(f"{results_dir}/results.json exists; refusing to overwrite")
         return 2
@@ -135,6 +163,8 @@ def main() -> int:
     all_devices = {s.device_id for s in train_index.sessions}
     picked = draw_machines(all_devices, args.machines, args.draw)
     sub_index = subset_index(train_index, lambda d: d in set(picked), f"train_n{args.machines}")
+    if args.max_sessions_per_machine is not None:
+        sub_index = cap_sessions(sub_index, args.max_sessions_per_machine, args.draw)
 
     mk = lambda idx, src, lab: ManufacturingDataset(
         index=idx, source_dir=src, label_dir=lab, config=cfg,
@@ -197,6 +227,7 @@ def main() -> int:
 
     results = {
         "experiment_id": EXPERIMENT_ID, "machines": args.machines, "draw": args.draw,
+        "max_sessions_per_machine": args.max_sessions_per_machine,
         "picked_machines": picked, "channels": names, "channel_indices": channels,
         "counts": {"train_windows": len(train_ds), "train_sessions": len(sub_index.sessions),
                    "train_class_counts": class_counts, "val_windows": len(val_ds)},

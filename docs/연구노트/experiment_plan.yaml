@@ -160,6 +160,34 @@ experiments:
       완료. Mild F1 0.893 -> 0.762(1e-5) / 0.624(1e-4), Moderate·Severe 불변, Severe recall 0.984 불변.
       예산 변수는 상대 변위 (3e-3 이하 안전, 2e-2 에서 0.05~0.09 손실). 손상은 첫 50 step 에 포화 (D-027, N27/N28)
 
+  - experiment_id: EXP-20260928-002
+    hypothesis_id: AIHUB-H1
+    status: completed
+    purpose: 현장 CT 가 한 개일 때의 입력 스키마 비용과 CT 설치 위치 (O-101/B-5). 2026-09-28 서버 완료 (연구노트 #23)
+    seeds: [42, 123]
+    code_commit: 5ef1833
+    environment_profile: SERVER-TRAINING (factory_training venv, --deterministic)
+    result_dirs:
+      - results/channel_subset/8ch_control_seed42
+      - results/channel_subset/5ch_ct2_seed42
+      - results/channel_subset/5ch_ct3_seed42
+      - results/channel_subset/5ch_ct4_seed42
+      - results/channel_subset/5ch_field_seed42
+      - results/channel_subset/4ch_noct_seed42
+      - results/channel_subset/5ch_ct2_s123_seed123
+      - results/channel_subset/5ch_ct1_s123_seed123
+    primary_metric: val_macro_f1
+    comparison: 8채널 기준 0.954888 (기준 실행을 정확히 재현). 집계 compare_channels.txt, 통계 ct_analysis.txt
+    stopping_rule: 전 조건 동일 30 epoch·동일 scheduler·결정론
+    limitations: >-
+      AI Hub 는 테스트베드 로봇이며 현장 전류 계통 배치가 같다는 보장이 없다 (B-5).
+      CT3·CT4 는 seed 1개이고 둘의 차이 0.19 pp 는 seed 편차와 같은 크기다. 장비 단위 불확실성 미반영.
+      5채널 모델을 처음부터 학습했으며 8채널에서의 전이는 시험하지 않았다
+    decision: >-
+      완료. CT2 0.934282 / CT3 0.867177 / CT4 0.865312 / CT1 0.844238 / CT 없음 0.833938.
+      CT2-CT1 = +8.71 pp (2 seed). CT2 하나가 네 개 전부 이득의 83 % 회수, Severe recall 1.000 복구.
+      현장 스키마 5채널 확정 (D-028), B-5 를 하드웨어 차단 항목으로 승격
+
   - experiment_id: EXP-20260907-004
     hypothesis_id: AIHUB-H3
     status: blocked

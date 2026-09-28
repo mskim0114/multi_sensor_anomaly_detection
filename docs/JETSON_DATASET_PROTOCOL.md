@@ -430,6 +430,9 @@ information axis** 를 우선 검토한다.
 | `--save-ct-raw` / `--no-thermal-save` | collector 와 동일 |
 | `--baseline-seconds` / `--anomaly-seconds` / `--recovery-seconds` | override. 사용 시 `protocol_compliant = false` |
 | `--duration` | `normal` 전용 총 길이 override |
+| `--environment` | 수집 장소 자유 서술 (`office_desk_bench`, `robot_cell_a`). 기록만 하고 해석하지 않는다 |
+| `--asserted-state` | 운영자가 **run 전체**에 대해 단언하는 상태. 현재 `normal` 만 허용하며 `--scenario normal` 전용. `--assertion-basis` 필수 |
+| `--assertion-basis` | 그 단언의 근거 (사람이 작성) |
 | `--test-mode` | `dataset/_smoke/` 로 격리 |
 | `--yes` | ENTER 확인 생략 (countdown 은 유지). 비대화형 실행용 |
 | `--self-test` | 하드웨어 없는 결정적 검증 |
@@ -504,6 +507,18 @@ test       dataset/_smoke/<scenario>_<RUN_ID>/  official 디렉터리에 들어�
 official completed trial 의 최소 조건은 expected tick count 충족, missed master tick 0,
 REQUIRED 센서의 fatal absence 없음, writer drop/error 0 이다. **FFC 로 인한 window invalid 는
 trial 자체를 실패로 만들지 않으며** quality summary 에 정확히 기록된다.
+
+### operator_annotation — 사람의 단언은 기록하되 label 이 아니다
+
+`--asserted-state` / `--environment` / `--assertion-basis` 는 `experiment.json` 의
+`operator_annotation` 블록에 근거·작성자·시각과 함께 저장된다. 이것은 **사람이 수집 전에 한 단언**이며
+데이터에서 유도한 값이 아니다. 따라서 다음이 성립한다.
+
+- 러너는 여전히 `state_label` 을 만들지 않는다. `observed_*` 는 후속 annotation 단계의 책임이다(§3)
+- `operator_annotation` 이 있다고 해서 그 trial 이 학습 데이터가 되는 것은 아니다. annotation 단계가
+  받아들일지 판단하고, **환경이 배포 환경과 일치해야** 채택된 label 을 학습에 쓸 수 있다
+  (사무실 bench 데이터는 §15 대로 현장 데이터가 아니다)
+- 이상 시나리오에는 쓸 수 없다. 이상을 유도하면 run 중간에 상태가 바뀌고 그 시점은 운영자가 미리 알 수 없다
 
 ### 학습 label 을 자동 생성하지 않는다
 

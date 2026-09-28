@@ -325,6 +325,36 @@ def print_preflight(pf: dict, profile_name: str) -> None:
 # ---------------------------------------------------------------------------
 # quality summary
 # ---------------------------------------------------------------------------
+# States a person may assert for a whole run. `normal` is the only one that can be
+# asserted without an intervention, which is why an anomaly scenario cannot use this
+# flag: a run that induces a fault changes state partway through, and when that
+# happened is an annotation question, not something the operator knows in advance.
+ASSERTABLE_STATES = ("normal",)
+
+
+def operator_annotation(args) -> dict | None:
+    """What a person asserted about this run, with its provenance.
+
+    Kept separate from `observed_*`, which a later annotation step fills from the
+    data. Nothing here is inferred by this program; if the operator asserts nothing
+    the field is null and the run carries no state claim at all.
+    """
+    if not args.asserted_state and not args.environment:
+        return None
+    return {
+        "asserted_state": args.asserted_state,
+        "environment": args.environment or None,
+        "assertion_basis": args.assertion_basis or None,
+        "asserted_by": "operator",
+        "asserted_at_utc": utc_now(),
+        "scope": "whole run" if args.asserted_state else "not a state assertion",
+        "note": ("operator assertion made before acquisition. Not derived from the "
+                 "recorded data and not a training label. An annotation step decides "
+                 "whether to accept it, and the environment must match the deployment "
+                 "environment before any accepted label is used for training."),
+    }
+
+
 def quality_summary(report: dict, planned_ticks: int) -> dict:
     q = report["quality"]
     total = report["master"]["snapshot_count"]
@@ -490,6 +520,16 @@ def main() -> int:
     ap.add_argument("--dataset-root", default=str(DEFAULT_DATASET_ROOT))
     ap.add_argument("--operator-note", default="")
     ap.add_argument("--equipment-condition", default="")
+    ap.add_argument("--environment", default="",
+                    help="where this run was collected, e.g. office_desk_bench or "
+                         "robot_cell_a. Free text; recorded, never interpreted")
+    ap.add_argument("--asserted-state", choices=ASSERTABLE_STATES, default=None,
+                    help="the state a person asserts held for the WHOLE run. Recorded as "
+                         "an operator assertion with its basis; it is not a training "
+                         "label until an annotation step accepts it")
+    ap.add_argument("--assertion-basis", default="",
+                    help="why the operator can assert that state (required with "
+                         "--asserted-state)")
     ap.add_argument("--save-ct-raw", action="store_true")
     ap.add_argument("--no-thermal-save", action="store_true")
     ap.add_argument("--baseline-seconds", type=int, default=CANONICAL_BASELINE_S)
@@ -515,6 +555,13 @@ def main() -> int:
         validate_severity(args.scenario, args.severity)
     except ValueError as exc:
         ap.error(str(exc))
+    if args.asserted_state and not args.assertion_basis:
+        ap.error("--assertion-basis is required with --asserted-state: record why the "
+                 "operator can make that claim")
+    if args.asserted_state and args.scenario != "normal":
+        ap.error("--asserted-state is only allowed for --scenario normal; an induced "
+                 "anomaly changes state during the run, which is an annotation step's "
+                 "decision, not an operator assertion")
     if args.duration is not None and args.scenario != "normal":
         ap.error("--duration is only allowed for --scenario normal; use "
                  "--baseline-seconds/--anomaly-seconds/--recovery-seconds")
@@ -552,9 +599,11 @@ def main() -> int:
         "observed_recovery_tick": None,
         "operator_note": args.operator_note,
         "equipment_condition": args.equipment_condition,
+        "operator_annotation": operator_annotation(args),
         "note": ("phase is the experiment procedure, not a state label. "
                  "observed_* are filled by a later annotation step. This runner "
-                 "never generates training labels."),
+                 "never generates training labels; operator_annotation records what "
+                 "a person asserted before the run, never anything inferred from data."),
     }
     experiment.update(host_info())
     experiment.update(git_info())
@@ -571,6 +620,11 @@ def main() -> int:
     print(f"  SENSOR PROFILE   {SENSOR_PROFILE_V1}")
     print(f"  OUTPUT DIRECTORY {trial_dir}")
     print(f"  MODE             {'TEST (not official dataset)' if args.test_mode else 'OFFICIAL'}")
+    if experiment["operator_annotation"]:
+        oa = experiment["operator_annotation"]
+        print(f"  OPERATOR CLAIM   state={oa['asserted_state']}  environment={oa['environment']}")
+        print(f"                   basis: {oa['assertion_basis']}")
+        print("                   recorded as an assertion, not a training label")
     print("  NOTE             this program does not create or control the anomaly")
 
     collector = SensorCollector(

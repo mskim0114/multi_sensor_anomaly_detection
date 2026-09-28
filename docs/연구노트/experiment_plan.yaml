@@ -188,6 +188,51 @@ experiments:
       CT2-CT1 = +8.71 pp (2 seed). CT2 하나가 네 개 전부 이득의 83 % 회수, Severe recall 1.000 복구.
       현장 스키마 5채널 확정 (D-028), B-5 를 하드웨어 차단 항목으로 승격
 
+  - experiment_id: EXP-20260928-003
+    hypothesis_id: AIHUB-H1
+    status: completed
+    purpose: 현장 스키마(5채널) 모델의 데이터 규모 곡선과, 같은 예산을 장비 몇 대에 나눌지. 현장 캠페인 규모 산정 (연구노트 #24)
+    seeds: [42]
+    code_commit: b43c413 / 3161c09
+    environment_profile: SERVER-TRAINING (factory_training venv, --deterministic)
+    result_dirs:
+      - results/data_scaling/n01_draw0_seed42
+      - results/data_scaling/n01_draw1_seed42
+      - results/data_scaling/n01_s7_draw0_seed42
+      - results/data_scaling/n01_s7_draw1_seed42
+      - results/data_scaling/n01_s7_draw2_seed42
+      - results/data_scaling/n01_s7_draw3_seed42
+      - results/data_scaling/n02_draw0_seed42
+      - results/data_scaling/n02_draw1_seed42
+      - results/data_scaling/n02_s4_draw0_seed42
+      - results/data_scaling/n02_s4_draw1_seed42
+      - results/data_scaling/n02_s4_draw2_seed42
+      - results/data_scaling/n02_s4_draw3_seed42
+      - results/data_scaling/n04_draw0_seed42
+      - results/data_scaling/n04_draw1_seed42
+      - results/data_scaling/n04_s2_draw0_seed42
+      - results/data_scaling/n04_s2_draw1_seed42
+      - results/data_scaling/n04_s2_draw2_seed42
+      - results/data_scaling/n04_s2_draw3_seed42
+      - results/data_scaling/n08_draw0_seed42
+      - results/data_scaling/n08_s1_draw0_seed42
+      - results/data_scaling/n08_s1_draw1_seed42
+      - results/data_scaling/n08_s1_draw2_seed42
+      - results/data_scaling/n08_s1_draw3_seed42
+      - results/data_scaling/n16_draw0_seed42
+      - results/data_scaling/n24_draw0_seed42
+    primary_metric: val_macro_f1
+    comparison: 32대 전체 학습 0.934282 (EXP-20260928-002 5ch_ct2). 집계 compare_scaling.txt
+    stopping_rule: 전 조건 동일 30 epoch·동일 scheduler·결정론
+    limitations: >-
+      AI Hub 의 장비·센서·고장은 현장의 것이 아니다. 곡선의 형태이지 현장 정확도의 예측이 아니다.
+      평가는 validation 4대이므로 장비 단위 불확실성(N23)이 더해진다. 점당 seed 1개.
+      AI Hub 는 장비당 약 2시간뿐이라 "한 대를 오래" 조건은 만들 수 없었다
+    decision: >-
+      완료. 장비 1대 0.5216 (Severe recall 0.508, 뽑기 폭 0.130) / 2대 0.7785 / 4대 0.8474 (폭 0.010) / 8대 0.8785 /
+      16대 0.9035 / 24대 0.9231. 같은 250창 예산에서 1대 -> 8대 +12.26 pp 인 반면 8대에서 예산 8배는 +20.66 pp 로
+      양이 더 크다. Severe recall 만 장비 수에 단조. 캠페인 최소 규모 확정 (D-030, N31/N32)
+
   - experiment_id: EXP-20260907-004
     hypothesis_id: AIHUB-H3
     status: blocked

@@ -1,6 +1,6 @@
 # RESEARCH STATUS
 
-최종 갱신: 2026-09-28 · 기준 HEAD `b201d17` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
+최종 갱신: 2026-09-28 (오후) · 기준 HEAD `817ccb5` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
 
 > **이 문서는 현재 단계·최우선 작업·blocker만 담는다.** 배포/환경/데이터 획득의 canonical
 > 현황은 [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)에 있고 여기서
@@ -37,6 +37,7 @@
 | **G2h-2** 논문 Table 8·§7.3·H1/H2 교체 (O-111) | **적용** (2026-09-21, D-023) | `paper_draft.md` — `+1.20%`·synergy·PENDING(EXP-003) 0건. [연구노트 #20](연구노트/연구노트_20_결정론_재현_SE추가seed_O111적용.md) §3 |
 | **G2h-3** 논문 장비 단위 불확실성 반영 (O-113) | **적용** (2026-09-28, D-025) | `paper_draft.md` §6.6.1 + Table 12b 신설, 초록·§6.1·§6.6·§7.5·결론·Severe 문단 교체. `100% detection` 0건. [연구노트 #21](연구노트/연구노트_21_EXP006_장비_Kfold.md) §5 |
 | 결정론 재현 (EXP-20260921-001) | **PASS** | `--deterministic` seed 42 × 2 GPU: history 210/210 일치, 최종 가중치 sha256 동일, 경고 0. 연구노트 #20 §1 |
+| 적응 궤적 (EXP-20260928-001) | **완료** (2026-09-28, 3 lr, `817ccb5` clean, 결정론) | 정상만 적응 시 Mild 만 무너지고 Severe recall 0.984 불변. 예산 변수는 상대 변위. [연구노트 #22](연구노트/연구노트_22_정상만_적응_weight_궤적.md) |
 | bench 데이터 (현장 아님) | **진행** (2026-09-18~) | soak #2 는 27분 만에 SCD30 I2C NACK 1회로 FAILED(정책대로, O-112). xcal 3회 관측(보정 불가 조건). [프로토콜 §15](JETSON_DATASET_PROTOCOL.md), 연구노트 #19 §7, #20 §4 |
 | G3 현장 문제 정의 | 미착수 | 로봇 소유기관 확인 필요 |
 | G4~G7 | 미착수 | — |
@@ -131,6 +132,12 @@ SE 기여 미확립(EXP-20260921-002). O-111 적용(D-023). 완료(09-18 야간)
   전부 Moderate 예측. 논문 결론 `:575` 정정안 → 연구노트 #21 §5, CE-048, O-113
 - **N25 24대 학습 모델의 frozen val F1 은 0.9461 ± 0.0032** — 32대 학습(0.9548)보다 0.009 낮음. agv18 이 일관되게 어려움(0.88~0.90). 원인(학습 장비 수 vs
   구성) 미분리 → 연구노트 #21 §2·§4
+- **N27 정상만으로 적응시키면 Normal–Mild 경계만 무너진다** — EXP-20260928-001(fold 0 체크포인트를 held-out 8대의 Normal 창
+  1,157개로 fine-tune, 결정론, `817ccb5`): 대상 도메인 Mild F1 0.893 → 0.762(lr 1e-5) / 0.624(lr 1e-4), Moderate·Severe 는 불변,
+  **Severe recall 은 세 학습률 모두 0.984 로 불변.** 예측 P(Normal) 이 참값 0.495 를 지나쳐 0.610 까지 간다 → 연구노트 #22 §2
+- **N28 적응의 예산 변수는 step·lr 이 아니라 상대 변위다** — 학습률이 100배 달라도 같은 ‖Δθ‖/‖θ‖ 에서 손상이 비슷하다
+  (3e-3 에서 0.0019~0.0022). 3e-3 이하 안전, 1e-2 에서 0.02~0.03, 2e-2 에서 0.05~0.09 손실. 손상은 발산하지 않고
+  lr 1e-4 기준 첫 50 step 에서 포화한다. `fc_thermal` 이 항상 가장 많이 움직인다 → 연구노트 #22 §2~3, D-027
 - **N26 수집 누적량은 학습에 쓸 수 없는 성격이다** — 2026-09-28 기준 Jetson 누적 **7,421 tick (2.06 시간)**: trial runner 12건 4,557 tick
   (development baseline 5×360, bench_thermal_xcal 3×360, bench_soak 1,627, 초기 테스트 50), 연속 수집기 13건 2,864 tick.
   30 tick 비중첩 창 **240창 중 training-valid 197창**(나머지는 FLIR stale 정책). **이상 사건 0건, state label 0건
@@ -162,6 +169,7 @@ SE 기여 미확립(EXP-20260921-002). O-111 적용(D-023). 완료(09-18 야간)
 | [연구노트 #19](연구노트/연구노트_19_EXP003_2x3_ablation_및_재현성.md) | EXP-003 2³ ablation · seed 재현성 · bench 데이터 시작 |
 | [연구노트 #20](연구노트/연구노트_20_결정론_재현_SE추가seed_O111적용.md) | 결정론 bit-level 재현 · SE 6-seed · O-111 적용 · bench_soak #2 실패 |
 | [연구노트 #21](연구노트/연구노트_21_EXP006_장비_Kfold.md) | EXP-006 장비 분리 4-fold · 장비 단위 CI · Severe 100 % 한정 |
+| [연구노트 #22](연구노트/연구노트_22_정상만_적응_weight_궤적.md) | 정상만 적응 시 weight 궤적 · 망각 예산 · Mild 붕괴 |
 | [LOCAL_REVIEW_20260910.md](LOCAL_REVIEW_20260910.md) | Codex 09-10 경로·캐시·RNG 수정 검증 |
 | [SENSOR_COLLECTION_REVIEW_20260917.md](SENSOR_COLLECTION_REVIEW_20260917.md) | Codex 09-17 수집기 재작성·`collect.sh` 검증 |
 | [JETSON_SENSOR_DASHBOARD.md](JETSON_SENSOR_DASHBOARD.md) | Codex 09-17 로컬 대시보드 |

@@ -139,6 +139,27 @@ experiments:
     decision: >-
       통과 조건 실패. ΔF1 mean +0.001470 std 0.002359, 양 5/6, seed 31415 −0.002715. SE 기여 미확립 (N21). 논문 §7.3 반영
 
+  - experiment_id: EXP-20260928-001
+    hypothesis_id: AIHUB-H1
+    status: completed
+    purpose: 정상 데이터만으로 fine-tune 할 때의 weight 궤적·망각·대상 도메인 효과. 사무실 데이터를 쓰기 전에 절차를 측정 (연구노트 #22)
+    seeds: [42]
+    code_commit: 817ccb5
+    environment_profile: SERVER-TRAINING (factory_training venv, --deterministic)
+    result_dirs:
+      - results/adaptation_trajectory/fold0_lr1e-06_seed42
+      - results/adaptation_trajectory/fold0_lr1e-05_seed42
+      - results/adaptation_trajectory/fold0_lr0.0001_seed42
+    primary_metric: val_macro_f1
+    comparison: 출발 체크포인트(fold 0, 망각셋 0.9430 / 대상 0.9475). 집계 compare_adaptation.txt
+    stopping_rule: 고정 400 step, 로그 간격 측정점 17개. scheduler·early stopping 없음
+    limitations: >-
+      장비를 환경의 대역으로 썼다 (사무실 환경과 같다는 주장이 아니다). seed 1개·fold 1개·체크포인트 1개.
+      적응셋 장비가 대상 도메인 평가셋에도 포함되므로 대상 점수는 낙관적. 가중치 없는 CE
+    decision: >-
+      완료. Mild F1 0.893 -> 0.762(1e-5) / 0.624(1e-4), Moderate·Severe 불변, Severe recall 0.984 불변.
+      예산 변수는 상대 변위 (3e-3 이하 안전, 2e-2 에서 0.05~0.09 손실). 손상은 첫 50 step 에 포화 (D-027, N27/N28)
+
   - experiment_id: EXP-20260907-004
     hypothesis_id: AIHUB-H3
     status: blocked

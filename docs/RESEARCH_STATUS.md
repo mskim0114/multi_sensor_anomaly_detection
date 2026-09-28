@@ -131,10 +131,12 @@ SE 기여 미확립(EXP-20260921-002). O-111 적용(D-023). 완료(09-18 야간)
   전부 Moderate 예측. 논문 결론 `:575` 정정안 → 연구노트 #21 §5, CE-048, O-113
 - **N25 24대 학습 모델의 frozen val F1 은 0.9461 ± 0.0032** — 32대 학습(0.9548)보다 0.009 낮음. agv18 이 일관되게 어려움(0.88~0.90). 원인(학습 장비 수 vs
   구성) 미분리 → 연구노트 #21 §2·§4
-- **N26 수집 누적량은 학습에 쓸 수 없는 성격이다** — 2026-09-28 기준 Jetson 누적 약 7,620 tick(≈2.1 시간): trial runner 12건 4,767 tick
-  (baseline 5×360, xcal 3×360, soak 실패 1,627, 초기 테스트), 연속 수집기 13건 2,853 tick. **전부 `normal`·severity 0, 이상 사건 0건,
-  라벨 0건, 물리 구도 2종(센서 보드/온열면), 장비 0대.** 30 tick 비중첩 창으로 환산해도 약 250창 단일 클래스이며, AI Hub 학습셋
-  9,313창/32대와 비교 불가. 학습 가능 조건은 §4 판단 참조 → 이 커밋
+- **N26 수집 누적량은 학습에 쓸 수 없는 성격이다** — 2026-09-28 기준 Jetson 누적 **7,421 tick (2.06 시간)**: trial runner 12건 4,557 tick
+  (development baseline 5×360, bench_thermal_xcal 3×360, bench_soak 1,627, 초기 테스트 50), 연속 수집기 13건 2,864 tick.
+  30 tick 비중첩 창 **240창 중 training-valid 197창**(나머지는 FLIR stale 정책). **이상 사건 0건, state label 0건
+  (`observed_anomaly_onset_tick` 전부 null), 감시 대상 장비 0대, 물리 구도 2종(센서 보드 / 온열면).**
+  `dust` severity 1 로 기록된 1건(20 tick)은 operator note 에 "orchestration timing test only, no dust" 로 명시된 절차 시험이며
+  이상 데이터가 아니다. AI Hub 학습셋 9,313창·32대와 비교 불가 → 이 커밋, 연구노트 #19 §7
 - **N14 `monai_env` 는 수술 영상 프로젝트용 공유 env 다** — 2025-12 생성, 336 패키지(monai·pydicom·SimpleITK·transformers). 기존 논문 실험이 이 위에서 돌았으나 정책상 전용 venv 로 교체(D-019). pin 은 그대로 옮겨 비교 가능성 유지 → 연구노트 #17 §6.3
 
 **지표 표기.** `49/60 = 81.7 %`는 **v1 윈도 유효율**이다. 판단 가용률이나 전 센서 정상 관측

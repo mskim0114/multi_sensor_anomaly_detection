@@ -1,0 +1,268 @@
+# P0 preparation and the P1a runner consume this contract; full protocol freeze is pending.
+experiment_id: EXP-20260928-004
+protocol_id: synthetic-modality-v3-proposed
+status: in_progress
+implementation_status: P1a_30epochs_completed_final_serialization_failed_artifacts_recovered
+review_integration:
+  date: "2026-09-29"
+  source: docs/REVIEW_20260929_EXP004_claude.md
+  status: incorporated_into_design_only
+  items: [gap_sign, statistical_baselines, thermal_AE_cost_gate, calibration_uncertainty, plurality_bound, overlap_not_ESS, thermal_and_late_baselines, thermal_soft_QC_base_policy, postfreeze_strength_diagnostics]
+  prior_exposure:
+    reviewer_reported_sample: 8000_ticks_across_all_32_devices_not_fold_fit_subset
+    statistics_seen: class_means_and_Normal_only_std
+    provenance: local_scripts_and_outputs_read_hashes_match_peer_reported_prefixes_raw_data_not_recomputed
+    evidence:
+      reported_origin_host: keti-Precision-7920-Tower
+      reported_origin_environment: factory_training_venv
+      local_directory: /home/keti/review_runs/20260928_adapt
+      sha256:
+        recheck_strength.py: 0e46aee4d6aecd8396e40c1610f7e2bbfb09fa11f93c7400291187bdf9d4fcdc
+        recheck_strength.txt: a5aedc3cf1647f802a69a30533d1c42ad5a600b366ebba9b86cf1b27746acaad
+        ct_analysis.py: 08a84867d3375fce23d97e0212c483913756199bf5416d138f3dc41ae5dc8d5f
+        ct_analysis.txt: bd69e1495767e64f8a717539c5a662347e8df6e56ac2da9ebfc728a22ddd0e55
+      local_script_and_output_contents_read: true
+      local_hashes_match_review_prefixes: true
+      remote_hashes_independently_verified: false
+      raw_data_recomputed: false
+    strength_grid_changed_after_review: false
+    researcher_blinded_to_real_anomalies: false
+design_reference: docs/연구노트/연구노트_25_합성이상_모달리티_비교설계.md
+baseline_commit: 154a506
+environment_profile: SERVER-TRAINING
+questions: [Q-M, Q-G, Q-C, Q-O]
+data:
+  source: AIHub-71802-verified-server-SSD
+  field_or_bench_training: false
+  window_ticks: 30
+  stride_ticks: 10
+  sampling_hz: 1
+  normal_filter: all_30_tick_labels_equal_Normal
+  primary_evaluation: pure_class_windows
+  secondary_evaluation: all_windows_with_majority_label_and_mixed_flag
+  quality:
+    policy_id: joint_hard_validity_and_thermal_soft_QC_v1
+    hard_invalid: [nonfinite, shape_mismatch, timestamp_violation]
+    hard_invalid_action: exclude_same_base_for_all_modalities_and_record_reason
+    thermal_soft_flags:
+      any_pixel_below_celsius: 0.0
+      any_pixel_outside_legacy_range_celsius: [30.98, 146.10]
+      range_source: src/data/config.py_ThermalStats_historical_not_physical_limits
+    soft_flag_policy: include_and_stratify
+    applied_roles: [fit, dev, calibration, heldout, provider_validation]
+    synthetic_base_rule: hard_valid_and_pure_Normal_including_soft_flagged
+    inherit_preinjection_base_flags: true
+    soft_flags_change_sampling_or_loss_weight: false
+    soft_flags_used_as_model_inputs: false
+    auto_clip_or_repair: false
+    refit_threshold_by_QC_stratum: false
+    reporting_strata: [all_hard_valid, no_thermal_soft_flag, thermal_soft_flagged]
+split:
+  outer_function: src.train_kfold.assign_folds
+  outer_k: 4
+  heldout: fold_f
+  dev_cal_pool: fold_f_plus_1_mod_4
+  dev: sorted_per_equipment_type_pool_indices_0_2
+  calibration: sorted_per_equipment_type_pool_indices_1_3
+  fit: remaining_two_folds
+  device_counts: {fit: 16, dev: 4, calibration: 4, heldout: 8}
+  provider_validation: reporting_only_after_freeze
+  realized_manifest_sha256: null
+inputs:
+  modalities: [S, T, F]
+  primary_channels: [NTC, PM1.0, PM2.5, PM10, CT1]
+  sensitivity_channels: [NTC, PM1.0, PM2.5, PM10, CT2]
+  thermal_shape: [30, 120, 160]
+  thermal_representation: radiometric_temperature
+  normalizer: run_local_fit_pure_Normal_unique_raw_ticks_only
+  modify_existing_constants: false
+models:
+  detectors: [AE, BIN]
+  pretrained_weights: none
+  encoder_hidden: 128
+  bottleneck: 128
+  sensor_lags: [1, 5, 10]
+  temporal_layers: 3
+  thermal_temporal_encoder: LSTM
+  ae_fusion_loss_weights: [0.5, 0.5]
+  late_fusion_control: reuse_S_T_AE_dev_normal_ECDF_equal_weights
+statistical_baselines:
+  ids: [B-NTC, B-MD, B-THERM, B-LATE]
+  stage: P0
+  base_score_parameter_source: fit_pure_Normal_only
+  late_fusion_ECDF_source: dev_pure_Normal_only
+  gradient_training_runs: 0
+  control_instances_all_folds: 16
+  fit_statistic_control_instances: 12
+  dev_ECDF_fusion_instances: 4
+  instance_definition: one_control_configuration_per_fold_not_one_optimizer_run
+  reuse_parameter_sets_across_seeds_and_arms: true
+  ntc_score: max_over_time_abs_run_normalized_NTC
+  md_features_per_sensor: [temporal_mean, temporal_std_ddof0, temporal_max_abs]
+  md_feature_count: 15
+  md_feature_input: run_normalized_primary_5_channels
+  md_feature_standardizer_and_covariance: fit_Normal_equal_equipment_weighted
+  constant_feature_scale_fallback: 1.0
+  md_covariance_rule: (1-lambda)*C+lambda*trace(C)/p*I+epsilon*I
+  md_lambda: 0.1
+  md_epsilon: 0.000001
+  md_score: squared_Mahalanobis_distance
+  thermal_score: max_over_time_and_pixels_abs_run_global_normalized_temperature
+  thermal_normalizer: reuse_same_fit_unique_Normal_raw_tick_global_mean_std_as_T_AE
+  late_components: [B-MD, B-THERM]
+  late_ECDF_weighting: equal_equipment
+  late_ECDF_window_weight: 1_divided_by_eligible_device_count_times_device_window_count
+  late_ECDF_tie: weighted_fraction_of_dev_scores_le_query
+  late_ECDF_out_of_range: bounded_0_to_1_no_extrapolation
+  late_weights: [0.5, 0.5]
+  report_ECDF_saturation_and_degenerate_threshold: true
+  comparisons: [S_vs_B_NTC, S_vs_B_MD, T_vs_B_THERM, F_vs_B_LATE, B_LATE_vs_B_MD, B_LATE_vs_B_THERM]
+  thresholds: [NQ, SYN]
+  heldout_real_evaluation: after_full_protocol_freeze_together_with_neural_models
+  use_heldout_performance_to_gate_budget: false
+training:
+  seeds: [42, 123, 456]
+  deterministic: true
+  epochs: 30
+  optimizer: AdamW
+  lr: 0.001
+  weight_decay: 0.01
+  scheduler: fixed_cosine
+  precision: fp32
+  effective_batch_size: 16
+  binary_normal_synthetic_ratio: [1, 1]
+  binary_extra_class_weights: false
+  ae_checkpoint: minimum_dev_Normal_reconstruction_loss
+  binary_checkpoint: minimum_dev_Normal_synthetic_BCE
+  checkpoint_tie: earlier_epoch
+  use_heldout_for_selection: false
+synthetic:
+  arms: [blind, oracle]
+  blind_fit_source: fit_Normal_only
+  blind_scope: parameter_fitting_without_real_anomaly_statistics_not_researcher_blinding
+  oracle_fit_source: fit_devices_real_anomalies_only
+  families: [sensor-only, thermal-only, coupled]
+  family_weights: [1, 1, 1]
+  strength_std_multipliers: [1, 2, 4]
+  strength_labels: [L, M, H]
+  strength_maps_to_real_severity: false
+  blind_implementation_policy: raw_copy_v1
+  sensor_only_subpatterns: [NTC, PM1.0, PM2.5, PM10, selected_CT, NTC_plus_selected_CT]
+  sensor_only_subpattern_weighting: uniform
+  coupled_sensor_channels: [NTC, selected_CT]
+  coupled_sensor_envelope: shared_linear_ramp
+  thermal_envelope: linear_ramp_0_to_1
+  variance_duration_ticks: 30
+  events_per_base: 9
+  step_ramp_blob_duration_ticks: [5, 10, 20]
+  spike_duration_ticks: [1, 2, 3]
+  drift_duration_ticks: 30
+  drift_definition: linear_ramp_over_full_30_ticks_not_independent_envelope_shape
+  event_id_scope: paired_CT_sensitivity
+  event_instance_identity: hash_event_namespace_and_CT_channel
+  thermal_blob_sigma_pixels: [3, 6, 12]
+  cross_modal_lag_ticks: [0, 2, 5]
+  seed_namespaces: [fit, dev, calibration, heldout-eval]
+  real_raw_mutation: false
+  clipping: none
+threshold:
+  policies: [NQ, SYN]
+  same_checkpoint_invariant: tau_SYN_ge_tau_NQ_and_SYN_positive_set_subset_of_NQ
+  Q_C_interpretation: FPR_reduction_versus_recall_retention_or_loss
+  comparator: score_gt_tau
+  normal_window_fpr_target: 0.01
+  normal_weighting: equal_equipment
+  synthetic_weighting: equal_equipment_family_strength
+  nq_rule: weighted_empirical_0.99_quantile_conservative_ties
+  syn_objective: 0.5*FPR_normal+0.5*(1-TPR_synthetic)
+  syn_constraint: FPR_normal_le_0.01
+  syn_tie: lower_FPR_then_higher_threshold
+  sensitivity_alpha: [0.005, 0.02]
+  real_labels_allowed: false
+  uncertainty:
+    scope: conditional_on_frozen_model_normalizer_and_generator
+    method: stratified_equipment_then_within_run_circular_score_blocks
+    equipment_strata: [AGV, OHT]
+    replicates: 2000
+    random_seed: 20260929
+    percentile_interval: [0.025, 0.975]
+    primary_block_window_starts: 12
+    sensitivity_block_window_starts: [6, 30]
+    short_run_policy: whole_run_block_with_low_resolution_flag
+    preserve_normal_and_all_synthetic_derivatives_as_base_cluster: true
+    refit_threshold_in_each_replicate: true
+    refit_model_normalizer_or_generator: false
+    leave_one_cal_device_out: true
+    calibration_stride_sensitivity_ticks: 30
+    calibration_stride_sensitivity_offsets_ticks: [0, 10, 20]
+    use_ci_or_sensitivity_to_retune_primary_threshold: false
+    infer_effective_sample_size_as_window_count_divided_by_3: false
+    interpretation: descriptive_not_coverage_guarantee_with_4_cal_devices
+evaluation:
+  primary_metric: per_class_real_recall_at_frozen_threshold
+  secondary_metrics: [pure_Normal_FPR, signed_gap, severity_monotonicity, per_equipment_metrics]
+  separate_real_synthetic_tables: true
+  synthetic_eval_base: heldout_pure_Normal_evaluation_only
+  main_aggregation: equipment_macro
+  paired_bootstrap_replicates: 10000
+  bootstrap_unit: equipment_stratified_AGV_OHT_after_seed_average
+  point_adjustment: false
+  event_recall_or_field_false_alarms_per_hour_claim: false
+  postfreeze_strength_diagnostics:
+    phase: reporting_after_full_protocol_and_threshold_freeze
+    source: matched_heldout_real_windows_and_frozen_synthetic_bank
+    grouping: equipment_channel_family_strength_real_class_and_QC_stratum
+    same_summary_for_real_and_synthetic: [window_mean, window_std_ddof0, window_max]
+    thermal_summary_domain: same_full_radiometric_window_and_image_geometry
+    distribution_quantiles: [0.05, 0.5, 0.95]
+    report_injection_deltas_separately_from_absolute_levels: true
+    real_class_minus_Normal_is_observational_not_event_onset_change: true
+    report_zero_or_full_synthetic_TPR_with_denominators: true
+    missing_class_or_Normal: NA_no_imputation
+    permits_blind_generator_threshold_or_model_retuning: false
+budget:
+  P0_training_runs: 0
+  P0_statistical_control_instances: 16
+  P1_training_runs: 6
+  P1a_training_runs: 1
+  P1a_model: T-AE
+  P1a_fold: 0
+  P1a_seed: 42
+  P1a_epochs: 30
+  P1a_included_in_P1: true
+  P1b_remaining_training_runs: 5
+  expansion_gate: P1a_full_thermal_AE_profile_then_all_P1_model_costs_and_feasibility_review
+  expansion_uses_heldout_real_performance: false
+  primary_total_is_conditional_plan: true
+  blind_seed42_all_folds_total_runs: 24
+  blind_three_seeds_total_runs: 72
+  oracle_binary_additional_runs: 36
+  primary_total_training_runs: 108
+  primary_nominal_evaluation_cells: 288
+  ct2_sensitivity_additional_runs: 72
+  estimated_wall_clock_hours: null
+  P1a_observed:
+    original_run_status: FAILED_FINAL_SERIALIZATION_NameError_checkpoint
+    recovery_gate: PASS
+    epochs_completed: 30
+    optimizer_steps: 3930
+    epoch_wall_seconds_sum: 962.9462115780916
+    launcher_wall_until_failure_seconds: 1084.8106202069903
+    peak_gpu_allocated_bytes: 768844800
+    original_train_loop_wall_seconds: null
+    original_cache_stage_wall_seconds: null
+    training_rerun: false
+    heldout_scored: false
+    evidence: /home/keti/review_runs/exp004_p1a_training_20260929T061548Z_recovery/recovered_pilot.json
+  required_cost_measurements: [epoch_wall_seconds, total_wall_seconds, peak_GPU_memory_bytes, encoder_decoder_parameters, thermal_output_elements_per_window, IO_seconds, threshold_bootstrap_seconds, effective_batch_size, GPU_concurrency]
+  thermal_output_elements_per_window: 576000
+acceptance:
+  severe_recall_reference: 0.9
+  severe_recall_reference_is_field_acceptance: false
+  allowed_positive_gap: null
+  allowed_blind_oracle_difference: null
+  status: measurement_protocol_not_deployment_gate
+artifacts:
+  output_root: results/synthetic_anomaly/EXP-20260928-004
+  statistical_baseline_checkpoint_policy: not_applicable_store_fitted_parameters_and_hash
+  required: [split_manifest, normalizer, generator_manifest, provenance, initial_state_sha256, checkpoint, freeze_manifest, real_metrics, synthetic_metrics, gap_metrics, statistical_baseline_parameters, calibration_accounting, threshold_uncertainty, pilot_cost_profile, base_QC_accounting, postfreeze_strength_diagnostics]

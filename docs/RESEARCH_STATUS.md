@@ -1,6 +1,6 @@
 # RESEARCH STATUS
 
-최종 갱신: 2026-09-28 (밤) · 기준 HEAD `3161c09` + 이번 커밋 · 브랜치 `feature/jetson-sensor-integration`
+최종 갱신: 2026-09-29 (EXP-004 검토 반영) · 기준 HEAD `154a506` + 미커밋 비교 설계 · 브랜치 `feature/jetson-sensor-integration`
 
 > **이 문서는 현재 단계·최우선 작업·blocker만 담는다.** 배포/환경/데이터 획득의 canonical
 > 현황은 [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)에 있고 여기서
@@ -40,6 +40,7 @@
 | 데이터 규모 곡선 (EXP-20260928-003) | **완료** (2026-09-28, 25 run, 결정론) | 장비 1대 F1 0.52·Severe 0.51, 4대에서 뽑기 운 소멸, 32대 0.934. 양이 다양성보다 크다. [연구노트 #24](연구노트/연구노트_24_데이터_규모_곡선.md) |
 | 채널 예산 (EXP-20260928-002) | **완료** (2026-09-28, 8 run, `5ef1833` clean, 결정론) | 현장 CT 1개 확정. CT2~4 복원 불가, 5채널 비용은 CT 위치에 따라 −2.1~−12.1 pp. [연구노트 #23](연구노트/연구노트_23_CT_한개_채널예산.md) |
 | 적응 궤적 (EXP-20260928-001) | **완료** (2026-09-28, 3 lr, `817ccb5` clean, 결정론) | 정상만 적응 시 Mild 만 무너지고 Severe recall 0.984 불변. 예산 변수는 상대 변위. [연구노트 #22](연구노트/연구노트_22_정상만_적응_weight_궤적.md) |
+| 합성 이상·모달리티 비교 (EXP-20260928-004) | **P1a 30 epoch 학습 완료 / 저장 오류 산출물 복구 PASS** | T-AE fold0/seed42 정상 fit/dev 2,613창, 3,930 step. epoch 합 16.05분·launcher 18.08분·peak 733.23 MiB. 최종 JSON NameError는 실패로 보존, 재학습 없이 checkpoint/원본-cache 전수 대조 PASS. 수정 실행기 54개 서버 테스트 및 실제 CLI 저장 경로 PASS. 세부 준비시간 누락 명시, held-out 평가 미실행. 다음은 P1b 공통 raw 캐시 구현·검토. [연구노트 #25 §13.9](연구노트/연구노트_25_합성이상_모달리티_비교설계.md), [계획 manifest](../configs/experiments/synthetic_modality_plan.yaml) |
 | bench 데이터 (현장 아님) | **진행** (2026-09-18~) | soak #2 는 27분 만에 SCD30 I2C NACK 1회로 FAILED(정책대로, O-112). xcal 3회 관측(보정 불가 조건). [프로토콜 §15](JETSON_DATASET_PROTOCOL.md), 연구노트 #19 §7, #20 §4 |
 | G3 현장 문제 정의 | 미착수 | 로봇 소유기관 확인 필요 |
 | G4~G7 | 미착수 | — |

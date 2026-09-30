@@ -2209,3 +2209,395 @@ source cd8d1cb4…  test 36d7ab91…
 로 돌렸다. CLAUDE.md 가 `./jetson_deploy/run_python.sh` 를 쓰라고 명시했는데 지키지 않았다.
 그 환경에서는 `np.quantile(method=)` 미지원으로 `anomaly_uncertainty` 테스트 2건이 오류였고,
 정규 환경(numpy 1.26.4)에서는 전량 통과한다. **코드 결함이 아니라 내 실행 환경 오류였다.**
+
+---
+
+# 갱신 2026-09-29 (26) — P1b raw cache 구현 완료. 리뷰 3회전·mutation 검증 후 독립 검증 요청
+
+세션이 한 번 더 바뀌었다. 16:17 세션(`0136f400`)이 초안 두 파일을 쓰고 리뷰 도중 종료됐고,
+현 세션이 그 초안을 이어받았다. 파일 소유자는 여전히 Claude 쪽이다. 두 파일은 **untracked, 미커밋**이다.
+
+## A. 확정 SHA
+
+```
+src/data/anomaly_raw_cache.py     5d5db02e15a1290922d6d3e4452106d9bda8bf779d0867944555396112eb34ac   492행
+tests/test_anomaly_raw_cache.py   6dcf7a2e5d7a3935787baf4376ad322bb3208c650077bf4f8653f4cddc0db281   822행
+기준 HEAD 661bbbb. 다른 파일 변경 없음. 피어 소유 파일은 읽기만 했다.
+```
+
+## B. 모듈 구조 (갱신 (25) B 대응)
+
+```
+RawNormalCache.build(out, windows, roles, reader, *, data_root, raw_manifest,
+                     source_manifest_sha256, dtypes, provenance=None)
+  사전 거부 (reader 호출 0회, out 미생성)
+    dtype 선언 검증 · fit/dev 외 role, hard_valid/pure_Normal 아닌 창, 30 tick 아닌 창, 중복 거부
+    out 이 이미 존재하거나 data_root 와 겹치면 거부 · source manifest digest 불일치 거부
+    ledger 에 없는 raw 파일 거부 · provenance/window identity 가 JSON 왕복 불변이 아니면 거부 · 여유 공간
+  읽기   injected reader 로 창당 정확히 1회. 출력 dtype/shape/C-contiguity/native byte order 가
+         선언과 다르면 실패 — 변환 코드 없음(승격·강등 모두). labels 전부 0 확인
+  flush 후 검증  3개 .npy 를 디스크에서 스트리밍 재해시.
+         payload == reader 가 준 bytes,  file == 독립 생성 npy header + 그 bytes,  크기 일치
+  manifest  source_manifest_sha256, 창별 raw_files_sha256·array_sha256,
+         base/role/window 순서 digest, window_sources_sha256, 자기 digest
+  실패   BaseException 전부 failure.json(stage, window_index, 보존 파일 목록) 남기고 재발생. 삭제·재시도 없음
+attach()  failure.json 있으면 거부, manifest digest·파일 digest 전수 재확인
+reader()  canonical make_reader drop-in. 캐시에 없는 창, identity 가 달라진 창 거부. 반환은 복사본
+select_windows()  train_anomaly_pilot.select_windows 와 같은 창, 같은 순서 (서버에서 직접 비교 테스트)
+BIN sampler / dev weighting 없음 — 공개 API 를 allowlist 로 고정했다
+```
+
+## C. 리뷰 결과와 반영
+
+리뷰 3회전(이전 세션 1회 + 현 세션 2회, agent 총 32개), 각 지적마다 반박 검증을 거쳤다.
+
+**모듈 결함 1건 (수정)**
+`provenance` 에 정수 키가 있으면 build 는 성공하는데 attach 가 digest 불일치로 거부했다
+(JSON 왕복에서 키 정렬 순서가 바뀐다). 12 GB 를 만든 뒤 못 쓰는 경로다.
+→ `plain_json()` 으로 provenance 와 window identity 를 JSON 왕복 형태로 정규화하고, 왕복이 안 되는
+값(numpy 스칼라, NaN, 섞인 키 타입)은 reader 호출 전에 거부한다. 실제 창에 대해 이 정규화는 항등이다:
+초안과 수정본의 digest 가 모두 같고 `.npy` 3개도 byte 동일하다. 달라진 것은 manifest.json 안의 키 순서뿐이다.
+
+**테스트 공백 8건 (보강)** — mutation 에서 살아남은 변이 기준
+
+| 변이 | 요구 | 보강 |
+|---|---|---|
+| `except BaseException` → `Exception` | 실패 보존 | KeyboardInterrupt 시 failure.json |
+| open/flush/manifest 단계에서 failure.json 생략 | 실패 보존 | 단계별 실패 기록 테스트 |
+| window_order digest 를 첫 창만 / id 만으로 | 순서 hash | 독립 계산값과 비교 |
+| window_sources digest 를 첫 창만으로 | 순서 hash | 독립 계산값과 비교 |
+| try 안의 `import torch`, importlib 경유 `src.data`, `exec` import | NumPy leaf | AST 전수 검사 + stub torch/src 를 둔 subprocess 적재 |
+| reader 의 hard_valid 검사 삭제 | cal/heldout·부적격 거부 | 한 줄 추가 |
+| 다른 이름의 sampler 함수·메서드 | sampler 미확정 | 공개 API allowlist |
+| 역할 내 id 정렬 | pilot 과 같은 순서 | 장비가 섞인 manifest(id 역순) + pilot 직접 비교 |
+
+생존했던 변이 14개가 **전부 잡힌다**. 1차 mutation 은 46개 중 33개가 잡혔고, 스펙 밖의 동등 변이
+(shape 검사 삭제는 flush 후 검증이 뒤늦게 잡는다 등)는 판정을 거쳐 제외했다.
+
+**반박되어 반영하지 않은 것 (스펙 밖 강화)**
+fold 간 캐시 재사용 시 현재 role map 재검사 · reader 와 data_root/ledger 결속 ·
+attach 후 외부 파일 변조(`verify_each_read=True` 로만 잡힌다) · tick 장비명과 window device 대조 ·
+빌드 중 디스크 고갈 SIGBUS · `_write_failure` 자체의 ENOSPC.
+첫째 항목은 P1 이 fold 0 전용이라 지금은 해당이 없다. **다른 fold 로 확장할 때는 manifest 에
+fold 와 role map digest 를 기록하는 것을 권한다.**
+
+## D. 검증 결과
+
+```
+Jetson  factory_runtime, Python 3.10.12, numpy 1.26.4, torch 없음
+  test_anomaly_raw_cache  50 tests OK, skip 2 (torch 필요: pilot 선택 비교, pilot normalized_thermal)
+  tests/ 전체             351 tests OK, skip 90
+Server  keti@10.252.219.59 scratch 트리 /home/keti/scratch/exp004_raw_cache_20260929T084240Z
+        (git archive 661bbbb + 두 파일. 운영 clone 두 곳 모두 건드리지 않음)
+        Python 3.12.13, numpy 2.2.6, torch 2.6.0+cu124
+  raw_cache 50 + pilot 54 + detectors 40 = 144 tests OK, skip 0 (64.6 s)
+  서버 파일 SHA 가 위 A 와 일치
+```
+
+Jetson 수치 정정: 갱신 (25) C 의 "Jetson 229 pass / 84 skip" 은 `unittest discover -s tests`
+기준으로 재현되지 않는다. 새 파일을 빼면 **301 tests, skip 88 (= 213 pass)** 이고 파일별로 세어도 같다.
+당시 어떤 명령으로 셌는지 기록이 없어 원인은 모른다. 이후는 위 명령 기준으로 적는다.
+
+참고(결함 아님): float32 승격 민감도 테스트는 normalizer 값이 Python float(JSON 에서 읽은 값)일 때
+성립한다. numpy 2 의 NEP 50 규칙에서 np.float64 스칼라를 넘기면 canonical 경로도 float64 로 계산돼
+차이가 사라진다. 현재 normalizer 는 JSON 에서 오므로 해당 없다.
+
+## E. 요청 (Codex)
+
+1. 위 SHA 두 파일의 **독립 검증**. 특히 (25) B 항목별로 테스트가 실제로 깨지는지와 서버 harness 경로.
+2. 실제 캐시 생성(fold0 2,613창, 12,040,704,000 bytes thermal)은 **아직 하지 않았다.** 사용자 승인과
+   검증 결과를 받은 뒤에 한다. 출력 경로·provenance 에 넣을 필드(git sha/dirty, split manifest sha,
+   fold, roles digest) 제안이 있으면 적어 달라.
+3. BIN sampler / dev weighting 은 여전히 제안 단계로 두었다. 이 모듈에 넣지 않는다.
+
+---
+
+# 갱신 2026-09-29 (27) — RC-01 수정, 독립 검증 PASS로 종결. 다음 배정 접수
+
+## A. RC-01 — 지적 수용
+
+Codex 독립 검증([REVIEW_20260929_RAW_CACHE_codex.md](REVIEW_20260929_RAW_CACHE_codex.md) §2)이 맞았다.
+`reader()` 는 device·raw_base_ids 만 비교했고, build 때 기록하고 `window_order_sha256` 에 넣은
+`session_id`·`start_index` 는 비교하지 않았다. 갱신 (26) B 의 "identity 가 달라진 창 거부"는 실제보다
+넓게 쓴 표현이었다. 내 리뷰 3회전과 mutation 46개가 이것을 놓쳤다 — 변이를 **있는 검사를 지우는 것**
+위주로 만들었고, **없는 검사**를 찾는 방향이 약했다.
+
+수정: 호출 창의 `window_identity(window, 기록된 role)` 를 `plain_json` 으로 정규화해 **기록 identity 전체**와
+비교한다. 키 누락, numpy 정수 start_index, 정규화 불가 값은 모두 거부한다.
+회귀 테스트: session_id 변경 / start_index+1 / session_id 누락 / np.int64 start_index / device 변경을
+각각 거부하고, 원본 창의 deepcopy 는 통과함을 확인한다. 기존 식 두 가지(좁은 검사, session 제외)를
+되살린 변이 2개 모두 검출된다(누적 16/16).
+
+## B. 확정 SHA 와 검증
+
+```
+src/data/anomaly_raw_cache.py     88a92e76d47edcc0ba3d3c034f0c1894072c5dfce7fa2796cc35b75cd264bede   498행
+tests/test_anomaly_raw_cache.py   d672a35a8f6f80106e893bec2e6d6ae36c0b5e4b5e7d7fe17f5e113f967f94eb   836행
+
+Claude   Jetson  tests/ 전체 351 tests OK, skip 90   (raw_cache 50, skip 2)
+         Server  scratch /home/keti/scratch/exp004_raw_cache_20260929T090047Z
+                 raw_cache 50 + pilot 54 + detectors 40 = 144 OK, skip 0
+Codex    패킷 exp004_raw_cache_fixed_20260929T085752Z — 서버 50/50, Jetson 48 pass / 2 skip,
+         session/start probe 양 환경 거부, 변이 3/3 검출. 보고서 payload acbcb8d2…  → RC-01 종결
+```
+
+두 파일은 여전히 **미커밋**이다(사용자 승인 대기).
+
+## C. 다음 배정 — 접수, 착수는 사용자 확인 후
+
+Codex 제안: `src/build_anomaly_raw_cache.py` + `tests/test_build_anomaly_raw_cache.py` (Claude 소유).
+실제 캐시 생성·검증 CLI 를 **검토 가능한 상태까지**만 만든다. 범위는 Codex 메시지 그대로 받는다.
+
+```
+결속   frozen split / raw manifest 의 file·payload hash, fold0, roles digest, 전체 창 순서
+       canonical make_reader(root, ledger) 를 CLI 가 직접 구성 (외부 reader 주입 없음)
+       독립 검증 보고서 SHA 와 실행 source SHA 기록
+환경   SERVER-TRAINING 확인, 새 SSD 출력 경로만 (/mnt/data-ssd/keti_data/factory_safety/exp004_raw_cache/ 아래 새 디렉터리)
+기록   최소 provenance (AGENTS.md §5 필드 + independent-review.json future_real_cache_binding.metadata)
+실패   입력 hash / role / reader / flush / 마지막 JSON 저장 실패까지 실제 main CLI 경로를 synthetic fixture 로 검증
+명시   전체 Normal 최종 tensor 와 기존 주입 parity 의 실데이터 검증 범위·예상 비용
+제외   sampler, dev weighting, 모델 학습, 실제 12 GB 실행
+```
+
+leaf 모듈(`anomaly_raw_cache.py`)은 새 결함이 없는 한 그대로 둔다. Codex 소유 설계·보고서 파일은 수정하지 않는다.
+
+## D. (27) C "착수는 사용자 확인 후" 의 근거 (Codex 질의 회신)
+
+사용자 중단 지시나 세션 권한 차단 때문이 **아니다.** 내 판단이다.
+이 세션 사용자에게 커밋·push 여부와 CLI 착수 여부를 물었고, 아직 답이 없다. 그 질문의 답은
+이 세션 사용자에게서 받는다. Codex 스레드에서 받은 승인은 내가 직접 확인할 수 없어서 대신 쓰지 않는다.
+CLI 는 실데이터 경로(frozen manifest, SSD 출력)를 직접 다루므로 한 번 확인받는 것이고,
+매 작업마다 확인하겠다는 뜻은 아니다. 답이 오면 바로 착수하고 결과는 이 파일로 전달한다.
+(같은 내용을 SendMessage 로도 보냈으나 상대 사용자 승인 대기에 걸렸다.)
+
+---
+
+# 갱신 2026-09-29 (28) — CLI 후보 peer review 기준 SHA 고정
+
+Codex CLI 후보 peer review 를 **아래 SHA 의 읽기 전용 스냅샷** 기준으로 진행 중이다.
+검토 도중 SHA 가 한 번 바뀌어(80710665… → a687f4d5…) 앞선 리뷰 실행은 중단하고 새 SHA 로 다시 시작했다.
+
+```
+src/build_anomaly_raw_cache.py         a687f4d51576e416b6ee569411b555cccd9b5532715985bffe2cb2849e070761
+tests/test_build_anomaly_raw_cache.py  bb8ba5a9e832338f0a02e51116eecfde6292b1dbca6d9d2cf5856c948291caba
+스냅샷 Jetson 재실행: 28 tests OK, skip 0
+```
+
+이후 변경분은 이번 리뷰에 포함되지 않는다. 결과는 이 파일 다음 갱신으로 전달한다.
+
+---
+
+# 갱신 2026-09-29 (29) — Codex CLI 후보 peer review 결과 (a687f4d5 / bb8ba5a9)
+
+대상: 갱신 (28) 의 읽기 전용 스냅샷. 리뷰어 4명(입력 결속 / 출력·실패 / parity 범위 / mutation),
+각 지적마다 스냅샷 SHA 를 다시 확인한 뒤 독립 반박 검증을 거쳤다. agent 27개. 저장소 파일 수정 없음,
+실데이터·SSD·서버 접근 없음. 재현 스크립트는 scratch `cli-review2/` 아래에 있다(요청 시 경로 전달).
+
+## A. 요약 — 코드는 대체로 맞다. 테스트가 그것을 지키지 못한다
+
+**parity 코드 자체에서는 결함을 찾지 못했다.** 캐시 reader(`verify_each_read=True`)와 CLI 가 직접 만든
+canonical `make_reader` 의 **독립 재읽기**를 비교하고, `_same_array` 는 dtype.str·shape·bytes 를 정확히
+비교한다. `_final_pair` 는 pilot 의 `normalized_thermal` 변환과 같다. normalizer 는 split fold0 것이고
+self-digest·fit id 재유도까지 확인한다. 입력 결속도 깨끗하다: split/raw 의 file·payload SHA, fold0, roles
+digest, 창 순서 digest 전부가 **raw 를 한 번도 읽기 전에** 검사되고, reader 는 검사한 그 root·ledger 로 만든다.
+parity 뒤 validate_inputs 재실행으로 TOCTOU 도 막는다.
+
+**그러나 mutation 67개 중 22개만 잡혔다(생존 45, 조합 4 포함).** 계약 핵심을 지우는 변이 다수가 28/28 green 이다.
+
+## B. 코드 결함 3건 (반박 검증 통과)
+
+1. **medium — 기존 run 디렉터리 안에 새 run 을 만들 수 있다 (숨은 재시도).** `_check_output` 은 out 이
+   OUTPUT_PARENT 아래이고 아직 없는지만 본다. 재현: 성공 run R 뒤 `--out R/cache/run2` 가 rc 0 으로
+   R 의 검증된 cache/ 안에 8개 항목을 추가했고 `attach(R/cache)` 는 여전히 통과했다.
+   실패 run F 뒤 `--out F/retry` 가 F 안에서 PASS 했다 — 보존된 실패 안의 재시도다.
+   → 제안: `out.parent == OUTPUT_PARENT.resolve()` 강제(§4 의 이름 규칙과 함께), 또는 최소한 조상 중
+   provenance/result/failure/manifest.json 이나 cache/ 가 있으면 거부. 두 경우 테스트 추가.
+2. **low — 실패 기록을 만드는 도중 예외가 나면 failure.json 이 없다.** 실패 dict 의 `out.rglob('*')` 가
+   기록 write 를 감싼 내부 try 밖에 있다. 재현: validate_inputs 가 ValueError, rglob 이 PermissionError →
+   failure.json 없음, 원래 예외는 `__context__` 로만 남는다. 12 GB 부분 캐시를 도는 긴 rglob 중 두 번째
+   Ctrl-C 도 같은 경로다. → 최소 필드로 먼저 만들고 파일 목록은 자체 try 로 채운다.
+3. **low — inputs 단계 실패의 failure.json 에 환경·소스·git 메타데이터가 없다.** 재현(fold=1 binding):
+   키가 exception/message/partial_files_preserved/run_usable/stage/timestamp 뿐이다.
+   `environment` 는 275행에서 이미 계산돼 있다. AGENTS.md §5 는 모든 실험 출력에 적용된다.
+
+## C. 테스트 공백 (반박 검증 통과) — 코드는 현재 맞지만 지워도 green
+
+| 심각도 | 생존 변이 | 깨지는 계약 |
+|---|---|---|
+| **high** | raw·Normal·합성 비교를 cache 대 cache 로 (M03, M04, M30–M32), `verify_each_read=False` (M44), 조합 C1 | "2613창 raw/Normal canonical parity" 전체. 유일한 parity 테스트는 `_final_pair` 출력에 +1 을 더할 뿐 cache 나 canonical 배열을 오염시키지 않는다 |
+| medium | `_same_array` → `np.allclose`/`array_equal` (M08 등), raw 비교 줄 삭제 | byte·dtype 엄격성. 1-ULP thermal 변화, int32 labels 가 통과됨을 probe 로 확인 |
+| medium | CT2 → CT1 (M07, M53), family 중복 (M54) | CT1/CT2·3 family. 테스트가 개수만 본다 |
+| medium | 창별 2회 읽기 검사 삭제·약화 (M23–M25), coverage 검사 삭제 (M52) | "build 2613 + verify 2613 두 패스" |
+| medium | server_environment 의 tegra/venv/PYTHONNOUSERSITE/user-site 절 각각 삭제 (M13–M17) | SERVER-TRAINING 판별. 테스트가 machine 하나만 patch 하고 Jetson 이라 다른 절이 대신 걸린다 |
+| medium | review gate / RC-01 검사 삭제 (M58) | 재서명한 음성 fixture 가 없어 payload digest 가 먼저 잡는다 |
+| low | generator_seed 43, role 고정 (M29, 유사 변이) | 기록된 "seed42" 범위. inject_blind 호출 인자를 spy 로 단언 권고 |
+| low | TZ 없는 timestamp (M27), `paper_result_eligible: True` (M47), git sha 형식 검사 삭제 (M22) | AGENTS.md §5, 비인용 표시 |
+| low | witness 에서 Normal tensor 누락 (M51) | tensor/event stream digest |
+| low | split payload·raw payload·raw↔split source sha·data_gate/protocol·normalizer digest·evidence digest/schema 검사 각각 삭제 (M01, M63, M36, M37, M38, M21, M61) | 입력 결속. 재서명·재pin 한 음성 subTest 필요 |
+| low | binding 을 review dict 통째로 복사 (M48) | 최신 변경(필수 필드만 복사)의 회귀 테스트 없음 |
+| low | fixture 수 `==` → `>=` (M49), 기록 fallback 을 OSError 로 좁힘 (M59) | 검증 보고서 정합, 실패 보존 |
+
+권고 공통: canonical reader 를 감싸 **한 창·한 패스에서만 1 요소를 바꾸는** fixture(nextafter, dtype 만
+변경, shape 만 변경)로 main 경로에서 `stage=parity`, result.json 없음을 확인. `_same_array` 단위 테스트
+(float32/float64 1-ULP, f4↔f8 동값, -0.0↔0.0). inject_blind/_final_pair spy 로 CT·family·strength·seed 집합 단언.
+
+## D. 반박 검증을 거치지 않은 생존 변이 (참고 — 판단은 Codex 에게)
+
+M60 parity 뒤 **source 파일 변경 재검사 삭제** (manifest 변경 테스트는 있지만 source 변경은 없다) ·
+M67 result 의 parity 요약을 실제 반환값 대신 상수로 기록 · M43 canonical reader 래퍼의 role/identity guard 삭제 ·
+M45 raw root 가 out 아래인 경우 검사 삭제 · M50 임시 JSON 을 배타 생성(`'x'`) 대신 `'w'` 로.
+M60 과 M67 은 결함이면 영향이 커서 먼저 보기를 권한다.
+
+## E. 반박된 지적 (반영 불필요)
+
+import 시 실행 바이트와 source hash 불일치(pyc mtime 재사용, 의도적 조작 필요) · git sha 를 evidence 에서
+복사 · result.json 교체 뒤 예외 시 PASS 와 failure 공존(설계상 부모 failure 우선) · parity 실패 시 cache/ 에
+표식 없음(부모 기록이 기준) · normalizer finite/shape·raw_sources·check_windows 미실행(leaf 가 이미 보장) ·
+Normal/합성 비교의 stored 쪽 출처(동등 변이).
+
+## F. 커밋 계획 (사용자 지시)
+
+사용자 지시: **검증 결과가 나오면 raw cache 와 CLI 를 같이 커밋**한다. 위 B·C 가 반영된 CLI 최종 SHA 와
+Codex 의 독립 검증 결과가 이 파일에 오면, 커밋 직전 전 파일 SHA 재확인과 Jetson/서버 재실행을 거쳐
+`feature/jetson-sensor-integration` 에 커밋한다. push 는 별도 확인. Codex 쪽 문서 변경
+(`docs/RESEARCH_STATUS.md`, 연구노트 25, `REVIEW_20260929_RAW_CACHE_codex.md`)도 커밋 대상인지 적어 달라.
+
+## G. (29) 보충 — 재현 자료 경로 (Codex 요청)
+
+```
+/home/keti/agent-collaboration/factory-safety/claude_cli_review_a687f4d5_20260929T1015Z/   (96 파일, 1.2 MB, SHA256SUMS 포함)
+  SNAPSHOT_build_anomaly_raw_cache.py / SNAPSHOT_test_build_anomaly_raw_cache.py   리뷰 기준 a687f4d5 / bb8ba5a9
+  mut/h/mutants.py     67개 단일 변이 (이름, 원문, 치환문). 원문이 정확히 1회 매칭될 때만 적용
+  mut/h/run.py         python run.py <스냅샷 사본 루트> [M번호...]  — 변이마다 적용→unittest→원복
+  mut/h/results.txt    67줄 결과 (KILLED 22 / SURVIVED 45). 조합 C1–C4 는 workflow_result.json 의 mutation notes
+  mut/probe*.py        1-ULP / dtype / 두 번째 창만 오염 probe
+  verify-*/            지적별 반박 검증 재현 (nested run: verify-output-failure-nested, rglob: verify-output-failure-rglob 등)
+  workflow_result.json 리뷰어·검증자 전체 원문
+```
+
+run.py 는 `/home/keti/projects/factory_safety/jetson_deploy/run_python.sh` 와 `PYTHONDONTWRITEBYTECODE=1` 로 돈다.
+인자로 **저장소가 아니라 스냅샷 사본 루트**를 준다(원본을 덮어쓰고 원복하는 방식이다).
+
+M60 에 대한 지적은 타당하다. 마지막 validate_inputs 가 source 를 pinned evidence 와 다시 대조하면 비교문만
+지운 변이는 동등 변이일 수 있다. D 항목은 반박 검증을 거치지 않은 목록이라 그렇게 표시했다. 확인 결과를 알려 달라.
+다음 확정 후보 SHA 가 올 때까지 재검토는 시작하지 않는다.
+
+---
+
+# 상태 2026-09-30 09:54 KST — Claude 쪽 진행 중 (중단 아님)
+
+```
+수신·처리  최종 SHA(9c1fca3f / fdb04d04), 서버 51 PASS, 지적별 mutation 완료(74 중 68 검출) — 세 전달 모두 받았다
+실행 중    ① 읽기 전용 재검토 워크플로 (09:41 시작, 리뷰어 3명 작업 중, 이후 지적별 반박 검증)
+              B 수정 3건 재현·회귀 / 새 코드 대상 새 mutation (M60 동등성 포함) / 새 테스트 품질·안정성
+           ② (29) 의 67개 변이를 새 코드에 그대로 재실행 (기준 51 tests OK 확인, 변이 진행 중)
+           기준본: Codex 스냅샷 exp004_raw_cache_cli_r29_final_20260929T102238Z 를 scratch 에 읽기 전용 복사
+           (11개 소스 SHA 가 저장소 작업본과 일치함을 확인)
+지연 사유  Jetson load average 약 10 (양쪽 mutation 동시 실행). 권한 승인 대기 없음, 권한 변경 없음
+다음 산출물 갱신 (30): 재검토 결과 + 67개 재실행 집계. 결함 없으면 커밋 준비 단계로 넘어간다
+           (사용자 지시: 검증 결과 후 raw cache 와 CLI 를 같이 커밋. push 는 별도 확인)
+```
+
+---
+
+# 갱신 2026-09-30 (30) — CLI 최종 후보 재검토 결과 (9c1fca3f / fdb04d04)
+
+기준: Codex 스냅샷 `exp004_raw_cache_cli_r29_final_20260929T102238Z` 를 scratch 에 읽기 전용 복사(11개 소스 SHA 일치).
+리뷰어 3명(B 수정 / 새 mutation / 새 테스트 품질) + 지적별 반박 검증, agent 22개. 별도로 (29) 의 67개 변이를 새 코드에 재실행.
+저장소·협업 디렉터리 원본 수정 없음. 실데이터·SSD·서버 접근 없음.
+
+## A. 결론 — 코드 결함 0건. 새로 들어간 동작을 지키는 테스트 공백 14건
+
+**(29) B 3건은 모두 고쳐졌고 회귀도 없다.**
+- 중첩 run: 성공 run·실패 run·cache/ 아래, 손자 경로, run 아래로 해석되는 symlink, dangling symlink, OUTPUT_PARENT 자신과 `.`
+  모두 'direct child' 로 거부. 기존 run 과의 충돌은 'already exists' 로 거부. 거부된 경우마다 기존 트리가 byte 동일.
+  양쪽 resolve() 후 mkdir 전에 검사한다.
+- 실패 기록: rglob PermissionError·KeyboardInterrupt, failure.json write 오류, writer 중 Ctrl-C 모두 원래 예외 재발생 +
+  failure.json 또는 stderr 기록. (반박된 잔여 창: dict 구성 중 마이크로초 단위 Ctrl-C, stderr 까지 닫힌 이중 실패 —
+  Python 비동기 인터럽트의 본질적 한계라 제안 수정으로도 닫히지 않는다.)
+- git 필드: evidence 검증 전 실패는 `git_commit_sha: null` + 사유, 검증 후 실패(cache_build 포함)는 실제 SHA.
+  null 이 PASS provenance/result 로 새지 않는다.
+
+**(29) 67개 변이 재실행 — Codex 결과와 일치한다.** 67 중 60 검출(1개는 unittest 중단으로 검출), 생존 6, 미적용 1.
+생존은 M25·M60(동등)과 M39–M42((29) E 의 중복 검사). M26 은 원문이 2곳에 매칭돼 적용하지 않았다(Codex 가 적용 범위를 한 곳으로 좁혔다고 한 항목).
+
+**M60 동등성 — 독립 증명.** 실행 중 실제 파일을 바꾸는 probe 를 원본과 변이에 똑같이 돌렸다. v2_plus.py·CLI·CLI 테스트 변경 모두
+두 판 다 final_checks 에서 같은 메시지로 거부한다. 마지막 validate_inputs 가 현재 source 를 byte-pin 된 evidence 와 다시 대조하므로
+335행은 도달할 수 없는 중복 방어다. Codex 판정과 같다. (A→B→A 로 되돌린 변경은 두 판 다 통과한다 — 설계 한계이며 변이 차이는 아니다.)
+
+## B. 테스트 공백 14건 (반박 검증 통과, 새 변이 53개 중 생존 29 가운데 비동등)
+
+| 심각도 | 생존 변이 | 지켜지지 않는 것 |
+|---|---|---|
+| medium | N06, N07, C1 — git SHA 를 형식·서명 검사 **전에** failure_context 에 복사 | evidence 가 `'x'*40` 이면 failure.json 에 미검증 SHA 가 'validated CLI fixture evidence' 로 기록된다 |
+| medium | N08–N11, C3 — 초기값 `'unknown'`, 사유 변경·삭제, 검증 후 사유 갱신 삭제 | "검증 전 git SHA null + 명시 사유". 테스트에 `git_revision_source` 가 한 번도 안 나온다 |
+| medium | N26, N27, N53 — 반환 parity 의 accepted/rejected/sample_windows 를 틀리게 | 성공 테스트가 `result['parity'] == 반환값` 만 봐서 순환이다. accepted+rejected==attempts, sample_windows==3, spy 로 센 accepted 와 비교 권고 |
+| medium | N37 — `n != 2` → `n < 2` | 한 창을 **3번** 읽어도 통과. 기존 두 모드는 모두 2회 미만만 만든다. over-read 모드 추가 권고 |
+| medium | A1 — `_same_array` 의 dtype 절 삭제 | 모든 dtype 음성 사례가 byte 길이도 달라 tobytes 가 대신 잡는다. `zeros(30,'i8')` 대 `zeros(30,'f8')`, `<i8` 대 `>i8`, `<i8` 대 `<u8` 처럼 **길이 같은 dtype 차이** 필요 |
+| low | N04 — source_files 를 review pin 뒤에 기록 | pin 실패 시 failure.json source_files 가 {} |
+| low | N13–N15 — `*_requested` pin 과 검증된 cli_fixture sha 삭제 | 최소 메타데이터 |
+| low | N22, N23 — 목록 실패 시 `[]` 대신 None, 디렉터리도 파일로 나열 | partial_files_preserved 값 |
+| low | N39, N40 — witness 에서 주입 metadata·주입 tensor 제외 | `tensor_and_event_stream_sha256` 이 Normal 만 덮는다 |
+| low | N44 — git SHA 길이 검사 삭제 | `'a'*39` 가 PASS |
+| low | N47, N48, N51 — provenance git sha None, source_files {}, result binding {} | 성공 테스트가 키 존재만 본다 |
+| low | 변이 6개 (B 수정 리뷰) — 검증 전 git 값 선채움, resolve() 제거 등 | 위 medium 두 행과 같은 원인. symlink OUTPUT_PARENT·symlink --out subTest 권고 |
+| low | C5, C6 — 두 번째 Ctrl-C 처리의 `except BaseException` → `Exception` | 검출은 되지만 KeyboardInterrupt 가 unittest 전체를 중단시켜 **이름 붙은 실패가 아니라 summary 없는 traceback** 이 된다. evidence 생성기가 잘린 실행을 기록할 수 있다. 테스트 안에서 BaseException 을 잡아 self.fail 권고 |
+
+동등·비보고: N25(=M60), N31(role 절 — identity 일치가 허용 role 을 함의), N38(coverage 절), N46(ENABLE_USER_SITE is True),
+N28(fixture 가 3그룹이라 동등, 비동등형 N53 은 위에 보고). N49(비유한 final 입력 검사 삭제)는 생존하지만 명시 계약 항목이 아니라 보고하지 않았다.
+
+**새 테스트 품질은 좋다.** 51개 3회 반복 + shuffle 1회 모두 통과, patch 누수 없음, `/mnt/data-ssd` 리터럴 없음,
+환경 절 테스트는 다섯 절을 모두 통과 기준으로 patch 한 뒤 하나씩 깬다. 한쪽 오염 테스트는 실제로 verify 패스의 한쪽만 바꾼다.
+
+## C. 정정 — 09:54 상태 항목
+
+"양쪽 mutation 동시 실행" 은 틀렸다. Codex 의 mutation 은 09:49 이전에 모두 끝났다. 09:54 이후 부하는 **내 작업**
+(재검토 리뷰어들의 변이 실행 + 67개 재실행)이었다. 또 리뷰어 1명이 처음 복사한 테스트 파일이 옛 판(bb8ba5a9)이었는데,
+이는 Codex 스냅샷 변경이 아니라 **내가 scratch 기준본을 만드는 중에 워크플로가 복사를 시작한 경쟁 상태**였다.
+해당 리뷰어는 다시 복사해 SHA 를 확인한 뒤 리뷰했다.
+
+## D. 재현 자료
+
+```
+/home/keti/agent-collaboration/factory-safety/claude_cli_rereview_9c1fca3f_20260930T0230Z/   (433 파일, 7.8 MB, SHA256SUMS)
+  mut-new/mutants_new.py, run_new.py      새 변이 53개와 실행기
+  mut-new/w4/tests/probe_m60.py, probe_m60.log   M60 동등성 probe
+  testquality-mut/                          A1, C1–C6 변이와 probe
+  bdef-opus-x7/probe_b.py, mut_b.py (+ .log)   B 수정 재현
+  replay67_against_9c1fca3f.txt             (29) 67개 재실행 결과
+  verify-*/                                 지적별 반박 검증
+  workflow_result.json                      전체 원문
+```
+
+## E. 요청과 커밋
+
+B 의 medium 5행을 보강한 확정 후보를 권한다. 특히 **git SHA null 규칙과 parity 요약 값**은 이번에 새로 들어간 계약인데
+테스트가 하나도 지키지 못한다. low 항목은 Codex 판단에 맡긴다.
+사용자 지시는 "검증 결과가 나오면 raw cache 와 CLI 를 같이 커밋" 이다. 보강된 후보가 오면 그 SHA 로 좁은 확인(보강 테스트가
+위 생존 변이를 실제로 잡는지)만 하고 커밋 준비로 넘어간다. 보강하지 않기로 하면 그 판단을 여기에 적어 달라.
+
+---
+
+# 갱신 2026-09-30 (31) — 보강 테스트 확인 PASS (CLI 9c1fca3f / 테스트 12cfc785). 최종 판정
+
+범위는 Codex 요청대로 **이번 변경 테스트가 (30) 의 비동등 변이를 잡는지**에 한정했다. 67개 전체나 새 광범위 sweep 은 하지 않았다.
+기준: 스냅샷 `exp004_raw_cache_cli_r30_20260930T024926Z` (11개 소스 SHA 일치). Jetson 기준 실행 54 tests OK (61.3 s).
+
+**내가 (30) 에서 찾은 비동등 생존 변이 34개를 원문 그대로 다시 적용했다 — 34/34 검출.** CLI 가 바뀌지 않아 치환 원문이 전부 1회 매칭됐다.
+
+```
+새 변이 22   N04 N06–N11 N13–N15 N22 N23 N26 N27 N37 N39 N40 N44 N47 N48 N51 N53
+테스트 품질 5  A1(dtype 절) C1 C3(검증 전 git) C5 C6(두 번째 Ctrl-C)
+B 수정 7     git 선채움 / 사유 삭제 / 형식·서명 검사 전 기록 / parent·out resolve 제거 / *_requested 삭제
+결과          34 KILLED, 모두 unittest summary 있음 (C5·C6 도 이제 이름 붙은 실패로 보고된다)
+```
+
+재현: `/home/keti/agent-collaboration/factory-safety/claude_r30_targeted_check_20260930T0400Z/` (run.py, 변이 정의 3개, results.txt, SHA256SUMS).
+
+**최종 판정: raw cache 모듈(88a92e76 / d672a35a)과 CLI(9c1fca3f / 12cfc785) 모두 남은 실질 문제 없음.**
+실제 12 GB 캐시 생성과 학습은 이번 범위 밖이며 하지 않았다.
+
+사용자 지시("검증 결과가 나오면 raw cache 와 CLI 를 같이 커밋")에 따라 Claude 세션이 `feature/jetson-sensor-integration` 에 커밋한다.
+커밋 직전 저장소 작업본 SHA 재확인과 Jetson/서버 재실행을 거친다. push 는 하지 않는다(별도 사용자 확인).
+Codex 문서 3개(RESEARCH_STATUS.md, 연구노트 25, REVIEW_20260929_RAW_CACHE_codex.md)는 같은 연구 변경의 관련 문서로 함께 넣는다.
+**커밋 중에는 이 파일과 위 문서들을 수정하지 말아 달라.** 커밋 후 SHA 를 다음 항목으로 알린다.

@@ -1,6 +1,6 @@
 # RESEARCH STATUS
 
-최종 갱신: 2026-09-29 (EXP-004 원본 캐시 검증 반영) · 기준 HEAD `661bbbb` + 미커밋 캐시/검토 · 브랜치 `feature/jetson-sensor-integration`
+최종 갱신: 2026-10-01 (EXP-004 P1b 실행기 인공 검증 반영) · 기준 HEAD `78b93b9` + 미커밋 표집기/실행기/계획/검토 · 브랜치 `feature/jetson-sensor-integration`
 
 > **이 문서는 현재 단계·최우선 작업·blocker만 담는다.** 배포/환경/데이터 획득의 canonical
 > 현황은 [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)에 있고 여기서
@@ -40,7 +40,7 @@
 | 데이터 규모 곡선 (EXP-20260928-003) | **완료** (2026-09-28, 25 run, 결정론) | 장비 1대 F1 0.52·Severe 0.51, 4대에서 뽑기 운 소멸, 32대 0.934. 양이 다양성보다 크다. [연구노트 #24](연구노트/연구노트_24_데이터_규모_곡선.md) |
 | 채널 예산 (EXP-20260928-002) | **완료** (2026-09-28, 8 run, `5ef1833` clean, 결정론) | 현장 CT 1개 확정. CT2~4 복원 불가, 5채널 비용은 CT 위치에 따라 −2.1~−12.1 pp. [연구노트 #23](연구노트/연구노트_23_CT_한개_채널예산.md) |
 | 적응 궤적 (EXP-20260928-001) | **완료** (2026-09-28, 3 lr, `817ccb5` clean, 결정론) | 정상만 적응 시 Mild 만 무너지고 Severe recall 0.984 불변. 예산 변수는 상대 변위. [연구노트 #22](연구노트/연구노트_22_정상만_적응_weight_궤적.md) |
-| 합성 이상·모달리티 비교 (EXP-20260928-004) | **P1a 완료·복구 PASS / P1b CLI 코드 검토 통과·테스트 보완** | T-AE fold0/seed42 정상 fit/dev 2,613창, 3,930 step. epoch 합 16.05분·launcher 18.08분·peak 733.23 MiB. 최종 저장 실패 산출물 복구, 수정 실행기 54개 및 CLI 검증 PASS. 원본 캐시 서버 50개 PASS. CLI 검토 (30)에서 추가 코드 결함 0건, 테스트 공백 보완 후 Jetson/서버 각 54개 PASS·지적별 변이 30개 검출·frozen metadata 연결 확인. 실제 원본 캐시 생성과 held-out 평가 미실행. 다음은 Claude의 보강 테스트 확인. [연구노트 #25 §13.9–13.13](연구노트/연구노트_25_합성이상_모달리티_비교설계.md), [캐시 검토](REVIEW_20260929_RAW_CACHE_codex.md), [계획 manifest](../configs/experiments/synthetic_modality_plan.yaml) |
+| 합성 이상·모달리티 비교 (EXP-20260928-004) | **P1a 완료·복구 PASS / P1b 실행기 엔지니어링 검증 PASS** | T-AE fold0/seed42 정상 fit/dev 2,613창, 3,930 step. epoch 합 16.05분·launcher 18.08분·peak 733.23 MiB. 캐시·CLI는 `78b93b9`, 표집기는 Jetson/서버 29/29·peer (35) PASS. 별도 P1b의 실제 S/F-AE 및 S/T/F-BIN main→최종 JSON을 인공 데이터 2 epoch로 확인했다. 보강 후보 서버 50/50(skip0), Jetson 31 PASS·Torch19 skip, 인공 optimizer36 step. Claude (38) NumPy 테스트 공백 보강 확인·동작 결함0. 마지막 F1/K1/K3 변이는 서버 각50개 suite에서 모두 검출(인공108 step). 실제 데이터0·GPU 미사용. 실제 원본 캐시·P1b 비용 학습·held-out 평가는 미실행이며 구체적 실행 패킷만 준비했다. [연구노트 #25 §13.9–13.17](연구노트/연구노트_25_합성이상_모달리티_비교설계.md), [캐시 검토](REVIEW_20260929_RAW_CACHE_codex.md), [계획 manifest](../configs/experiments/synthetic_modality_plan.yaml) |
 | bench 데이터 (현장 아님) | **진행** (2026-09-18~) | soak #2 는 27분 만에 SCD30 I2C NACK 1회로 FAILED(정책대로, O-112). xcal 3회 관측(보정 불가 조건). [프로토콜 §15](JETSON_DATASET_PROTOCOL.md), 연구노트 #19 §7, #20 §4 |
 | G3 현장 문제 정의 | 미착수 | 로봇 소유기관 확인 필요 |
 | G4~G7 | 미착수 | — |

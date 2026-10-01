@@ -2,11 +2,11 @@
 experiment_id: EXP-20260928-004
 protocol_id: synthetic-modality-v3-proposed
 status: in_progress
-implementation_status: P1a_30epochs_completed_final_serialization_failed_artifacts_recovered
+implementation_status: P1a_recovered_P1b_sampler_verified_runner_implemented
 review_integration:
-  date: "2026-09-29"
+  date: "2026-09-30"
   source: docs/REVIEW_20260929_EXP004_claude.md
-  status: incorporated_into_design_only
+  status: incorporated_design_and_preparatory_code_full_freeze_pending
   items: [gap_sign, statistical_baselines, thermal_AE_cost_gate, calibration_uncertainty, plurality_bound, overlap_not_ESS, thermal_and_late_baselines, thermal_soft_QC_base_policy, postfreeze_strength_diagnostics]
   prior_exposure:
     reviewer_reported_sample: 8000_ticks_across_all_32_devices_not_fold_fit_subset
@@ -128,12 +128,45 @@ training:
   lr: 0.001
   weight_decay: 0.01
   scheduler: fixed_cosine
+  scheduler_step: per_epoch
+  scheduler_T_max_epochs: 30
   precision: fp32
   effective_batch_size: 16
   binary_normal_synthetic_ratio: [1, 1]
   binary_extra_class_weights: false
+  binary_sampler:
+    implementation: src/data/anomaly_bin_sampler.py
+    schema: exp004-base-paired-bin-v1
+    epoch_index: one_based_1_to_planned_epochs
+    normal_per_base_per_epoch: 1
+    accepted_synthetic_per_base_per_epoch: 1
+    accepted_event_cycle: per_base_without_replacement_stateless_permutations
+    paired_bases_per_effective_batch: 8
+    pair_example_order: [Normal, synthetic]
+    partial_batch: preserve_pairs_mean_over_actual_examples
+    rng: PCG64_from_first_128_bits_of_canonical_JSON_SHA256
+    rng_namespace: [schema, protocol, fold, training_seed, fit, kind]
+    base_order_suffix: [base-order, zero_based_epoch]
+    event_cycle_suffix: [event-cycle, base_window_id, floor_zero_based_epoch_div_accepted_count]
+    modality_or_model_in_rng: false
+    training_seed_required: true
+    rejected_events_resampled: false
+    invisible_positive_label_retained: true
+    index_input: selected_role_windows_and_complete_nine_nominal_events_per_base
+  ae_normal_order: reuse_P1a_epoch_permutation
   ae_checkpoint: minimum_dev_Normal_reconstruction_loss
-  binary_checkpoint: minimum_dev_Normal_synthetic_BCE
+  ae_dev_weighting: simple_mean_over_Normal_windows_reuse_P1a
+  binary_checkpoint: minimum_dev_class_equipment_base_event_weighted_BCE
+  binary_dev_weighting:
+    class_total_weights: [0.5, 0.5]
+    hierarchy: [equipment, base, accepted_event]
+    Normal_weight: 0.5_div_D_div_bases_in_equipment
+    synthetic_weight: 0.5_div_D_div_bases_in_equipment_div_accepted_events_in_base
+    equipment_count_source: dev_index
+    reduction: sum_weight_times_unreduced_BCE_no_second_mean
+    weight_sum_absolute_tolerance: 0.000000000001
+    collision_lower_bound: report_same_base_metadata_bound_with_same_weights
+    uses_calibration_family_strength_weights: false
   checkpoint_tie: earlier_epoch
   use_heldout_for_selection: false
 synthetic:

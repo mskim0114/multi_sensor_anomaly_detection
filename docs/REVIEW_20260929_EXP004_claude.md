@@ -2601,3 +2601,380 @@ B 수정 7     git 선채움 / 사유 삭제 / 형식·서명 검사 전 기록 
 커밋 직전 저장소 작업본 SHA 재확인과 Jetson/서버 재실행을 거친다. push 는 하지 않는다(별도 사용자 확인).
 Codex 문서 3개(RESEARCH_STATUS.md, 연구노트 25, REVIEW_20260929_RAW_CACHE_codex.md)는 같은 연구 변경의 관련 문서로 함께 넣는다.
 **커밋 중에는 이 파일과 위 문서들을 수정하지 말아 달라.** 커밋 후 SHA 를 다음 항목으로 알린다.
+
+## (31) 보충 — 커밋 완료
+
+```
+커밋  78b93b9  EXP-004: P1b raw Normal-window cache and its build/verify CLI   (부모 661bbbb, feature/jetson-sensor-integration)
+      8 파일: anomaly_raw_cache.py/test, build_anomaly_raw_cache.py/test, 두 리뷰 파일, RESEARCH_STATUS.md, 연구노트 25
+      파일 SHA  88a92e76 / d672a35a / 9c1fca3f / 12cfc785  (검증본과 동일)
+커밋 전 확인  Jetson tests/ 전체 405 OK (skip 90)
+             서버 scratch /home/keti/scratch/exp004_precommit_20260930T053653Z  198 OK
+             (raw cache 50 + CLI 54 + pilot 54 + detectors 40)
+push  하지 않음 — 사용자 확인 대기. 이 보충 항목은 커밋 뒤에 쓴 것이라 작업 트리에 미커밋 변경으로 남는다.
+```
+
+---
+
+# 갱신 2026-09-30 (32) — P1b fit sampler·dev 선택 초안에 대한 의견 (설계 협의, 실행 없음)
+
+대상: `p1b_next_stage_draft_20260930T054129Z/P1B_NEXT_STAGE_DRAFT.md`. 동결 `events.jsonl`(3d8991a9…)의 metadata만 읽었다.
+raw·held-out·모델 예측·학습 0. 재계산 스크립트: `/home/keti/agent-collaboration/factory-safety/claude_p1b_policy_check_20260930.py`.
+
+## A. 철회 — 내 갱신 (20) B 의 A' 는 §5.2 와 다르다. base 별 순회에 동의한다
+
+§5.2 원문은 "BIN fit 은 각 epoch 에서 **base 당** 정상 1개와 합성 1개를 균등 순환" 이다. A'(전체 accepted 사건 한 줄 순회)는
+한 epoch 안에서 어떤 base 는 합성 0개, 어떤 base 는 2개 이상을 준다 — 사전 등록 문구와 다른 목적함수다. (20) B 를 철회하고
+**base 별 무복원 순회**를 지지한다. 두 안을 한 sampler 로 섞지 말라는 초안의 경고에도 동의한다.
+
+## B. 수치 독립 재현 — 전부 일치
+
+```
+fit  base 2,088 / accepted 16,682 / k=6:85 7:457 8:941 9:605 / 장비 16 / no-op accepted 0
+dev  base   525 / accepted  4,183 / k=6:21 7:128 8:223 9:153 / 장비 4
+                         sensor-only   thermal-only   coupled    S 하한     T 하한
+fit 사건 균등              24.9011 %     37.5495 %    37.5495 %   0.403164   0.300870
+fit base 순회              24.0518 %     37.9741 %    37.9741 %   0.405108   0.296695
+30 epoch 사건 노출 (fit)   k=6 → 5회 510건 / k=7 → 4회 2,285·5회 914 / k=8 → 3회 1,882·4회 5,646 / k=9 → 3회 3,630·4회 1,815
+BIN 261 step/epoch, 7,830 step/30 epoch; AE 131·3,930 — 일치
+```
+
+## C. fit sampler — 두 가지를 명시하자
+
+**1. 상태 없는 닫힌 형태로 정의한다.** base b 의 accepted 사건 수를 k_b 라 하면 epoch e 의 사건은
+`perm(b, ⌊e/k_b⌋)[e mod k_b]` 이고, epoch e 의 base 순서는 `perm_base(e)` 다. 두 순열 모두
+`(fold, training_seed, …)` 만으로 정해지고 modality·model 이름은 들어가지 않는다. 이렇게 두면 sampler 에 숨은 상태가 없어
+재시작·재현이 epoch 번호만으로 되고, 다음이 그대로 테스트가 된다:
+각 사건 노출이 ⌊30/k_b⌋ 또는 ⌈30/k_b⌉, 각 base 의 Normal 노출이 정확히 30, S/T/F 의 (base, 사건) 스케줄이 byte 동일.
+
+**2. 같은 base 의 Normal·합성을 같은 배치에 묶는 것은 §5.2 가 요구하지 않은 추가 선택이다 — 명시적으로 등록하자.**
+§5.2 는 "epoch 당" 만 말한다. 쌍 배치는 배치당 서로 다른 base 를 16개가 아니라 8개로 줄이고, S/T 에서는 불가시 사건이
+**같은 배치 안에서 같은 입력·반대 라벨**로 들어간다. 모델에 BatchNorm 이 없어(Dropout 만 있다, `v2_plus.py:71`)
+배치 통계 간섭은 없다. 기대 gradient 도 같다. 달라지는 것은 gradient 분산뿐이다. 나는 **쌍 배치를 권한다** —
+같은 base 대비 변화가 학습 신호의 본질이고 대응쌍이 그 분산을 줄인다. 다만 "8 base × (Normal, 합성)" 을 문구로 고정하고,
+독립 셔플 안과 다른 규약이라는 것을 기록해 두자.
+
+## D. dev 선택 — 클래스 1/2·장비 균등에 동의. 합성 쪽은 장비 안에서 **base 균등**을 제안한다
+
+초안의 합성 가중 `0.5/(4·k_d)` 는 장비 안에서 **사건 균등**이다. 그러면 dev 에서는 사건 9개 base 가 6개 base 의 1.5배로
+계산된다. 반면 학습은 base 순회라 base 마다 합성 총량이 같다. dev 기준이 학습 목적을 held-out base 에서 추정하도록
+**장비 → base → 사건** 순으로 나누기를 제안한다: `w = 0.5 / (4 · m_d · k_b)` (m_d = 장비 d 의 dev base 수).
+Normal 쪽은 base 당 1창이라 초안의 `0.5/(4·n_d)` 와 같다.
+
+```
+dev 가중                         sensor-only   S 하한     T 하한
+장비 균등 + 사건 균등 (초안)       24.8306 %    0.403376   0.300238
+장비 균등 + base 균등 (제안)       23.9806 %    0.405323   0.296137
+참고: 학습 base 순회 (fit)        24.0518 %    0.405108   0.296695
+```
+
+제안 쪽이 학습 목적과 family 구성·충돌 하한 모두 가깝다. **차이는 작다**(sensor-only 0.85 %p, 하한 0.002–0.004 nats).
+또 checkpoint 선택은 같은 모델의 epoch 끼리 비교하므로, 상수인 하한 차이는 argmin 을 바꾸지 않는다. 바뀌는 것은 어떤 오류에
+가중이 실리느냐다. 그러니 어느 쪽이든 방어 가능하다. 요구 사항은 **실행 전에 하나로 고정**하는 것이고, 내 선택은 제안 쪽이다.
+어느 쪽을 고르든 각 arm 의 dev BCE 를 **같은 가중으로 계산한 충돌 하한과 나란히** 보고하자(갱신 (20) A 의 권고 유지).
+
+## E. step 예산 — 동의, 한 줄 보탠다
+
+같은 30 epoch 가 같은 optimizer 예산이 아니라는 기록에 동의한다. "fixed cosine LR" 이 **모델마다 자기 총 step**
+(AE 3,930, BIN 7,830)에 걸친 per-step 스케줄인지, epoch 단위인지 문구로 고정해야 한다. 같은 30 epoch 라도 BIN 은
+cosine 곡선 위에서 두 배 촘촘히 걷는다.
+
+## F. 구현 소유권 제안 — 사용자 확인 후 확정
+
+```
+Codex   src/data/anomaly_bin_sampler.py + tests   NumPy leaf. C-1 닫힌 형태와 불변식 테스트
+Claude  train_anomaly_pilot.py 확장 (S/F-AE, BIN) + tests   이미 소유한 실행기·모델 쪽. sampler 는 import 만 한다
+```
+
+sampler 를 실행기와 분리하면 raw cache 때처럼 torch 없이 Jetson 에서 byte 단위로 검증할 수 있다.
+이 분담과 구현 착수는 **이 세션 사용자의 확인을 받은 뒤** 확정한다. 실제 12 GB 캐시 생성과 P1b 학습은 이 협의 범위 밖이다.
+
+---
+
+# 갱신 2026-09-30 (33) — sampler API 에 대한 실행기 쪽 제약 (Codex 요청, 검토만)
+
+`train_anomaly_pilot.py`(Claude 소유) 와 `synthetic_anomaly.inject_blind` 를 읽고 정리했다. 코드는 쓰지 않았다.
+
+## A. 연결에 꼭 필요한 것 — 없으면 실행기가 사건을 다시 만들 수 없다
+
+1. **pair 에 `family`, `strength`, `ct_channel` 을 넣어 달라.** `inject_blind` 는 이 셋과 (protocol, fold, role,
+   base_window_id, generator_seed) 로 사건을 만든다(`synthetic_anomaly.py:287`). `event_id` 는 그 namespace 의 digest 라서
+   거꾸로 풀 수 없다. 실행기는 pair 의 인자로 `inject_blind` 를 부르고 **반환 meta 의 event_id·accepted·sensor_changed·
+   thermal_changed 가 index 의 값과 같은지** 매번 확인하겠다. index 가 이 네 값(또는 그 digest)을 함께 제공하면 좋다.
+2. **`event_id` 는 CT 를 포함하지 않는다.** `event_key` 에 ct_channel 이 없고(310행), CT 를 넣은 것은 `event_instance_id` 다(316행).
+   지금 bank 는 CT1 만이지만(23,517 = 2,613×9), CT2 민감도에서 같은 event_id 가 두 번 나온다. index 의 사건 키는
+   `event_instance_id` 또는 `(event_id, ct_channel)` 로 해 달라. build_event_index 가 ct_channel 과 다른 사건을 받으면 거부하자.
+3. **pair 가 창을 가리키는 방법.** 캐시 reader 는 `window` dict 전체를 받아 identity(session_id, start_index, raw_base_ids 포함)를
+   대조한다(RC-01). base_window_id 만으로는 reader 를 부를 수 없다. pair 에 **selected_windows 안의 위치(index)** 를 넣고,
+   실행기가 `selected_windows[i]['base_window_id'] == pair.base_window_id` 를 확인하는 방식을 제안한다.
+
+## B. P1a 와 맞춰야 할 규약
+
+4. **epoch 번호는 1부터다.** P1a 는 `for epoch in range(1, epochs + 1)` 이고 순서는 `PCG64(SeedSequence([seed, epoch]))` 다
+   (`train_anomaly_pilot.py:131, 367`). sampler 의 `perm(b, ⌊e/k_b⌋)[e mod k_b]` 가 0 기준이면 `e = epoch − 1` 을
+   **sampler 안에서** 적용하고 docstring 에 적어 달라. 실행기가 변환하면 두 곳에서 틀릴 수 있다. epoch < 1 이나 > 계획 epoch 는 거부.
+5. **AE arm 은 sampler 를 쓰지 않는다.** S/F-AE 는 P1a T-AE 와 비교되므로 P1a 와 **같은 Normal 순서 함수**
+   (`epoch_permutation`)와 **같은 dev 규약**을 써야 한다. P1a 의 dev 는 dev Normal 의 **단순 평균**이다(`dev_sum / dev_count`, 432행).
+   따라서 장비→base→사건 dev 가중은 **BIN 전용**이고, AE 는 단순 평균을 유지한다. 이 비대칭을 계획 문서에 적자.
+6. **LR.** P1a 는 `CosineAnnealingLR(T_max=30)` 를 **epoch 마다 한 번** step 한다(341, 411행). 메시지의 "epoch별 step 유지" 와 같다.
+   BIN 은 epoch 당 261 optimizer step 이 같은 LR 로 돈다.
+
+## C. 반례로 테스트해 주면 좋은 것
+
+7. `training_seed` 에 **기본값을 두지 말자**(메시지 API 는 42). seed 는 [42, 123, 456] 을 돈다. 빠뜨리면 조용히 42 가 된다.
+8. `build_event_index` 의 거부 사례: (a) selected_windows 에 없는 base 의 사건, (b) accepted 사건이 0개인 base
+   (지금 bank 에는 없지만 다른 fold 에서 생기면 base 순회가 정의되지 않는다 — 조용히 건너뛰지 말고 실패),
+   (c) role·fold·generator_seed·normalizer_sha256·fit_ids_sha256 가 다른 사건, (d) 같은 event_instance_id 중복,
+   (e) base 당 nominal 9개가 아닌 경우(rejected 포함 전체 수 기준).
+9. `epoch_batches` 의 마지막 배치: fit 2,088 = 261×8 이라 이 데이터에서는 부분 배치가 없다. 쌍이 유지되는지는
+   8 의 배수가 아닌 인공 fixture 로 확인해 달라.
+10. `dev_examples` 가중 합: Normal 0.5, 합성 0.5, 장비별 합 0.5/D 를 **정확히**(float 합 오차 허용 범위를 명시) 확인하고,
+    D·m_d 를 dev index 에서 세는지(설정값이 아닌지) 확인.
+11. `epoch_manifest(epoch)` 의 digest 가 S/T/F 에서 같다는 것은 sampler 입력에 modality 가 없다는 것으로 보장된다.
+    이를 **시그니처 수준**에서 고정하는 테스트(modality/model 인자를 받지 않음)를 권한다.
+
+실행기 확장은 사용자 확인 후 착수한다. 위 A 1–3 이 API 에 들어가면 그 위에서 연결하겠다.
+
+# 상태 2026-09-30 — sampler 후보 독립 검토 착수 (65621dd7 / 63a892c4)
+
+스냅샷을 scratch 에 읽기 전용으로 고정했다(26 tests OK). 계약 검증 / 실행기 연결 prototype(합성 fixture + 동결 metadata) /
+mutation 세 갈래 + 지적별 반박 검증으로 진행 중이다. 결과는 다음 갱신 (34)로 전달한다. 이 후보는 검토 중 수정하지 말아 달라.
+
+---
+
+# 갱신 2026-09-30 (34) — sampler 후보 독립 검토 결과 (65621dd7 / 63a892c4)
+
+리뷰어 3명(계약 / 실행기 연결 prototype / mutation) + 지적별 반박 검증, agent 18개. 읽은 실제 입력은 스냅샷의 동결 metadata 2개뿐이다.
+저장소·협업 디렉터리 원본 수정 없음. 재현 자료: `/home/keti/agent-collaboration/factory-safety/claude_sampler_review_65621dd7_20260930/`.
+
+## A. 결론 — 동작 결함 0건. 무작위성과 dev 재주입 필드를 지키는 테스트가 비어 있다
+
+**계약은 전부 맞다.** 동결 fold-0 metadata 에서 닫힌 형태를 독립 재계산해 seed 42·123·456 각각 epoch 1–30 전 필드가 일치했다.
+노출 분포(k=6 → 5회 510 / k=7 → 4회 2,285·5회 914 / k=8 → 3회 1,882·4회 5,646 / k=9 → 3회 3,630·4회 1,815),
+base 당 Normal 정확히 30, epoch 당 8쌍 배치 261개, epoch·seed 의 경계값·자료형 거부, RNG 키에 modality·model·CT 없음,
+PYTHONHASHSEED 가 달라도 결과 동일, dev 가중(D=4 를 데이터에서 셈, m_d agv02 108 / agv10 121 / oht02 149 / oht10 147)이
+공식과 상대오차 1e-15 이내, 클래스 합 fsum 정확히 0.5. 거부 사례 목록도 전부 ValueError 다.
+
+**실행기를 이 API 위에 만들 수 있다.** 합성 raw fixture 로 RawNormalCache → build_event_index → BasePairedSampler →
+`windows[pair.window_index]` → `cache.reader()` → `inject_blind` 재주입을 30 epoch 돌렸다. 120쌍 모두 event_id·event_instance_id·
+family·strength·ct_channel·두 changed 플래그가 같고 accepted=True 였다(rejected 사건이 섞인 bank 라 검사가 공허하지 않다).
+dev 도 양성 전부 재주입 검증, `sum(weight·BCE)` 가 p=0.5 에서 정확히 ln 2 — 재평균 없음을 확인했다.
+동결 metadata 로 fit 2,088 base / 16,682, dev 525 / 4,183 이 그대로 만들어지고, CT1 bank 에 CT2 를 요청하면 거부된다.
+
+mutation 60개 중 47개 검출. 생존 13개 중 1개 동등, 1개는 계약 밖(generator_seed 를 학습 RNG 키에 넣는 것 — 계약은 modality·model 만 금지).
+
+## B. 테스트 공백 (반박 검증 통과, 중복 합침)
+
+| 심각도 | 생존 변이 | 깨지는 것 |
+|---|---|---|
+| medium | M04 base 순서 키에서 epoch 제거 | 30 epoch 모두 같은 base 순서·같은 261 배치. 검증 드라이버 불변식도 전부 통과한다 |
+| medium | M02 cycle 이 증가하지 않음 | 모든 cycle 이 perm(b,0) 을 반복 |
+| medium | M03 사건 순열 키에서 base 제거 | 같은 k 의 base 가 모두 같은 순열 |
+| medium | M38 순열 없이 event_id 정렬 순서 | 스케줄이 전혀 무작위가 아니다 |
+| medium | M16 dev D 를 2 로 고정 | 모든 dev fixture 가 장비 2대다. 실제 fold-0 dev 는 4대라 가중 합이 2.0 이 된다 |
+| medium | M31 pair ct_channel 을 CT1 로 고정 | CT2 index 가 CT1 pair 를 낸다(실행기의 instance 검사가 실행 중에야 잡는다) |
+| medium | M32·M34·M35·M36 dev 양성의 ct_channel·flags·strength·family | dev 테스트가 None/non-None 만 본다. 잘못된 재주입 identity 가 통과한다 |
+| medium | M52 선택되지 않은 base 의 사건을 거부 대신 건너뜀 | 유일한 테스트가 기존 사건의 base 를 바꿔서 9칸 검사가 먼저 잡는다. 사건을 **추가**하는 경우가 없다 |
+| low | M20 rejected 사건을 binding hash 에서 제외 | rejected 기록만 바꿔도 index sha 불변 |
+| low | M11 기본 batch 8 → 16 | 기본값 미고정 |
+| low | M37 pair device 오기 | 미검사 |
+
+**권고 — 위 medium 네 줄(M02·M03·M04·M38)은 golden 테스트 하나로 닫힌다.** 문서화된 namespace
+`[SCHEMA, PROTOCOL, fold, seed, 'fit', 'base-order', e']` 와 `[…, 'event-cycle', base, cycle]` 로 한 fixture 의 몇 (base, epoch)
+기대값을 독립 재계산해 비교하면 된다. 계약 리뷰어의 재계산 코드가 재현 자료 `contract/probe/frozen.py` 에 있다.
+여기에 장비 3–4대·base 수가 다른 dev fixture(M16), CT2 fixture 의 pair·dev 필드 전수 단언(M31–M36), 사건 추가형 음성 사례(M52)를 더하면 된다.
+
+## C. 문서 한 줄 (결함 아님)
+
+`window_index` 는 **해당 role 로 필터한 windows 안의 위치**다. 반면 RawNormalCache 는 fit→dev 를 합친 순서로 창을 담는다.
+실행기가 `role_windows[pair.window_index]` 를 쓰면 맞다(prototype 이 그렇게 확인했다). docstring 의 "selected_windows 위치" 를
+"role 로 필터한 windows 의 위치" 로 고쳐 두면 연결 실수를 막는다. 또 `inject_blind` meta 에는 role·device·base_window_id 가 없으므로
+합성 bank 를 새로 만들 때는 호출자가 채워야 한다는 점도 적어 두면 좋다.
+
+## D. 다음
+
+B 를 보강한 확정 후보가 오면 그 SHA 로 **B 의 생존 변이가 잡히는지만** 좁게 확인한다.
+실행기 확장(Claude 쪽)은 이 세션 사용자의 확인 후 착수한다. 실제 캐시 생성·P1b 학습·commit/push 는 이 범위 밖이다.
+
+---
+
+# 갱신 2026-09-30 (35) — 보강 sampler 확인 PASS (d0afa2df / 2fb00e3a)
+
+범위는 요청대로 (34) B 의 변이 검출에 한정했다. 운영 로직은 이전 후보와 docstring 두 곳만 다르다(API 변경 없음을 diff 로 확인).
+Jetson 29 tests OK. (34) 의 변이 60개를 원문 그대로 다시 적용했다.
+
+```
+60 / 60 검출   (34) B 에 보고한 비동등 생존 14개(M02 M03 M04 M38 M16 M31 M32 M34 M35 M36 M52 M20 M11 M37) 전부 포함
+               내가 계약 밖·동등으로 분류했던 M07(generator_seed 를 학습 RNG 키에), M58(epoch 기준 재표기)도 이제 검출된다 —
+               golden reference 가 문서의 namespace 를 literal 로 고정하기 때문이다
+원복 후 sampler SHA d0afa2df… 확인
+재현  /home/keti/agent-collaboration/factory-safety/claude_sampler_recheck_d0afa2df_20260930/ (mutate.py, results.txt)
+```
+
+**판정: sampler 후보 d0afa2df / 2fb00e3a 는 남은 실질 문제 없음.** docstring 의 role-filtered window_index 설명과
+bank writer 책임 필드 명시도 (34) C 와 일치한다. 서버 확인은 Codex 결과를 기다린다.
+
+실행기 확장(Claude 쪽)의 소유권과 착수는 이 세션 사용자의 확인 후 정한다.
+
+---
+
+# 갱신 2026-09-30 (36) — P1b 새 진입점 설계 검토: P1a helper 재사용 주의점과 필요한 main fixture
+
+별도 진입점(`src/train_anomaly_p1b.py`, Codex 소유)에 동의한다. P1a 실행기를 고치면 캐시 CLI 의 SOURCE_FILES 11개 결속이
+깨진다는 이유가 맞다. 나는 `train_anomaly_pilot.py`·모델·그 테스트의 소유를 유지하고 **P1b 동안 수정하지 않는다.**
+아래는 그 코드의 소유자로서 아는 함정이다. 코드는 쓰지 않았다.
+
+## A. 내 P1a 코드의 결함 1건 — 복사하지 말 것
+
+**`execute_pilot` 은 `except Exception` 만 잡는다**(`train_anomaly_pilot.py` 약 816행). KeyboardInterrupt·SystemExit 에서는
+failure.json 이 남지 않는다. raw cache 와 CLI 는 `BaseException` 을 잡는데 P1a 만 빠졌다. 갱신 (24) 의 수정 때 내가 놓쳤다.
+P1a 는 이미 끝났고, 지금 고치면 CLI 의 source 결속이 바뀌므로 **P1a 는 알려진 한계로 기록만** 한다.
+P1b 진입점은 `BaseException` 을 잡고 원래 예외를 다시 올려 달라. 같은 곳의 `pilot.json` 쓰기도 원자적이지 않다
+(`write_text`). P1b 는 임시 파일 + fsync + `os.replace` 로 써 달라.
+
+## B. 그대로 재사용해도 되는 helper
+
+```
+enable_determinism()        strict 모드. CUBLAS_WORKSPACE_CONFIG 는 CUDA 초기화 전에 환경에 있어야 하므로 설정하지 않고 검사만 한다
+partition_microbatches()    실제 배치 크기로 나눈다. BIN 에도 맞다 — 예제당 원소가 1개(logit)라 가중 합이 배치 평균을 정확히 재현한다
+                            8쌍이 micro 경계에서 갈라져도 gradient 누적 합은 같다
+epoch_permutation()         S/F-AE 는 반드시 이것. P1a T-AE 와 같은 (seed, epoch) 순서를 봐야 비교가 된다
+detectors.build_arm_set()   S/T/F 초기 branch 를 명시적 복사로 맞춘다. 반환 manifest 의 copied 목록과 branch 별 state hash 를 기록
+detectors.autoencoder_loss() F 는 0.5·MSE_S + 0.5·MSE_T 원소 평균. per_sample=True 가 있다
+PilotFailure + check_finite  비유한 loss·gradient, grad 가 None 인 parameter 를 실패로 보존
+strict `<` checkpoint 비교   동률이면 이른 epoch. ties 목록도 기록한다
+```
+
+## C. 재사용하면 안 되거나 바꿔야 하는 것
+
+1. **`train_pilot` 자체는 T-AE 전용이다.** `load_thermal` 이 열화상만 주고 `model(thermal=...)` 만 부른다. S/F 는 sensor 도 필요하다.
+   입력은 `controls.normalized_pair` 로 만들고, 최종 변환은 P1a 와 **같은 표기** `np.ascontiguousarray(x, dtype=np.float32)` 로 하자
+   (raw cache 의 byte 동일성 검증이 이 표기를 기준으로 했다).
+2. **dev 평균.** P1a 는 `dev_sum / dev_count` 다. AE 는 그대로 쓰고, BIN 은 `sum(weight · unreduced BCE)` 로 **나누지 않는다**.
+   두 식이 한 함수에 섞이지 않게 목적별로 분리하고, BIN 쪽 테스트는 p=0.5 에서 정확히 ln 2 가 나오는지 보면 된다.
+3. **`ThermalCache` 는 쓰지 않는다.** P1a 의 6 GB 정규화 float32 캐시는 T 전용이고 합성을 담지 못한다. P1b 는 raw cache 에서 읽어
+   매 epoch 정규화·재주입한다.
+4. **`verbose` 는 `run_training` 에서 소비된다**(갱신 (24) D). 새 진입점에서 `train_pilot` 계열로 새지 않게 하자.
+5. **모델 dropout 은 arm 마다 RNG 소비가 다르다**(F 는 branch 가 둘). 초기 가중치 동일성은 복사로 보장되지만, 학습 중 dropout
+   mask 까지 같다고 주장하지 말자. 데이터 순서에는 torch RNG 를 쓰지 않는다(sampler·numpy 만).
+
+## D. 비용 — 미리 적어 둘 두 항목
+
+- **`reader(verify_each_read=True)`** 는 창을 읽을 때마다 sha256 을 다시 계산한다. BIN 한 run 에서 (fit 2,088 + dev 525) × 30 epoch
+  ≈ 78,390번, 열화상만 약 360 GB 를 해시한다(0.5–1 GB/s 면 6–12 분). 필요한 검사지만 wall time 에 따로 기록하자.
+- **재주입.** 쌍마다 `inject_blind` 1회, fit 2,088 + dev 4,183 사건 × 30 epoch. 사건당 수 ms 라 수십 분 단위다.
+  compute·I/O 와 분리해 잰다.
+
+## E. 필요한 실제 main 경로 fixture
+
+갱신 (24) 의 교훈은 **함수 단위 테스트로는 main 의 마지막 직렬화 경로를 못 잡는다**는 것이다. 합성 raw fixture 로:
+
+1. **arm 마다 실제 main → 최종 JSON 까지.** 최소 S-AE, F-AE, BIN 하나(가능하면 셋 다). 1–2 epoch, 인공 optimizer step 수를 따로 센다.
+2. **최종 JSON 직렬화만 터뜨리기** → failure.json 이 남고 epochs.jsonl·checkpoint 가 보존되는지.
+3. **학습 중 KeyboardInterrupt** → failure.json(stage, epoch, batch) + 부분 산출물 보존 + 예외 재발생(A 의 결함 회귀 방지).
+4. **재주입 불일치** — bank 의 flag 하나를 바꾼 사건 → 그 pair 를 처음 쓰는 시점에 실패, optimizer step 이 그 뒤로 진행되지 않음.
+5. **gate 순서** — source·cache·bank·evidence 중 하나가 틀리면 reader 와 optimizer 가 **생성되기 전에** 실패
+   (CountingReader 처럼 호출 수 0, optimizer 생성 0 을 단언).
+6. **cal/heldout 창이 섞인 입력** → reader 전에 거부.
+7. **비유한 loss** → PilotFailure 가 failure.json 에 context 와 함께.
+8. **AE 와 BIN 이 다른 dev 식**을 쓰는지 한 fixture 에서 동시에 확인(AE 단순 평균, BIN 가중 합).
+9. **S/T/F 의 sampler manifest digest 와 사건 digest 가 같다**는 것을 main 결과 JSON 에서 확인.
+
+인공 fixture 의 optimizer step 과 실제 데이터 step 을 결과 기록에서 구분하는 것, 자동 임계값을 만들지 않는 것에 동의한다.
+실제 12 GB 캐시·P1b 학습·commit/push 는 이 검토 범위 밖이다.
+
+# 상태 2026-10-01 — P1b 실행기 후보 검토 착수 (5c6d8d7e / 9a095dcc)
+
+스냅샷을 scratch 에 읽기 전용으로 고정했다(source-pins 16개 일치, Jetson 36 중 19 OK·17 skip). 계약 (36) 대조 / torch 경로 **정적** 검토 /
+NumPy 경로 mutation + torch 테스트 공백 분석 + 지적별 반박 검증으로 진행 중이다. 결과는 갱신 (37) 로 전달한다.
+**서버 실행은 하지 않는다.** Codex 세션의 서버 접근이 막힌 상태이고, 그 검증은 Codex 세션이 처리하기로 했으므로 내가 대신 돌리지 않는다.
+검토 중에는 후보를 수정하지 말아 달라.
+
+---
+
+# 갱신 2026-10-01 (37) — P1b 실행기 후보 검토 결과 (5c6d8d7e / 9a095dcc)
+
+리뷰어 3명(계약 / torch 정적 / mutation) + 지적별 반박 검증, agent 18개. **torch 경로는 정적 검토만** 했다(Jetson 에 torch 없음,
+서버 미사용). Jetson 36 tests: 19 OK, 17 skip. 재현 자료: `/home/keti/agent-collaboration/factory-safety/claude_p1b_runner_review_5c6d8d7e_20261001/`.
+
+## A. 결론 — 코드 결함 0건. 입력 gate 대부분에 음성 테스트가 없다
+
+**(36) A–E 와 (32)–(35) 를 모두 지킨다.** 확인한 것:
+- gate 순서: `_check_output` → `validate_inputs`(metadata + `_validate_cache`) → torch import → provenance → `attach().open()` → reader.
+  optimizer 는 `train_loop` 안에서 만든다. reader·optimizer 전에 거부됨을 테스트가 단언한다.
+- `except BaseException` + 원래 예외 재발생(809행). `_write_json` 은 `'x'` 생성 → fsync → `os.replace`. checkpoint 도 같고 epochs.jsonl 은 epoch 마다 fsync.
+- S/F-AE 는 P1a `epoch_permutation`(1 기준 epoch)과 dev Normal 단순 평균. BIN dev 는 `fsum(weight · unreduced BCE)`, 다시 나누지 않음.
+- `window_index` 는 role 로 필터한 목록에 대해 풀고 base_window_id·device 를 교차 확인, reader 에 split 의 window dict 전체를 넘긴다.
+  (combined fit+dev 순서로 바꾼 변이는 잡힌다.)
+- 재주입 meta 의 event_id·instance·family·strength·CT·두 flag·accepted·parameters 를 bank 와 대조.
+- reader 는 `verify_each_read=False` 이고, 대신 PairLoader 가 base 를 읽을 때마다 manifest 의 `array_sha256` 과 한 번 대조한다.
+  같은 base 를 재사용하므로 BIN 해시는 phase 당 base 1회다 — (36) D 의 360 GB 우려보다 싸면서 같은 보장이다.
+- 정적: BIN loss 는 `(B,)` logit + float32 target, `reduction='none'` → `.mean()` × 실제 배치 기준 가중. dev 는 `eval()` + `no_grad()`,
+  매 epoch `train()` 복귀. 선택 state 는 `detach().cpu().clone()` 이라 live tensor 와 aliasing 없음, 저장 후 다시 읽어 hash 대조.
+  gradient None/비유한 검사가 BIN head·F fusion 까지 덮는다. 데이터 순서에 torch RNG 를 쓰지 않는다.
+
+**mutation 72개 중 30개 검출, 42개 생존.** 생존 대부분이 아래 B 의 gate 들이다. 원본 코드는 각 경우를 올바르게 거부한다
+(표본 확인함). 즉 지금은 맞지만, 지워도 아무 테스트가 깨지지 않는다.
+
+## B. 테스트 공백 (반박 검증 통과)
+
+| 심각도 | 생존 변이 | 지켜지지 않는 것 |
+|---|---|---|
+| medium | L6·L7·L8 재주입 검사에서 event_instance_id / sensor_changed / accepted 제거 | torch 테스트도 thermal_changed 하나만 바꾼다. NumPy PairLoader 테스트로 필드마다 음성 사례를 만들면 Jetson 에서도 돈다 |
+| medium | L18 loader 의 CT1 → CT2 | 입력 값을 독립 계산한 `normalized_pair` 와 비교하는 테스트가 없다(torch AE 테스트는 같은 loader 를 쓰므로 순환적이다) |
+| medium | (정적) BIN dev 가중을 단순 평균으로 바꿔도 통과 | 유일한 dev 값 테스트가 logit=0 이라 모든 BCE 가 ln 2 — 어떤 정규화 평균도 ln 2 다. 재평균만 잡고 **가중 자체**는 못 잡는다. logit 이 base·label 에 따라 달라지는 모델로 `fsum(w·BCE)` 와 비교 필요 |
+| medium | G4·G5·G7·G8·G10 evidence 수치 gate | real step > 0, fixture step 0, git sha 형식, sampler unit_tests 실패·skip, sampler optimizer step > 0 이 받아들여진다 |
+| medium | G11–G13·G15–G18·G20 split·normalizer·bank gate | data_gate FAIL, 다른 id 로 적합한 normalizer, **bank heldout_read/calibration_read=True**, CT2 bank, gradient_training_runs ≥ 1, 사건 칸 누락, sampler 입력 pin 불일치 |
+| medium | C1–C5·C7·C9–C12 cache 결과 gate | `cache/failure.json`, 다른 CLI source, provenance pin, allowed_roles, verified_after_flush=false, binding, raw manifest payload, parity 수치. 기존 테스트는 result.source_files 만 바꿔서 중복 검사가 대신 잡는다 |
+| medium | P1·P2 `_signed`·`_pinned` 우회 | 모든 테스트가 수정 뒤 재서명·재pin 한다. 서명 안 한 편집과 pin 불일치가 한 번도 시험되지 않는다 |
+| low | (정적) BIN micro-batch 동등성 테스트가 nominal/actual 분모 오류를 못 잡는다 | 1-파라미터 모델 + AdamW 는 gradient 크기에 불변이라 모든 step 이 같은 배율로 틀려도 최종 state 가 같다. train_loss 값을 손계산과 비교하거나 SGD/grad 직접 비교 |
+| low | L15 해시 시간을 cache_io 에 합침, reader 를 verify_each_read=True 로 | 비용 기록 (36) D 미단언 |
+| low | CLI arm 목록에 (T, AE) 추가, `--out` 의 입력 디렉터리 중첩 검사 삭제 | T-AE 재실행, 입력 디렉터리에 쓰기 |
+
+권고 공통: gate 하나에 음성 subTest 하나. **다른 필드는 일관되게 유지한 채** 그 필드만 바꾸고 재서명·재pin 해야 중복 검사가 대신 잡지 않는다.
+P1·P2 만은 재서명·재pin **하지 않은** 사례가 필요하다.
+
+## C. 참고 (결함 아님)
+
+- `dev_checkpoint_ties` 가 최선 epoch 자신을 포함한다. P1a 는 제외한다. P1a 와 P1b 기록을 나란히 볼 때 같은 규약으로 맞추자.
+- AE dev chunk 를 micro_batch 단위로 자른다(P1a 는 16 단위 뒤 micro). micro_batch 가 16 을 나누면(기본 2) 경계가 같고, 아니면 float 합 순서만 다르다.
+- `os.replace` 뒤 디렉터리 fsync 는 없다. 계약 요구가 아니라서 보고하지 않았다.
+
+## D. 다음
+
+B 를 보강한 확정 후보가 오면 그 SHA 로 생존 변이 검출만 좁게 확인한다. 이번처럼 torch 경로는 정적 확인으로 한정되므로
+**서버 54 + P1b 36 의 실제 실행 결과는 Codex 세션의 서버 검증을 기준**으로 삼는다. 실제 캐시·학습·commit/push 는 범위 밖이다.
+
+---
+
+# 갱신 2026-10-01 (38) — 보강 P1b 실행기 확인 (e5716f50 / 5f6ae536)
+
+범위는 (37) B 의 생존 변이 재확인이다. 운영 코드 변경은 ties 기록에서 선택 epoch 를 빼는 한 곳뿐임을 diff 로 확인했다.
+source-pins 16개 일치. Jetson 50 tests: 31 OK, 19 skip. (37) 의 변이 70개를 원문 그대로 다시 적용했다(원복 후 SHA e5716f50 확인).
+
+```
+70 중 57 검출 (이전 30)   재현: /home/keti/agent-collaboration/factory-safety/claude_p1b_runner_recheck_e5716f50_20261001/
+```
+
+**(37) B 의 항목 중 Jetson 에서 돌 수 있는 것은 전부 잡힌다.** 재주입 필드 L6–L8, CT2 정규화 L18, evidence 수치 G4·G5·G7·G8·G10,
+split·bank gate G11–G13·G15–G18·G20, cache gate C1–C5·C7·C9–C12, 서명·pin P1·P2, 비용 timer L15, CLI O1·O3 모두 KILLED.
+
+**남은 생존 13개는 세 종류다.**
+
+| 종류 | 변이 | 판단 |
+|---|---|---|
+| 이전에 반박·동등 판정 | G21, L1, L5, L13, L14, L17 | (37) 에서 동등이거나 다른 검사가 막는다고 판정됐다. 그대로 둔다 |
+| **torch main 경로 — Jetson 에서 판정 불가** | F1 (`except Exception`), K1 (`verify_each_read=True`), K2 (provenance 기록 생략), K3 (학습 뒤 최종 입력 재검증 생략) | main 테스트가 torch-gated 라 Jetson 에서는 skip 된다. 서버 50/50 PASS 는 **원본이 통과한다**는 증거이지 **이 변이를 잡는다**는 증거는 아니다 |
+| (37) 에서 보고하지 않은 작은 것 | A2 (`_write_json` fsync 생략), A3 (임시 파일을 `'x'` 대신 `'w'`), O4 (micro-batch 양수 검사) | A2 는 crash 없이는 관찰 불가. A3·O4 는 low. 판단은 Codex 에게 맡긴다 |
+
+**권고 하나.** F1·K1·K3 는 결함이면 영향이 큰 항목이다(Ctrl-C 기록, 360 GB 해시, 학습 뒤 source·입력 변조 미검출).
+Codex 세션이 서버에서 이 세 변이만 50개 suite 에 적용해 KILLED 를 확인하면 (37) B 와 이 검토가 닫힌다. 나는 서버를 쓰지 않는다.
+
+**판정: Jetson 에서 확인 가능한 범위에서 (37) B 는 보강됐다. 코드 결함은 여전히 0건이다.**
+torch 경로의 최종 근거는 Codex 서버 결과(50/50, 다섯 모델 main → JSON, 인공 step 36·실제 0, BIN 사건 stream 일치)다.
+
+`exp004_p1b_cost_launch_20261001T012537Z/launch-plan.json` 은 읽지 않았다. 실제 비용 실행은 학습이므로 이 검토 범위 밖이고,
+실행 여부는 사용자 결정이다.
+
+정정 하나: 이 재확인의 대기 명령이 `pgrep -f "python ./mutate.py"` 로 자기 셸 명령줄과 일치해 끝나지 않았다. Codex 의 지적이 맞았다.
+결과 파일 행 수와 원복된 SHA 로 완료를 확인했다.

@@ -2978,3 +2978,599 @@ torch 경로의 최종 근거는 Codex 서버 결과(50/50, 다섯 모델 main �
 
 정정 하나: 이 재확인의 대기 명령이 `pgrep -f "python ./mutate.py"` 로 자기 셸 명령줄과 일치해 끝나지 않았다. Codex 의 지적이 맞았다.
 결과 파일 행 수와 원복된 SHA 로 완료를 확인했다.
+
+---
+
+# 갱신 2026-10-01 (39) — 커밋·push 완료, 실제 캐시 생성과 P1b 비용 실행을 **Claude 세션이 실행**한다
+
+**이 세션 사용자가 승인했다:** (1) 검증된 파일 커밋 (2) push (3) 실제 캐시 생성과 P1b 비용 실행.
+
+```
+커밋  546de5f  EXP-004: P1b base-paired BIN sampler and the P1b training runner   (부모 78b93b9)
+      sampler d0afa2df/2fb00e3a, runner e5716f50/5f6ae536, 계획 yaml, RESEARCH_STATUS, 연구노트 25, 이 리뷰 파일
+      커밋 전 Jetson tests/ 484 OK (skip 109), 서버 scratch 277 OK (cache 50 + CLI 54 + sampler 29 + P1b 50 + pilot 54 + detectors 40)
+push  origin/feature/jetson-sensor-integration  661bbbb..546de5f  (main·force push 없음)
+```
+
+**실행 주체는 Claude 세션이다. Codex 는 같은 작업을 띄우지 말아 달라** — GPU·출력 경로가 겹친다.
+launch-plan(`exp004_p1b_cost_launch_20261001T012537Z`)을 따르되 **한 군데를 고친다:**
+
+- 계획의 `cache_output` `/home/keti/review_runs/..._raw_cache` 는 검증된 CLI 가 거부한다(`_check_output`: OUTPUT_PARENT
+  `/mnt/data-ssd/keti_data/factory_safety/exp004_raw_cache` 의 **직속 자식만** 허용). 캐시는
+  `/mnt/data-ssd/keti_data/factory_safety/exp004_raw_cache/exp004_fold0_raw_cache_<UTC>` 로 만들고, 모델 명령의
+  `--cache-run` 을 그 경로로 바꾼다. P1b 실행기는 cache-run 경로에 제약이 없다(`_validate_cache`). 모델 출력은 계획대로 `~/review_runs` 아래.
+- 나머지 argv(코드 디렉터리 `exp004_p1b_runner_r37_20261001T010020Z_code`, 증거 파일 4개와 SHA, fold 0, micro-batch 2,
+  S-AE → F-AE → S-BIN → T-BIN → F-BIN 순차)는 그대로다. 증거 bundle 은 계획의 `remote_bundle` 경로에 SHA 확인 후 복사한다.
+- 첫 실패에서 멈춘다. 재시도·LR·micro-batch 변경 없음. 실패 산출물 보존. T-AE 재학습 없음, cal/held-out 접근 없음, 임계값 생성 없음.
+- git: 계획의 증거는 dirty `78b93b9` 시점에 만들어졌다. 실행 source 는 pin 16개와 같고 그 내용은 이제 깨끗한 `546de5f` 에 있다.
+  결과는 `paper_result_eligible=false` 비용 진단으로만 다룬다.
+
+서버 확인: GPU 2장 모두 유휴, `/mnt/data-ssd` 여유 873 GB, 코드·P0·bank 디렉터리 존재. 진행 상황은 이 파일에 남긴다.
+
+## (39) 진행 1 — 실제 raw cache PASS, P1b 순차 실행 시작
+
+```
+cache   /mnt/data-ssd/keti_data/factory_safety/exp004_raw_cache/exp004_fold0_raw_cache_20261001T025938Z
+        result.json  file 8c3208b161a244c9a3ee0417d7e09b1058755d387952149599b41e2006a88e7b
+                     payload 00b404814229c0dbf242ad47453eb126161c5bcc3b387a148e38b34333946ee7
+        provenance.json file 8a97a4cc…   cache manifest 0469fd9b…
+        gate PASS   parity PASS: raw 2,613창, Normal 최종 tensor 5,226쌍(CT1·CT2), 합성 표본 20창 × 360 시도 (accepted 328 / rejected 32, 전수 아님)
+        canonical 읽기 5,226 (fit 4,176 / dev 1,050), raw_roles_read [dev, fit], optimizer_steps 0
+        시간  입력 검사 5.1 s / build 213.2 s / attach 54.9 s / parity 153.4 s / 전체 431.8 s
+        log  /home/keti/review_runs/exp004_p1b_cost_launch_20261001T012537Z/claude_cache_build.log
+P1b     순차 스크립트 /home/keti/review_runs/exp004_p1b_cost_launch_20261001T012537Z/claude_p1b_sequence.sh (sha 16fb2010…)
+        launch-plan 의 argv 에서 --cache-run 과 --cache-result-sha256(위 file SHA) 두 값만 바꿨다
+        상태 claude_p1b_sequence_status.txt, 모델별 log claude_<arm>_<objective>.log, 출력 계획대로 …_<arm>_<objective>/
+        2026-10-01T03:08:49Z 시작. S-AE epoch 1: 48.7 s, step 131, dev loss 0.30475, peak alloc 107 MB
+        (epoch 시간 중 array_hash 28.9 s — S 는 센서만 쓰지만 창 전체 hash 를 대조한다. 비용 기록에 남긴다)
+```
+
+## (39) 진행 2 — S-AE·F-AE·S-BIN PASS. **T-BIN 은 엔지니어링 PASS 이지만 학습이 붕괴했다**
+
+```
+                 step(실제/인공)   선택 epoch   dev loss              학습 루프   peak alloc
+S-AE  PASS       3,930 / 0         30           0.093596 (MSE)       26.4 분     102 MiB
+F-AE  PASS       3,930 / 0         27           0.289115 (0.5S+0.5T)  38.0 분     743 MiB
+S-BIN PASS       7,830 / 0         17           0.430481 (가중 BCE)   54.0 분      99 MiB   충돌 하한 0.405323
+T-BIN PASS       7,830 / 0         15           0.693147 = ln 2      65.4 분     692 MiB   충돌 하한 0.296137
+F-BIN 실행 중 (2026-10-01T06:17:16Z 시작)
+확인  S-AE·F-AE 의 fit 순서 digest 30 epoch 전부 일치. S-BIN·T-BIN 의 실제 사건 stream (540e73b6…) 과 fit manifest 30 epoch 전부 일치.
+      F 의 공유 branch 4개 초기 hash 가 S·T 와 일치(복사 안 된 것은 fusion 뿐). 파라미터 S 563,861 / T 5,567,057 / F 6,163,814.
+```
+
+**T-BIN 붕괴.** train loss 가 30 epoch 내내 0.6929–0.6936, dev 가 0.69314718 근처에 고정됐다(S-BIN 은 0.53 → 0.42 로 내려갔다).
+읽기 전용 진단(서버 CPU, dev 8창 + 각 창의 thermal-only s4 사건, 학습 없음 — `/home/keti/scratch/claude_tbin_diag.py`):
+
+```
+                fc_thermal 출력 |f| 평균/최대   z 의 예제 간 std   logit 범위
+T 초기          0.036 / 0.21                    7.7e-4             −0.078 ~ −0.076
+T 학습 후       55.4 / 332                       3.2e-9             −0.00004 (상수)
+S 학습 후       —                                5.9e-3             −0.88 ~ −0.80
+입력 확인       주입 열점의 정규화 공간 차이 최대 4.000 (입력은 정상, 재주입 검증도 쌍마다 통과)
+```
+
+`fc_thermal`(19,200→128)의 출력이 학습 중 수백 배로 커져 뒤의 3층 LSTM 이 포화됐고, bottleneck 이 입력과 무관한 상수가 됐다.
+head 는 bias 만 남아 확률 0.5 를 낸다. **데이터 경로 결함이 아니라 고정 학습 규약(AdamW 1e-3, 이 구조) 아래의 최적화 실패**다.
+P1a T-AE 는 같은 인코더로 학습됐으므로, BCE 목적에서만 나타난 현상이다.
+
+해석 주의:
+- 이 결과를 "열화상은 이상 판별에 쓸모없다" 로 읽으면 안 된다. 하한(0.296)과 실제(0.693)의 차이는 정보 부족이 아니라 학습 실패다.
+- 규약은 dev 를 보고 LR·구조를 바꾸지 말라고 한다(§3.3(7)). 고치려면 **모든 arm 에 같은 변경**을 적용하고 계획 버전을 올려야 한다.
+  후보(정규화층, gradient clipping, 작은 LR, fc_thermal 앞 pooling)는 사전 등록 대상이며 이번 실행에서 바꾸지 않는다.
+- F-BIN 은 계획대로 계속 돌린다. 열화상 branch 가 같은 방식으로 붕괴하는지가 F−S 비교 해석에 직접 필요하다.
+
+---
+
+# 갱신 2026-10-01 (40) — 실제 캐시 + P1b 다섯 모델 비용 실행 완료. 열화상 BIN branch 는 두 모델 모두 붕괴
+
+**실행: Claude 세션, 사용자 승인. 다섯 모델 모두 엔지니어링 PASS, 첫 실패 없음.** 2026-10-01T03:08:49Z → 07:30:57Z (4 시간 22 분).
+`paper_result_eligible=false`, `full_P0_gate=NOT_EVALUATED`. cal/held-out 읽기 0, 임계값 생성 0, T-AE 재학습 없음.
+
+## A. 결과
+
+```
+모델    선택 epoch  dev loss        하한(같은 가중)  실제/인공 step  epoch 평균  학습 루프   peak alloc
+S-AE    30          0.093596 MSE   —               3,930 / 0       52.7 s      26.4 분     102 MiB
+F-AE    27          0.289115 0.5S+0.5T —           3,930 / 0       76.1 s      38.0 분     743 MiB
+S-BIN   17          0.430481 BCE   0.405323        7,830 / 0      108.1 s      54.0 분      99 MiB
+T-BIN   15          0.693147 BCE   0.296137        7,830 / 0      130.9 s      65.4 분     692 MiB   ← 학습 붕괴 (= ln 2)
+F-BIN   15          0.428312 BCE   0               7,830 / 0      145.0 s      72.5 분     699 MiB   ← 열화상 branch 붕괴, S-BIN 과 동등
+```
+
+AE 와 BIN 의 dev loss 는 정의가 달라 서로 비교하지 않는다. BIN 끼리는 같은 가중의 BCE 다.
+
+**같은 조건 확인(실제 실행 기록에서):** S-AE·F-AE 의 fit 순서 digest 30 epoch 전부 일치. S/T/F-BIN 의 실제 사건 stream
+`540e73b6…` 와 fit manifest 30 epoch 전부 일치. F 의 공유 branch 4개 초기 hash 가 S·T 와 일치(복사 안 된 것은 fusion 뿐).
+
+## B. 열화상 BIN branch 붕괴 — 진단 (읽기 전용, 서버 CPU, dev 8창 + 각 창의 thermal-only s4 사건)
+
+```
+                   fc_thermal |f| 평균/최대   열화상 z 예제 간 std   판단
+T 초기             0.036 / 0.21               7.7e-4                정상 범위
+T-BIN 학습 후      55.4 / 332                 3.2e-9                LSTM 포화, z 상수, logit −0.00004 상수
+F-BIN 학습 후      71.6 / 387                 3.6e-8                같은 붕괴
+F-BIN logit        열화상 z 를 다른 예제 것으로 섞어도 변화 0.0, 0 으로 바꿔도 최대 1.45e-4
+                   thermal-only s4 양성과 짝 Normal 의 logit 차이 8쌍 모두 정확히 0
+```
+
+`fc_thermal`(19,200→128) 출력이 BCE 학습 중 수백 배로 커져 3층 LSTM 이 포화됐다. T-BIN 은 확률 0.5 상수 예측기가 됐고,
+F-BIN 은 열화상을 전혀 쓰지 않는 센서 분류기가 됐다. 입력은 정상이다(주입 열점의 정규화 차이 최대 4.0, 재주입 검증 전 쌍 통과).
+T-AE(P1a)·F-AE 는 같은 인코더로 학습됐다 — 이 붕괴는 **BIN 목적에서만** 나타났다.
+
+**해석:** 이번 결과로 F−S 이득이나 열화상의 판별 가치를 말할 수 없다. 하한과의 차이(T 0.693 대 0.296, F 0.428 대 0)는
+정보 부족이 아니라 **고정 학습 규약 아래의 최적화 실패**다. 규약(§3.3(7))상 dev 를 보고 LR·구조를 바꾸지 않았다.
+고치려면 사전 등록 → **모든 arm 에 같은 변경** → 계획 버전 상승이 필요하다. 후보: fc_thermal 앞 정규화(LayerNorm 등),
+gradient clipping, 작은 LR, CNN 뒤 global pooling. 어느 것도 이번 실행에서 적용하지 않았다.
+
+## C. 비용 (30 epoch 합계, 분)
+
+```
+          compute  array_hash  injection  normalization  cache_io  transfer+stack
+S-AE        7.4      15.2         —          1.7            1.0       0.1
+F-AE       17.2      15.9         —          1.7            1.1       1.3
+S-BIN      14.4      16.1       14.7         5.5            0.9       0.6
+T-BIN      22.9      15.2       15.0         5.3            1.0       4.0
+F-BIN      26.9      17.9       15.1         5.4            1.1       4.1
+캐시 생성   431.8 s (build 213 / attach 55 / parity 153)
+```
+
+`array_hash`(캐시 배열 hash 대조)가 모델마다 약 15–18 분으로, S-AE 에서는 계산의 두 배다. S 는 센서만 쓰지만 창 전체(열화상 포함)를
+대조한다. BIN 의 재주입은 약 15 분이다. 둘 다 GPU 계산이 아니라 CPU 쪽 비용이다.
+
+## D. 산출물 (서버)
+
+```
+캐시      /mnt/data-ssd/keti_data/factory_safety/exp004_raw_cache/exp004_fold0_raw_cache_20261001T025938Z   result file 8c3208b1…
+모델 출력 /home/keti/review_runs/exp004_p1b_cost_launch_20261001T012537Z_{S_AE,F_AE,S_BIN,T_BIN,F_BIN}/
+          result.json  S_AE ee4ad97e / F_AE 0663258b / S_BIN 12c35217 / T_BIN 9a05724f / F_BIN a5778113
+          checkpoint   S_AE f1d4a809 / F_AE f7cd9ae0 / S_BIN 17b7e4a7 / T_BIN 2fe73946 / F_BIN 84531612
+          epochs.jsonl S_AE abd50e4c / F_AE fbe16c0b / S_BIN 5944065d / T_BIN 422aad42 / F_BIN 07bd6c41
+launcher  /home/keti/review_runs/exp004_p1b_cost_launch_20261001T012537Z/claude_p1b_sequence.sh (16fb2010…),
+          claude_p1b_sequence_status.txt, claude_<arm>_<objective>.log, claude_cache_build.log
+진단      /home/keti/scratch/claude_tbin_diag.py (읽기 전용, 산출물 디렉터리에 쓰지 않음)
+```
+
+Codex 의 독립 검토(캐시 결속, 실제 step·노출 순서, 초기 branch, 비용 항목)를 요청한다. 다음 단계(안정화 규약 사전 등록과 재실행 여부)는
+이 세션 사용자의 결정을 기다린다.
+
+---
+
+# 갱신 2026-10-01 (41) — (40) 해석 정정 4건 (Codex 독립 검토 수용) + 진단 v2
+
+Codex 독립 검토(`exp004_p1b_audit40_20261001T085232Z/five-model-verification.json`, 320 검사 PASS)의 해석 지적 4건을 모두 수용한다.
+**(40) 의 아래 표현을 대체한다.**
+
+1. **F-BIN "하한 0" → "미계산".** 실행 result 의 `invisible_same_base_BCE_lower_bound_nats` 는 F 에서 null 이다. 내가 적은 0 은 계산값이 아니라
+   BCE 의 자명한 비음수 하한일 뿐이다. 따라서 "F 의 남은 loss 0.428 전부가 최적화 오차" 라고 말할 수 없다. F 의 실제 하한은 계산되지 않았다.
+2. **"F-BIN 은 S-BIN 과 동등" → 관측 차이만.** best dev BCE 차이 F − S = **−0.00217**(0.428312 − 0.430481). fold 1개·seed 1개의 관측이며
+   통계적 동등성을 검정하지 않았다.
+3. **"LSTM 포화가 원인" → 관측과 가설을 분리.** 진단 v2 로 gate 를 직접 쟀다(아래). **관측:** 학습된 T·F 의 열화상 LSTM 1층 gate pre-activation
+   |평균| 45–69, 91–99 % 가 |pre| > 6. 초기 모델은 0.06, 0 %. **가설:** fc_thermal 출력 증가 → 1층 gate 포화 → 표현 퇴화가 학습 실패의
+   원인이라는 인과는 **유력한 가설**이다. 학습 궤적(epoch 별 gate·gradient)을 보지 않았으므로 원인으로 확정하지 않는다.
+4. **"logit 차이 정확히 0" → 반올림 없이 다시 쟀다.** v1 스크립트는 `round(float(v), 5)` 로 출력했으므로 그 0 은 근거가 아니었다.
+   v2 는 반올림 전 값과 명시적 equality 를 기록한다.
+
+## 진단 v2 (읽기 전용, 서버 CPU, eval + no_grad, 학습 없음)
+
+```
+입력    dev 8 base × (Normal, thermal-only s4) — base_window_id·device·event_id·event_instance_id 를 결과 JSON 에 기록
+pin     cache manifest file 725acd33… / split c0ec8ac4… / events 3d8991a9… / anomaly_detectors.py 4cafae61…
+        checkpoint file SHA 는 결과 JSON 의 models.*.checkpoint_sha256
+결과    /home/keti/agent-collaboration/factory-safety/claude_bin_diag2_20261001/ (claude_bin_diag2_result.json, 스크립트 v1·v2, SHA256SUMS)
+
+                    fc |f| 평균   z 예제 간 std   쌍 logit max|diff|   쌍 logit 정확히 같음   쌍 z 정확히 같음
+T 초기              0.036         7.7e-4          2.4e-4               0/8                    0/8
+T-BIN epoch 15      55.4          3.2e-9          0.0                  8/8                    3/8
+F-BIN epoch 15      71.6          3.6e-8          0.0                  8/8                    1/8
+F-BIN 열화상 z 를 다른 예제 것으로 바꿈: logit 정확히 같음(torch.equal True). 0 으로 바꿈: max|Δlogit| 1.45e-4
+
+LSTM gate pre-activation |평균| (포화 비율 |pre|>6)   i / f / g / o
+T 초기   1층   0.06 / 0.06 / 0.07 / 0.06  (0 %)
+T-BIN    1층  50.4 / 44.7 / 52.8 / 52.8  (95 / 91 / 96 / 98 %)   2·3층 0.5–1.6 (0 %)
+F-BIN    1층  60.5 / 54.6 / 68.6 / 67.3  (95 / 96 / 97 / 99 %)   2·3층 0.0–1.3 (0 %)
+```
+
+해석: 쌍의 z 가 비트 단위로 항상 같은 것은 아니지만(1e-8 수준 차이), 그 차이가 logit 까지 전달되지 않아 logit 은 8쌍 모두 float32 로 정확히 같다.
+gate 수치는 LSTM 가중치로 내가 다시 계산한 값이다. 마지막 층 출력 std(3.8e-9)가 모델의 z std(3.2e-9)와 같은 크기여서 재계산이 맞다고 본다.
+다만 PyTorch 내부 출력과 원소 단위로 대조하지는 않았다.
+
+범위: dev 16 표본, checkpoint 1시점. 학습 궤적·다른 seed·fold 는 보지 않았다.
+
+---
+
+# 갱신 2026-10-01 (42) — P1c 초안(BIN 공통 LR 1e-3 → 1e-4) 과학 설계 검토
+
+대상: `exp004_p1b_audit40_20261001T085232Z/p1c-lr1e4-draft.json` (payload 292ec8cd…). 단일 변경·원 데이터·원 namespace 유지, dev sweep 없음,
+fit probe 로 기전을 본다는 골격에 동의한다. 아래는 실행 전에 고쳐야 할 것들이다.
+
+## A. 가장 큰 허점 — 붕괴는 epoch 1 안에서 끝났다. epoch 0·1·5·15·30 probe 로는 시작 시점을 볼 수 없다
+
+```
+T-BIN epoch 1   train 0.6936152   dev 0.693147198   (ln 2 = 0.693147181, 차이 1.8e-8)
+초기 logit ≈ −0.077 이면 balanced BCE 0.693888 이다 → epoch 1 이 끝났을 때 이미 상수 예측기
+비교: S-BIN epoch 1 dev 0.5187, F-BIN 0.4809
+```
+
+epoch 1 끝의 probe 는 이미 무너진 상태를 한 번 더 찍을 뿐이다. **epoch 1 안의 step 단위 probe** 가 필요하다.
+제안: step 0, 1, 2, 5, 10, 20, 50, 100, 261(=epoch 1 끝) + 기존 epoch 5·15·30. 1e-4 에서 시작이 늦어지면 epoch 2–3 도 촘촘히 넣는다.
+
+## B. LR 만으로는 늦출 뿐일 수 있다 — 사전 예측을 등록하자
+
+Adam 의 갱신 크기는 gradient 크기와 거의 무관하게 parameter 당 약 lr 이다. `fc_thermal` 은 fan-in 이 19,200(64×15×20)이라,
+같은 부호로 움직이는 입력이 많으면 pre-activation 변화가 대략 `lr × Σ|x_i|` 로 커진다. 1e-4 는 이 속도를 10배 줄일 뿐이다.
+7,830 step 이면 누적 이동 상한이 여전히 크다. 그래서 **"1e-4 는 시작을 수백 step 늦출 뿐 같은 상태로 간다"** 는 결과도 충분히 가능하다.
+그 경우 LR 실험의 정보는 "LR 만으로는 부족하다" 가 된다. 이것도 유용하지만, 그렇다면 **판정 규칙을 실행 전에 적어 두자.**
+
+```
+fit probe 만으로 판정 (dev 를 보지 않음)
+  건강     epoch 30 에서 열화상 LSTM 1층 |pre|>6 비율 < 50 % 그리고 열화상 z probe 간 std > 1e-4
+  지연     건강 기준을 epoch 1–5 에는 만족하나 30 에서 깨짐
+  실패     epoch 1 안에서 원 붕괴와 같은 상태
+지연·실패 → LR 단독은 부족하다고 기록하고, 다음 단계는 구조 변경(fc_thermal 출력 정규화, CNN 뒤 pooling 등)을 별도 사전 등록한다
+```
+
+수치 기준(50 %, 1e-4)은 예시다. 원 실행의 초기·붕괴 값(0 % vs 91–99 %, 7.7e-4 vs 3e-9)을 근거로 실행 전에 확정하면 된다.
+
+## C. 본 pilot 전에 싼 사전 실험을 권한다
+
+T-BIN 을 **1 epoch(261 step)만**, LR 1e-3 과 1e-4 로 각각 돌리며 step 단위 probe 를 찍는다. 원 실행의 epoch 시간 기준으로 각 약 2–3 분이다.
+fit probe 만 쓰고 dev·checkpoint 선택은 하지 않는다. 이것으로 (i) 1e-3 붕괴가 몇 step 에서 시작하는지 재현하고, (ii) 1e-4 가 그 시작을 없애는지
+늦추는지를 본 뒤 3-run pilot 의 probe 시점과 판정 기준을 확정할 수 있다. 1e-3 재현은 원 실행 결과와의 결정론 확인도 겸한다.
+
+## D. 측정이 학습을 바꾸지 않게
+
+- probe forward 는 `eval()` + `no_grad()`, 끝나면 `train()` 복귀. dropout RNG 를 소비하지 않는지 테스트로 확인
+  (probe 를 켠 run 과 끈 run 의 step 수십 개 state hash 가 같아야 한다).
+- **gradient norm 은 probe 용 별도 backward 로 재지 말 것.** 실제 학습 step 의 `backward()` 직후, `optimizer.step()` 전에
+  parameter group 별(fc_thermal, thermal LSTM 층별, head) norm 을 읽는다. 별도 backward 는 grad 를 오염시키거나 비용을 왜곡한다.
+- gate 는 내 v2 방식(가중치로 재계산)을 쓰려면, 초안대로 **PyTorch LSTM 출력과 원소 단위 parity** 를 먼저 확인하자. 아니면 hook 으로
+  각 층 입력을 받아 gate pre-activation 을 계산하고, 마지막 층 출력이 모델 z 와 같은지 함께 단언한다.
+
+## E. 비교 범위
+
+- **AE 는 1e-3 그대로다.** §3.3(7) 은 규약 변경을 "모든 비교군" 에 적용하라고 한다. AE 와 BIN 을 같은 지표로 비교하지 않으므로 BIN 끼리만
+  바꾸는 것은 방어 가능하다. 다만 이 비대칭을 계획 버전에 명시하자(P1a T-AE·P1b AE 는 1e-3, P1c BIN 은 1e-4).
+- **S-BIN 이 1e-4 에서 덜 학습될 수 있다.** F−S 는 같은 LR 끼리만 비교하자. 원 1e-3 S-BIN 과 1e-4 F-BIN 을 섞어 비교하지 말 것.
+- probe 32쌍(장비 16 × sensor-only s4·thermal-only s4)은 기전 진단에 맞다. S 에는 thermal-only 가, T 에는 sensor-only 가 불가시라는 점을
+  판정 지표 계산에서 나눠 보고하자. coupled 를 넣지 않는 이유도 한 줄 적어 두면 좋다.
+- 실행 순서 F→T→S 를 design seed 로 정한 것은 좋다. 순서가 cost 에만 영향을 주고 결과에는 영향을 주지 않는다는 것(결정론)을 C 의 재현으로 확인할 수 있다.
+
+## F. 결론
+
+LR 단일 변경으로 시작하는 것은 타당하다. 다만 **A(step 단위 onset probe)와 B(사전 판정 규칙)가 없으면 결과를 해석할 수 없다.**
+C 의 1-epoch 사전 실험이 가장 싸고 정보가 크다. 실행 범위는 이 세션 사용자 확인 대상이다.
+
+---
+
+# 갱신 2026-10-01 (43) — `anomaly_bin_diagnostics` 구현 (Claude 소유, Codex 요청)
+
+```
+src/models/anomaly_bin_diagnostics.py     c0517ec1b497478e8a73375933e843aab7fe799fec84d74cd7bda6af736b7b33   262행
+tests/test_anomaly_bin_diagnostics.py     8defe0fa154cd25028f43054a70e3565bdbdc993df07a049d216f3436c6b3f63
+미커밋. 기존 anomaly_detectors·P1b runner·YAML 수정 없음. 의존: torch + 표준 라이브러리만(테스트로 고정).
+```
+
+## API
+
+`thermal_lstm_diagnostics(model, thermal, *, rtol=1e-5, atol=1e-6) -> dict` — **입력 `(N, 30, 120, 160)` float32**
+(Codex 의 정정대로. `(N,30,1,…)` 나 `(N,30,60,80)` 은 거부). model 은 objective `BIN`, arm `T` 또는 `F`.
+
+```
+schema, arm, examples, ticks, saturation_abs_pre_activation (= 6.0)
+fc_thermal          {count, abs_sum, abs_mean, abs_max}
+thermal_z           {count, sum[128], sum_sq[128]}       예제 간 std 를 정확히 합산하기 위한 합
+thermal_z_values    encoder 가 실제로 낸 z, 중첩 list (N × 128)
+layers[l].gates[g]  g ∈ input/forget/cell/output: {total_count, abs_sum, abs_mean, abs_max, abs_gt6_count}
+layers[l].cell, layers[l].last_hidden   (같은 합산 형식)
+parity_sequence        수동 재귀 vs nn.LSTM 의 마지막 층 전체 출력 시퀀스, 원소 단위
+parity_encoder_output  수동 재귀의 마지막 step vs encoder 의 z
+  둘 다 {max_abs_error, max_rel_error, rtol, atol, count, violations, passed}   passed = 모든 원소 |a−b| ≤ atol + rtol·|b|
+```
+
+- `combine_diagnostics(parts)` 는 microbatch 결과를 **정확히** 합친다(개수·합·최대·포화 개수·parity 위반 수, z 값은 이어 붙임).
+  arm·tick·임계가 다르면 거부.
+- `summarize(record)` 는 평균·포화 비율·예제 간 std(모집단 std, 합에서 계산)를 낸다. `parity_passed` 는 두 parity 의 AND.
+- `lstm_recurrence(lstm, x)` 는 일반 `nn.LSTM`(batch_first, 단방향, bias, projection 없음)용 재귀 계산이다. 다른 설정은 거부.
+
+보장: `eval()` + `no_grad()`. 모든 `module.training` 플래그와 CPU·CUDA RNG 상태를 **실패해도** 되돌린다. backward 없음,
+기존 `.grad` 객체와 값 불변(테스트), 새 grad 생성 없음. 입력·parameter·중간값이 비유한이면 `ValueError`.
+parity 가 실패해도 예외가 아니라 `passed=false` 로 기록한다. 중단 여부는 observer(Codex) 가 정한다.
+
+## 검증
+
+```
+서버 scratch /home/keti/scratch/exp004_bindiag_20261001T093435Z (torch 2.6.0, CPU)   16 tests OK
+Jetson   16 중 15 skip(torch 필요), tests/ 전체 OK
+변이 11개 전부 검출: bias_hh 누락, gate 순서 뒤바뀜, parity 항상 통과, encoder parity 를 자기 자신과 비교, training 플래그 미복원,
+  입력·parameter 비유한 검사 삭제, 포화 >= 로 바꿈, 결합 시 뒷부분 포화 개수 누락, z 를 수동값으로 대체, eval 미설정
+```
+
+fixture 에는 다층·짧은 시계열(층 1–3, step 1–5) parity 통과, **weight 하나를 0.05 바꾼 복사본의 parity 실패**,
+출력을 1e-3 밀어낸 `nn.LSTM` 하위 클래스를 끼웠을 때 두 parity 모두 실패, fc_thermal 가중치 ×2000 에서 1층 포화 > 50 % 가 있다.
+
+**한계 하나:** eval 관찰은 원래 RNG 를 소비하지 않으므로 RNG 복원 코드를 지워도 결과가 같다. 복원은 방어용이며 테스트가 이를 구분하지 못한다.
+dropout 이 있는 train 모드로 관찰하는 경로는 없다.
+
+## observer 쪽에 한 가지
+
+`thermal_z_values` 는 N×128 이라 probe 64개 × 시점 수만큼 쌓인다. 기록 크기가 문제가 되면 probe 시점마다 따로 저장하자.
+쌍 logit 은 모델 head 로 observer 가 계산하고, 그 값도 반올림 없이 기록해 달라((41)-4 의 교훈).
+
+## (43) 보충 — Codex 코드 검토 3건 반영
+
+```
+src/models/anomaly_bin_diagnostics.py   bb773b54a958ace8817c0b3186036a52a6161ca33e671c07033892e12a33e45d
+tests/test_anomaly_bin_diagnostics.py   2fc0dcd1ab84991e6c1740892a458243c927c0433d557219488ab06449a0c502   (18 tests)
+```
+
+1. **CPU 관찰이 CUDA 를 초기화하던 문제 — 수정.** `torch.cuda.get_rng_state_all()` 이 lazy 초기화를 일으킨다. 이제 `torch.cuda.is_initialized()` 일 때만
+   CUDA RNG 를 저장·복원한다. 새 테스트는 **새 인터프리터에서** 호출 전후 `is_initialized()` 가 둘 다 False 인지 본다.
+   옛 코드(`is_available()`)로 되돌리면 GPU 가 보이는 서버에서 이 테스트가 실패함을 확인했다.
+   단 `CUDA_VISIBLE_DEVICES=` 로 GPU 를 가린 실행에서는 CUDA 자체가 없어 이 테스트가 둘을 구분하지 못한다 — **GPU 가 보이는 실행에서 돌려야 의미가 있다.**
+2. **rtol·atol 검증 — 추가.** 유한한 0 이상 수만 받는다(inf, nan, 음수, bool, 문자열 거부). rtol=atol=0 은 허용(정확 일치 요구).
+3. **docstring 첫 문장 — 범위를 좁혔다.** "dev 8 base, 선택 checkpoint 1시점, fold·seed 1개, 학습 궤적 미검사" 로 (41) 과 맞췄다.
+
+검증: 서버 scratch 에서 GPU 가 보이는 실행·CPU 전용 실행 모두 18 OK. Jetson 18 중 17 skip, 1 OK.
+(변이 11개 결과는 이전 판 기준이다. 이번 변경은 RNG 조건·tolerance 검사·docstring 뿐이라 재실행하지 않았다.)
+
+---
+
+# 갱신 2026-10-01 (44) — GPU update invariance 실패의 원인: 내 모듈의 CUDA RNG "복원" 자체였다. 수정·검증 완료
+
+Codex fixture `exp004_p1c_onset42_20261001T093652Z_fixtures_r1` 의 실패(step 1 같고 step 2 부터 다름)는 **내 결함**이다.
+`_restore_rng` 가 관찰 뒤 CUDA RNG 를 무조건 `set_rng_state_all()` 로 다시 썼다. 값이 같아도 이 호출은 cuDNN RNN dropout 상태를
+다음 train forward 에서 재초기화하게 만든다. 상태를 지키려던 방어 코드가 학습을 바꿨다.
+Codex 가 PyTorch 2.6.0 소스에서 같은 기제를 독립적으로 찾았다(`CUDAGeneratorImpl::set_state` → `set_current_seed` 가
+`no_reset_rnn_state_` 를 지움, `cudnn/RNN.cpp` 가 다음 train 호출에서 dropout buffer 를 새 seed 로 초기화).
+
+## 실측 (서버 GPU 1, 합성 3층 LSTM dropout 0.1, 3 step, 실데이터 없음 — `/home/keti/scratch/claude_cudnn_rng_probe.py`)
+
+```
+torch 2.6.0+cu124, cuDNN 90100
+step 사이 동작                         step 1          step 2          step 3
+없음 (control, 2회)                     0c44699c        bcc30f11        f5f9c398      재현됨
+eval forward 만                          0c44699c        bcc30f11        f5f9c398      같음
+CPU set_rng_state(같은 값)               0c44699c        bcc30f11        f5f9c398      같음
+CUDA set_rng_state_all(같은 값)          0c44699c        df1e2ba2        5ec2883a      달라짐
+eval forward + CUDA set_rng_state_all    0c44699c        df1e2ba2        5ec2883a      달라짐  ← 내 모듈이 하던 것
+```
+
+eval 관찰 자체는 무해하고, CUDA RNG 쓰기가 원인이다.
+
+## 수정
+
+```
+src/models/anomaly_bin_diagnostics.py   e25f625ed5073cd87b896782d1f8da6b88379782cf7f7ef2cdfb1e0288be7cf9
+tests/test_anomaly_bin_diagnostics.py   39a47d99d0dee21b15d593142ff620b97d184cc18fb529e91a2d0d054f68e053   (21 tests)
+```
+
+- RNG 는 **비교만 하고 절대 다시 쓰지 않는다**(CPU 도 마찬가지 — 일관성과 단순함을 위해).
+- 관찰 전후 RNG 가 다르면 = 관찰이 RNG 를 소비했다면 **`RuntimeError` 로 실패**한다. 이때도 되돌리지 않는다. CUDA 쪽을 되돌리면
+  그 자체가 dropout 을 흔들기 때문이다. 관찰 자체가 예외를 낸 경우에는 그 예외가 우선한다.
+- Codex 안("값이 바뀐 경우에만 setter")과 다른 점: 나는 바뀐 경우에도 setter 를 쓰지 않고 실패시킨다. 정상 eval 관찰은 RNG 를 소비하지 않으므로
+  두 안은 정상 경로에서 같고, 비정상 경로에서 내 안은 조용히 계속 학습할 여지를 남기지 않는다.
+
+## 테스트와 검증
+
+```
+새 테스트  RNG setter 를 mock 으로 막아도 관찰이 성공하고 setter 호출 0회
+           CPU RNG 를 소비하는 관찰은 "consumed CPU RNG" 로 실패, training 플래그는 복원
+           GPU: 실제 T-BIN 모델 3 step 학습 — control 2회 재현 확인 후, step 사이 관찰을 넣은 run 의 parameter hash 가 control 과 3 step 모두 같음
+서버       GPU 보이는 실행 21 OK, CPU 전용 실행 20 OK + GPU 테스트 1 skip
+Jetson     21 중 20 skip
+변이       무조건 복원(옛 코드)으로 되돌리면 GPU invariance 테스트와 setter 금지 테스트 둘 다 FAIL
+```
+
+Codex observer 쪽도 같은 원칙(정상 경로에서 RNG setter 호출 없음)을 적용하면 fixture 가 닫힐 것으로 본다.
+
+## (44) 보충 — Codex rng-forensics(6조건) 확인. 내 쪽은 이미 "정상 경로 setter 0회" 이다. 코드 변경 없음
+
+Codex 의 6조건 GPU 대조(`exp004_p1c_onset42_20261001T093652Z/rng-forensics.json`, payload 34a76d57…)가 (44) 실측과 같은 결론이다.
+요청("바뀐 장치에만 setter")은 현재 `e25f625e…` 가 이미 만족한다 — 이 파일에는 `set_rng_state` 호출이 **하나도 없다**(`_check_rng_unchanged` 는 비교만 한다).
+
+차이는 **RNG 가 실제로 바뀐 비정상 경로**뿐이다:
+```
+Codex observer   바뀐 장치의 RNG 를 복구한 뒤 오류로 중단
+Claude 모듈      복구하지 않고 오류로 중단 (RuntimeError "consumed CPU/CUDA RNG")
+```
+두 경우 모두 실행이 멈추므로 학습 결과에는 차이가 없다. 내 쪽에서 복구를 하지 않는 이유는, 모듈이 호출자에게 예외를 올리는 시점에
+CUDA setter 를 부르면 호출자가 예외를 잡고 계속할 경우 dropout 상태가 이미 흔들려 있기 때문이다. 복구 여부는 중단을 결정하는 observer 가 정하는 편이 맞다.
+이 판단에 이견이 있으면 알려 달라. 최종 source SHA 로 fixture 44개를 다시 검증할 때 모듈 SHA 는 `e25f625e…` 다.
+
+---
+
+# 갱신 2026-10-01 (45) — P1c 첫 epoch 판정 경계 검토 (onset-plan-candidate-final, payload 47d34177…)
+
+서버 52 검사 PASS, 관찰 on/off 의 parameter hash·RNG 일치, 보존된 P1b first-epoch 인공 GPU state 와의 일치를 확인했다. 설계 골격(LR 2개 × 261 step,
+fit 32쌍 고정 probe, dev 미사용, step 0/1/2/5/10/20/50/100/261, design seed 로 순서 고정)에 동의한다. 경계에 대해 세 가지 이견이 있다.
+
+기준값 — 이미 관측한 것 (dev 8 base, 선택 checkpoint, (41) v2):
+```
+                         layer0 gate 포화율 i / f / g / o     z 예제 간 std    thermal-only 쌍 logit gap
+T 초기                   0 / 0 / 0 / 0 %                      7.7e-4           2.4e-4
+T-BIN 붕괴               95 / 91 / 96 / 98 %                  3.2e-9           0 (정확히 같음)
+F-BIN 붕괴               95 / 96 / 97 / 99 %                  3.6e-8           0
+```
+
+## A. "healthy-like" 는 학습을 측정하지 않는다 — 초기 모델이 이미 통과한다
+
+healthy-like = 모든 gate < 0.5 + std > 1e-4 + gap > 1e-6. 그런데 **학습 전 초기 모델이 이 세 조건을 모두 만족한다**(0 %, 7.7e-4, 2.4e-4).
+따라서 step 261 에서 "healthy-like" 가 나와도 "붕괴하지 않았다" 만 말할 뿐, "열화상으로 판별을 배웠다" 는 말하지 못한다.
+제안: 이름을 **"not-collapsed"** 로 바꾸거나, 학습 신호를 하나 더해 둘을 나누자 — 예를 들어 thermal-only 쌍 gap 이 초기값(step 0)의 k배 이상으로
+**커졌는지**, 또는 fit thermal-only probe 의 BCE 가 step 0 보다 내려갔는지. 기준은 step 0 의 실측값에 상대적으로 정하면 dev 를 보지 않고도 정의된다.
+
+## B. collapse 의 "네 gate 모두 ≥ 0.9" 는 관측된 붕괴를 간신히 잡는다
+
+T-BIN 붕괴의 forget gate 가 0.908 이었다. 경계 0.9 와 차이가 0.008 이다. 같은 붕괴가 다른 시점·다른 probe 집합에서 0.89 로 찍히면 intermediate 가 된다.
+반대로 **forget gate 포화는 정상 LSTM 에서도 흔하다**(기억 유지를 위해 f→1). 그래서 healthy 쪽의 "모든 gate < 0.5" 도 학습된 정상 모델을
+intermediate 로 밀어낼 수 있다.
+제안: gate 기준은 판정에서 빼고 **기록만** 하자. 판정은 결과 쪽 두 지표(z std, 쌍 gap)로 하고, gate 는 기전 설명에 쓴다.
+z std ≤ 1e-6 과 gap ≤ 1e-6 은 붕괴값과 30–300배, 초기값과 수백배 떨어져 있어 경계로 안정적이다. gate 를 판정에 꼭 넣는다면 "네 gate 평균 ≥ 0.9" 처럼
+한 gate 의 경계 근처 값에 덜 민감한 형태로.
+
+## C. 시작 시점 — snapshot 사이를 메울 값싼 신호
+
+step 50·100·261 사이가 넓다. 1e-3 에서 붕괴가 그 사이에 일어나면 구간만 안다. 추가 계산 없이 얻을 수 있는 **매 step 의 train BCE 와
+fc_thermal 출력의 |평균|·최대(이미 forward 에서 나오는 값)** 를 step 마다 기록하면, probe snapshot 은 지금대로 두고도 시작 시점을 몇 step 단위로 좁힐 수 있다.
+관찰이 학습을 바꾸지 않는다는 보장은 forward 값만 읽으므로 유지된다(별도 forward·backward·RNG 없음).
+
+## D. 재현 gate 하나
+
+1e-3 run 은 P1b T-BIN 의 epoch 1 과 같은 seed·순서·데이터다. 실행 전 gate 로 **step 261 의 train loss 가 P1b epoch 1 의 0.6936152 와 같고,
+fit 순서 manifest 가 같은지** 를 단언하자. 같으면 실데이터에서 관찰이 학습을 바꾸지 않았다는 직접 증거이고, 다르면 진단 결과를 P1b 해석에 연결할 수 없다.
+
+## E. 범위 문구 — 동의
+
+"261 까지 미관측은 7,830 step 안정성의 증명이 아니다", "dev 를 이미 보고 생긴 탐색적 경계이며 경보·early stop 이 아니다" 에 동의한다.
+판정 결과는 snapshot 별 궤적으로 내고, step 261 의 하나의 라벨로 요약하지 말자.
+
+실행 범위는 이 세션 사용자의 확인 대상이다.
+
+---
+
+# 갱신 2026-10-01 (46) — P1c R4 후보(payload 37e58409…) 검토: 이견 없음, 주석 하나
+
+(45) A–E 반영을 확인했다. 판정은 z std 와 쌍 gap 만 쓰고, 초기 모델도 통과할 수 있는 쪽은 `responsive_at_probe` 로 이름을 바꿨고, gate 는 기록으로만 남겼다.
+fixed probe BCE 와 step 0 대비 변화를 연속값으로 남기는 것, 학습 forward 의 fc_thermal 을 hook 으로만 읽는 것, 반올림하지 않은 train loss 로
+원 T-BIN epoch 1 과 대조하는 gate 와 그 범위 문구 모두 동의한다. **과학적 이견은 없다.**
+
+주석 하나 — 재현 gate 는 **같은 장치·같은 소프트웨어**에서만 정확 일치를 기대할 수 있다. 원 T-BIN 은 서버 GPU 0, torch 2.6.0+cu124, cuDNN 90100,
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` 로 돌았다. LR 1e-3 진단도 같은 GPU 번호와 같은 환경으로 돌리고, 결과 기록에 driver·cuDNN 버전과 장치 번호를 남기자.
+다른 GPU 에서 불일치가 나면 그것은 관찰 결함이 아니라 장치 차이일 수 있다(gate 가 멈추는 것은 맞지만 원인 해석이 달라진다).
+
+실행 범위는 이 세션 사용자의 확인 대상이다.
+
+## (46) 정정 — "원 T-BIN 은 cuDNN 90100 으로 돌았다" 는 기록이 아니라 추정이다
+
+cuDNN 90100 은 **오늘(2026-10-01) 같은 venv 에서 내 RNG probe(`claude_cudnn_rng_probe.py`) 를 돌릴 때 측정한 값**이다.
+원 T-BIN 의 provenance 에는 cuDNN·driver·GPU UUID 가 없다(Codex 확인). 같은 venv·같은 서버라 같았을 가능성이 높지만,
+**원 학습 당시 값으로 기록하지 말자.** runtime identity gate 의 cuDNN pin 도 driver·UUID 와 마찬가지로 "현재 환경의 사전 기준" 으로 다뤄 달라.
+
+---
+
+# 갱신 2026-10-01 (47) — P1c LR 1e-3 진단 결과에 대한 관찰 (Codex 실행, 읽기 전용 검토)
+
+결과: `exp004_p1c_onset42_20261001T093652Z/diagnostic-lr1e3/` (result payload c2d53225…). 원 T-BIN epoch 1 재현 gate 정확 통과
+(train loss 0.6936151724437187, initial state, fit order). 고정 fit probe: step 0–100 `responsive_at_probe`, 261 `collapse_like` → 시작 구간 **(100, 261]**.
+Codex 의 범위 문구에 동의한다.
+
+## 보조 trace(steps.jsonl) 에서 보이는 두 가지 — 고정 probe 측정이 아니며 batch 가 매 step 바뀐다
+
+**1. fc_thermal 출력은 첫 갱신부터 급증한다.**
+```
+step         1      2      5      10     20     50     75     100    130–261
+|f| 평균    0.044  0.53   2.19   3.30   4.11   12.4   35.9   46.9   50–86 (정체)
+|f| 최대    0.32   1.30   9.6    11.7   20.4   103    199    535    300–1,790
+```
+첫 갱신 한 번에 12배가 됐다. Adam 의 갱신 크기가 parameter 당 약 lr 이고 fc_thermal 의 fan-in 이 19,200 이라는 (42) B 의 설명과 맞는다.
+고정 probe 가 step 100 까지 `responsive` 였다는 것은, 출력이 커지는 동안에도 한동안 입력 차이가 logit 까지 전달됐다는 뜻이다.
+
+**2. 아래층으로 가는 gradient 가 step 125–130 사이에 약 100배 줄고 회복하지 않는다.**
+```
+gradient L2      step 100    105      110      115      120      125      130      150      200      261
+fc_thermal       1.6e-3     6.3e-4   2.6e-3   3.4e-4   4.1e-4   2.1e-4   2.1e-6   1.8e-6   1.5e-7   1.9e-7
+thermal LSTM 0   2.1e-2     7.8e-3   2.7e-2   3.8e-3   5.5e-3   2.7e-3   2.9e-5   2.4e-5   1.9e-6   2.7e-6
+thermal LSTM 1   2.8e-2     2.2e-2   2.9e-2   2.9e-2   2.9e-2   3.4e-2   3.4e-2   4.9e-2   1.3e-2   9.0e-3
+head             1.9e-2     1.3e-2   3.1e-2   3.1e-2   2.0e-2   1.9e-2   2.5e-2   3.2e-2   2.4e-2   1.7e-2
+```
+LSTM 2·3층과 head 는 같은 크기의 gradient 를 계속 받는데, **1층과 그 아래(fc_thermal, CNN)만 gradient 가 끊긴다.** 1층 gate 포화로 gradient 가 막혔다는
+가설((41)-3)과 일치하는 모습이다. 이 trace 는 학습 batch 에 따라 달라지므로 고정 probe 의 시작 구간을 대신하지 않지만, **gradient 차단이 step 125–130 근처에서
+일어났다**는 것은 같은 gradient 계측 안에서의 관찰로 적어 둘 만하다. train loss 는 이 구간 전후로 ln 2 근처(0.68–0.73)에 머문다.
+
+## LR 1e-4 결과를 볼 때 확인할 것
+
+- fc_thermal |f| 의 증가 속도가 첫 몇 step 에서 약 10배 느려지는가(갱신 크기가 lr 에 비례한다는 설명의 직접 검증).
+- 1층 gradient 차단이 261 step 안에 오는가, 오지 않는가. 오지 않아도 7,830 step 안정성은 아니다(Codex 문구 유지).
+- 고정 probe 의 thermal-only BCE 가 step 0 보다 내려가는가 — `responsive` 이면서 BCE 가 그대로면 "붕괴는 늦췄지만 학습은 안 했다" 로 읽어야 한다.
+
+---
+
+# 갱신 2026-10-01 (48) — 두 LR 진단의 같은 step 비교와 다음 최소 설계
+
+결과 패킷 `two-lr-audit-r5.json`(payload e6d5e6cb…, 386 audit PASS). 두 run 은 초기 state·fit order·실제 example stream 이 같아 **같은 step 끼리 비교할 수 있다.**
+아래는 학습 batch trace(보조, 고정 probe 아님)와 고정 probe 결과를 함께 본 것이다.
+
+```
+step   train |f| 평균 1e-3 / 1e-4   배율    thermal LSTM0 grad L2 1e-3 / 1e-4   fc grad 1e-3 / 1e-4
+  1        0.044 / 0.044            1.0        1.25e-3 / 1.25e-3                6.5e-3 / 6.5e-3
+  2        0.53  / 0.061            8.8        4.4e-3  / 1.5e-3                 3.7e-3 / 5.2e-3
+  5        2.19  / 0.19            11.4        1.1e-2  / 2.1e-3                 3.8e-3 / 5.1e-3
+ 10        3.30  / 0.33            10.0        1.4e-2  / 3.7e-3                 2.8e-3 / 5.0e-3
+ 20        4.11  / 0.56             7.3        1.2e-2  / 4.6e-3                 2.0e-3 / 4.7e-3
+ 50       12.4   / 0.49            25          3.1e-2  / 4.6e-3                 4.9e-3 / 4.4e-3
+100       46.9   / 0.46           101          2.1e-2  / 4.8e-3                 1.6e-3 / 4.5e-3
+130       86.1   / 0.70           123          2.9e-5  / 5.4e-3                 2.1e-6 / 4.7e-3
+261       50.7   / 0.29           176          2.7e-6  / 4.2e-3                 1.9e-7 / 2.8e-3
+train loss 평균 (261 step)   1e-3 0.693615 / 1e-4 0.693041   (ln 2 = 0.693147)
+```
+
+## A. 기전 해석 — (47) 을 고친다
+
+1. **첫 몇 step 의 배율 ≈ 10 은 lr 비례 갱신과 맞는다.** (47) 의 "Adam 갱신 × fan-in" 설명이 이 구간에서 직접 확인된다.
+2. **그러나 1e-4 는 "10배 느리게 같은 길" 이 아니다.** 1e-4 의 |f| 는 0.3–0.7 에서 머문다. 1e-3 은 step 20–100 사이에 오히려 **가속**한다(배율 7 → 101).
+   1e-3 쪽에만 커질수록 더 커지는 되먹임이 있는 것으로 보인다. (42) B 에서 나는 "1e-4 는 늦출 뿐일 수 있다" 고 예측했는데, 261 step 안에서는 그 예측이 맞지 않았다.
+   다만 7,830 step 에서도 그런지는 모른다.
+3. **1e-4 에서 1층 gradient 는 261 step 내내 4–5e-3 으로 유지된다.** 1e-3 의 감소 구간(step 125–130 의 보조 관찰)에 해당하는 일이 없다.
+4. **1e-4 는 epoch 1 에서 거의 배우지 않았다.** train loss 평균 0.69304(ln 2 와 1e-4 차이), 고정 thermal-only probe BCE 변화 −0.00255.
+   쌍 방향은 16/16 이 맞지만 평균 signed gap 0.0088 이다. Codex 가 구분한 대로 초기 bias 감소분과 판별 신호를 나눠 보면 판별 신호는 더 작다.
+   **"붕괴를 피했다" 와 "열화상으로 판별을 배웠다" 는 아직 다른 문장이다.**
+
+## B. 다음 최소 설계 — T-BIN 하나를 LR 1e-4 로 30 epoch 끝까지
+
+3-run(S/T/F, 23,490 step) 전에 **T-BIN 1 run(7,830 step, 원 실행 기준 약 65 분)** 으로 두 질문에 먼저 답하자. T 가 30 epoch 동안 붕괴하면 S/T/F 비교는 의미가 없다.
+
+```
+조건      원 P1b T-BIN 과 같은 데이터·seed·sampler·batch·cosine(T_max 30) — LR 만 1e-4. 처음부터 다시 시작한다
+          (final-state.pt 에 Adam 상태가 없으므로 진단 run 에서 이어 학습하지 않는다 — Codex 가 짚은 대로)
+재현 gate  첫 261 step 의 train loss·fit order 가 LR 1e-4 진단 run 과 정확히 같아야 계속 (반올림 없이)
+probe     고정 fit 32쌍을 epoch 1, 2, 3, 5, 10, 15, 20, 25, 30 끝에. 매 step 의 |fc|·층별 grad 는 지금처럼
+dev       원 규약 그대로 매 epoch 가중 BCE 와 checkpoint 선택 (P1b 와 같은 방식으로 기록·비교 가능하게)
+사전 판정  (dev 를 보지 않고 fit probe 로만, 실행 전에 확정)
+          붕괴      어느 snapshot 에서든 collapse_like  → LR 단독 불충분 → 구조 변경을 따로 사전 등록, S/F 는 돌리지 않는다
+          학습 신호 30 epoch 동안 collapse 없음, 그리고 thermal-only probe BCE 가 step 0 대비 의미 있게 내려감
+                   → 같은 LR 로 S-BIN·F-BIN 을 돌려 BIN 끼리 비교
+          정체      collapse 없음, BCE 변화 미미 → "붕괴는 피했으나 학습 신호 없음" 으로 기록하고 S/F 전에 다시 협의
+          "의미 있게" 의 수치는 이번 1e-4 진단의 step 0→261 변화(−0.00255)와 1e-3 의 변화를 기준으로 실행 전에 정한다
+```
+
+이 설계는 새 코드가 거의 필요 없다. 기존 P1b 실행기에 LR 인자와 epoch 끝 probe 를 붙이면 된다. 실행은 이 세션 사용자가 확인할 대상이다.
+
+## C. 기록 하나
+
+Codex 지적대로 1e-3 붕괴의 step 261 forget gate 포화율은 **0.891** 이었다. Codex 의 처음 후보 기준("네 gate ≥ 0.9")이었다면 붕괴로 분류되지 않았다.
+(45) B 의 우려가 실제로 맞았고, 출력 지표로 판정을 바꾼 것이 일관된 분류를 지켰다.
+
+---
+
+# 갱신 2026-10-01 (49) — T-BIN 1e-4 30 epoch 초안(r48, payload 9aa0a5ed…) 검토. (48) A-4 정정 수용
+
+## A. 정정 수용 — "판별 신호가 bias 감소분보다 작다" 는 근거가 없었다
+
+Codex 의 contrast gain 분해(`contrast-gain-review48.json`, payload 67e1d80e…): 1e-4 step 261 의 총 probe BCE 감소 0.00255 중
+쌍 평균 logit 을 고정한 contrast 항 변화가 약 0.00219, 평균 logit 항 변화가 약 0.00036 이다. **내 문장이 틀렸다.** logit 수준의 대수적 분해이고
+인과 분해가 아니라는 Codex 의 범위 문구에 동의한다. (48) A-4 의 해당 문장을 이것으로 대체한다.
+
+## B. 초안에 동의하는 것
+
+- 재현 gate 를 진단 run 의 **최종 tensor SHA**(0cff5d0e…)까지 강화한 것. 원 P1b 와 달리 epoch 1 state 참조가 있어 가능하다.
+- collapse snapshot 하나로 결론 내지 않고 30 epoch 를 끝까지 돌려 **시작·지속·회복**을 구분하는 것. 내 (48) B 의 "붕괴 → 즉시 구조 변경" 보다 낫다.
+  기술적 실패만 중단 사유로 두는 것도 맞다.
+- S/F·구조 변경을 자동으로 실행하지 않는 것, 31개 시점을 실행 전에 고정한 것.
+
+## C. screening 기준(epoch 25·30 모두 contrast gain ≥ 0.02 AND thermal-only BCE ≤ ln 2 − 0.02) — 수용, 두 가지를 보탠다
+
+수치 자체는 탐색적 예산 결정 기준으로 합리적이다(첫 epoch contrast 의 약 9배, cosine 끝 구간의 두 시점 모두). 미달을 "학습 0" 으로 부르지 않는 것에 동의한다.
+
+1. **음성 대조를 같이 기록하자 — T 의 sensor-only 쌍.** T-BIN 에게 sensor-only 사건은 열화상 입력이 base 와 **byte 동일**하다. 따라서 sensor-only 쌍의
+   logit 은 정확히 같아야 하고 contrast gain 은 **정확히 0** 이어야 한다. 이 값이 0 이 아니면 데이터 경로나 observer 결함이다. 비용 없이 판정의 신뢰를 높인다.
+   (S·F 로 넓힐 때는 같은 논리로 S 의 thermal-only 쌍이 음성 대조가 된다.)
+2. **probe 는 학습에 쓰인 사건이다.** fit 32쌍의 양성 사건은 30 epoch 동안 각 3–5회 노출된다(사건 수 k=6–9 에 따라). 그래서 epoch 25·30 의 probe gain 은 **기억**과
+   **일반화된 판별**을 구분하지 못한다. 초안의 "일반화가 아니다" 문구로 충분하지만, screening 통과를 S/F 실행의 근거로 쓸 때 그 근거가 fit 기억일 수 있다는 점을
+   결정 기록에 한 줄 남기자. dev 가중 BCE 는 원 규약대로 기록되므로, 판정에 쓰지 않더라도 나란히 보고하면 기억과 일반화의 괴리가 보인다.
+
+## D. 비용 기록
+
+원 T-BIN wall 3,993.4 s(train loop 3,926.4 s)와 새 run 을 비교할 때, probe 31회와 per-step trace 의 관찰 비용을 별도 phase 로 재야 한다는 Codex 문구에 동의한다.
+GPU 를 함께 쓰는 다른 작업이 없는지도 실행 기록에 남기자(원 실행 때는 다섯 모델을 순차로 돌렸고 동시 작업은 없었다).
+
+실행 여부는 이 세션 사용자 확인 대상이다.

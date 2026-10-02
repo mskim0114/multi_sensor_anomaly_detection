@@ -1,6 +1,6 @@
 # RESEARCH STATUS
 
-최종 갱신: 2026-10-01 (EXP-004 P1b 실행기 인공 검증 반영) · 기준 HEAD `78b93b9` + 미커밋 표집기/실행기/계획/검토 · 브랜치 `feature/jetson-sensor-integration`
+최종 갱신: 2026-10-01 (EXP-004 P1c 첫 epoch LR 비교522step 완료·서버59검사 PASS) · 기준 HEAD `546de5f` + 신규 진단 코드·상태·검토 문서 변경 · 브랜치 `feature/jetson-sensor-integration`
 
 > **이 문서는 현재 단계·최우선 작업·blocker만 담는다.** 배포/환경/데이터 획득의 canonical
 > 현황은 [SERVER_WORKSTATION_HANDOFF.md](SERVER_WORKSTATION_HANDOFF.md)에 있고 여기서
@@ -40,7 +40,7 @@
 | 데이터 규모 곡선 (EXP-20260928-003) | **완료** (2026-09-28, 25 run, 결정론) | 장비 1대 F1 0.52·Severe 0.51, 4대에서 뽑기 운 소멸, 32대 0.934. 양이 다양성보다 크다. [연구노트 #24](연구노트/연구노트_24_데이터_규모_곡선.md) |
 | 채널 예산 (EXP-20260928-002) | **완료** (2026-09-28, 8 run, `5ef1833` clean, 결정론) | 현장 CT 1개 확정. CT2~4 복원 불가, 5채널 비용은 CT 위치에 따라 −2.1~−12.1 pp. [연구노트 #23](연구노트/연구노트_23_CT_한개_채널예산.md) |
 | 적응 궤적 (EXP-20260928-001) | **완료** (2026-09-28, 3 lr, `817ccb5` clean, 결정론) | 정상만 적응 시 Mild 만 무너지고 Severe recall 0.984 불변. 예산 변수는 상대 변위. [연구노트 #22](연구노트/연구노트_22_정상만_적응_weight_궤적.md) |
-| 합성 이상·모달리티 비교 (EXP-20260928-004) | **P1a 완료·복구 PASS / P1b 실행기 엔지니어링 검증 PASS** | T-AE fold0/seed42 정상 fit/dev 2,613창, 3,930 step. epoch 합 16.05분·launcher 18.08분·peak 733.23 MiB. 캐시·CLI는 `78b93b9`, 표집기는 Jetson/서버 29/29·peer (35) PASS. 별도 P1b의 실제 S/F-AE 및 S/T/F-BIN main→최종 JSON을 인공 데이터 2 epoch로 확인했다. 보강 후보 서버 50/50(skip0), Jetson 31 PASS·Torch19 skip, 인공 optimizer36 step. Claude (38) NumPy 테스트 공백 보강 확인·동작 결함0. 마지막 F1/K1/K3 변이는 서버 각50개 suite에서 모두 검출(인공108 step). 실제 데이터0·GPU 미사용. 실제 원본 캐시·P1b 비용 학습·held-out 평가는 미실행이며 구체적 실행 패킷만 준비했다. [연구노트 #25 §13.9–13.17](연구노트/연구노트_25_합성이상_모달리티_비교설계.md), [캐시 검토](REVIEW_20260929_RAW_CACHE_codex.md), [계획 manifest](../configs/experiments/synthetic_modality_plan.yaml) |
+| 합성 이상·모달리티 비교 (EXP-20260928-004) | **P1a 완료·복구 PASS / P1b 비용 실행 완료 / P1c 첫 epoch LR 진단 완료** | 기존 T-AE는 재학습하지 않았다. Claude (40)가 CT1/fold0/seed42로 실제 SSD 캐시와 S/F-AE·S/T/F-BIN 각30 epoch를 완료했다. P1b 실제 step은 AE 각3,930/BIN 각7,830, 총31,350이며 Codex의 산출물·metadata320검사 PASS다. S/F-AE 순서와 S/T/F-BIN 30 epoch 사건 stream이 각각 일치한다. T-BIN dev BCE는0.693147≈ln2다. Claude (41)의 해석 정정4건과 dev8base 진단 v2의45개 일관성 검사를 완료했다. F-BIN0.428312 vs S-BIN0.430481은 단일 fold/seed 관찰로 동등성이나 융합 이득을 확립하지 않으며 F 충돌 하한은 null(미계산)이다. 검토42–47에 따라 첫 epoch 진단 실행기·LSTM parity helper를 작성하고 GPU RNG setter 부작용을 분리·수정했다. R5 서버59검사(skip0)·metadata11검사 후 fit-only 진단 recipe를 별도 동결했다. Codex가 T-BIN LR1e-3/1e-4 각261step, 총522 추가 실데이터 update를 완료했고 두 run 산출물·독립 수치386검사 PASS다. LR1e-3은 원 첫 epoch aggregate가 정확히 재현됐고 고정 probe의 붕괴 관측 구간은(100,261]이다. LR1e-4는261까지 붕괴 기준 미관측, thermal-only fit probe BCE0.69389→0.69134다. 이는 선택된 fit probe의 학습 신호이며 장기 안정성·현장 일반화·융합 우위는 미확립이다. 원 source16·P1b 결과는 보존했다. full P0 freeze·held-out 평가·threshold 생성은 미실행이며 paper_result_eligible=false다. [연구노트 #25 §13.9–13.25](연구노트/연구노트_25_합성이상_모달리티_비교설계.md), [캐시 검토](REVIEW_20260929_RAW_CACHE_codex.md), [계획 manifest](../configs/experiments/synthetic_modality_plan.yaml) |
 | bench 데이터 (현장 아님) | **진행** (2026-09-18~) | soak #2 는 27분 만에 SCD30 I2C NACK 1회로 FAILED(정책대로, O-112). xcal 3회 관측(보정 불가 조건). [프로토콜 §15](JETSON_DATASET_PROTOCOL.md), 연구노트 #19 §7, #20 §4 |
 | G3 현장 문제 정의 | 미착수 | 로봇 소유기관 확인 필요 |
 | G4~G7 | 미착수 | — |

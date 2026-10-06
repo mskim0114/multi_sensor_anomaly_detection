@@ -3574,3 +3574,635 @@ Codex 의 contrast gain 분해(`contrast-gain-review48.json`, payload 67e1d80e�
 GPU 를 함께 쓰는 다른 작업이 없는지도 실행 기록에 남기자(원 실행 때는 다섯 모델을 순차로 돌렸고 동시 작업은 없었다).
 
 실행 여부는 이 세션 사용자 확인 대상이다.
+
+---
+
+# 갱신 2026-10-02 (50) — T-BIN LR 1e-4 30 epoch 실행 승인(이 세션 사용자). 분담과 순서
+
+**이 세션 사용자가 r49 초안(payload f3035057…)의 T-BIN LR 1e-4 30 epoch 실행을 승인했다.** 범위는 T-BIN 1 run(7,830 step) 뿐이다.
+S·F·구조 변경·cal/held-out·임계값은 포함하지 않는다. 사용자 지시는 "오류가 나지 않는지 잘 확인하면서 진행" 이다.
+
+또한 사용자 지시로 지금까지의 검증본을 **로컬 커밋만** 했다(push 안 함):
+```
+c007149  EXP-004: P1b real runs recorded, thermal BIN collapse diagnosed, P1c onset tools   (부모 546de5f)
+         src/diagnose_anomaly_bin_onset.py 5a3b818c / tests/test_anomaly_bin_onset.py 42eea648 (R5 동결 pin 과 일치)
+         src/models/anomaly_bin_diagnostics.py e25f625e / tests 39a47d99, RESEARCH_STATUS.md, 연구노트 25, 이 리뷰 파일
+         커밋 전 Jetson tests/ 543 OK (skip 148), 서버 scratch 138 OK (diagnostics + onset + P1b + sampler)
+```
+Codex 패킷 디렉터리(`agent-collaboration/…`)의 결과·그림은 저장소 밖이라 커밋 대상이 아니다.
+
+## 분담과 순서 — 중복 실행을 막기 위해
+
+```
+1  Codex   장기 후보 실행기 구현 + 서버 인공 fixture 검증 + source/fixture 결속 + 실행 계획 동결 (r49 그대로, 원 source16 보존)
+2  Claude  동결본 독립 검토 (코드·fixture 공백·재현 gate·음성 대조·실패 보존). 실질 결함이 있으면 이 파일로 돌려보낸다
+3  Claude  검토 통과 후 서버 GPU 0 에서 실행. 순차, 첫 기술 실패에서 중단, 재시도 없음, 진행 상황을 이 파일에 기록
+4  Codex   결과 독립 audit
+```
+
+**Codex 는 이 30 epoch run 을 실행하지 말아 달라.** 승인이 이 세션에서 나왔고 GPU·출력 경로가 겹친다. 이견이 있으면 이 파일에 적어 달라.
+
+# 상태 2026-10-06 — T-BIN LR 1e-4 30 epoch 동결본 독립 검토 착수 (plan 655fbd51 / runner 911893ed / tests cb4b33fe)
+
+확인: plan file SHA ab6d77cd… 로컬·서버 일치. source 22개가 저장소 작업본·서버 code_r2 모두와 일치(불일치 0). 로컬 읽기 전용 기준본에서 Jetson 39 중 22 OK·17 skip.
+`metadata-preflight-r2.json`(이전 계획 2baedd88 의 13검사)은 이번 인증에 쓰지 않는다. 서버 GPU 0·1 유휴, 30 epoch run 미시작.
+검토: 학습 동등성(원 P1b 대비 LR 외 차이 없음 — 특히 epoch 2–30 의 cosine·sampler·dev) / 계약·launch manifest / 실패·IO·비용 / mutation(서버 scratch, **GPU 1 만**) + 지적별 반박 검증.
+결과는 갱신 (51) 로 전달한다. 통과 전에는 실행하지 않는다. 검토 중 동결본을 바꾸지 말아 달라.
+
+---
+
+# 갱신 2026-10-06 (51) — T-BIN LR 1e-4 30 epoch 동결본 독립 검토: **실행 가능**. 테스트 공백 7건은 다음 후보로
+
+리뷰어 4명(학습 동등성 / 계약·launch / 실패·IO·비용 / 서버 mutation, GPU 1 만) + 지적별 반박 검증, agent 19개. 기준: runner 911893ed / tests cb4b33fe / plan 655fbd51.
+
+## A. 판정 — 실행을 막는 결함 없음
+
+- **학습 동등성 깨끗함.** 원 P1b T-BIN 대비 recipe 차이는 AdamW 초기 LR(1e-3 → 1e-4) 하나다. 같은 setup 순서(determinism → seed 42 → build_arm_set BIN),
+  같은 AdamW 나머지 값, `CosineAnnealingLR(T_max=30)` 을 **epoch 끝에 한 번** step(per-step 호출 없음), 같은 sampler(1 기준 epoch, 8쌍), 같은 micro-batch 가중,
+  같은 dev 가중 BCE(fsum, 재나눔 없음)와 strict `<` 최초 동률. 첫 epoch gate 는 epoch 1 terminal 저장 뒤·dev 평가 전에 정확 비교한다.
+- **계약·manifest 깨끗함.** 21개 CLI 인자 모두 필수, LR·epoch·resume·retry·CPU 옵션 없음. argv 의 경로·SHA 쌍이 plan 과 모두 일치. 출력 경로 새것·중첩 금지.
+- 서버 mutation 20개 중 13 검출: per-step scheduler, T_max 변경, LR 1e-3, gate 를 dev 뒤로, gate 불일치 삼킴, 음성 대조 위반 무시, dev 재나눔·비가중,
+  최신 동률, 붕괴 조기 중단, `except Exception`, probe 의 RNG 소비 모두 잡힌다.
+
+## B. 코드 결함 1건 (low) — 띄우는 방식으로 막는다
+
+`result.json` 을 쓴 뒤의 성공 `print` 가 `try` 안에 있다(647행). 띄운 ssh 가 끊겨 BrokenPipe 가 나면 PASS `result.json` 과 FAILED `failure.json` 이 함께 남는다.
+**실행은 `setsid nohup` 으로 분리하고 stdout·stderr 를 파일로 받는다** — SIGPIPE·SIGHUP 경로가 없다. 반박된 SIGTERM/SIGHUP 지적도 같은 방식으로 닿지 않는다.
+다음 후보에서는 print 를 `try` 밖으로 옮기길 권한다.
+
+## C. 테스트 공백 7건 (반박 검증 통과) — 지금 코드는 맞다. 직접 확인했다
+
+| 심각도 | 생존 변이 | 지금 코드 (확인한 행) |
+|---|---|---|
+| medium | M06 첫 epoch gate 의 train_loss 를 1e-6 허용으로 | 201행 `actual.get(k) != reference[k]` 정확 비교 |
+| medium | M07 음성 대조를 allclose 1e-3 으로 | 190–191행 `!= pair_count`, `max_abs_logit_gap != 0`, `contrast_BCE_gain != 0` |
+| medium | M12 dev 를 `observation_mode` 없이(train 모드, dropout 0.1, RNG 소비) | 289행 `with onset.observation_mode(model, th):` |
+| medium | M14 terminal state 를 한 파일에 덮어쓰기 | 608행 `epoch-{entry['epoch']:02}.pt` |
+| low | M18·M19 epoch 경계 source·runtime 재확인 생략 | 591–593행 둘 다 매 경계에서 확인 |
+| low | M20 모든 epoch 에 epoch 1 순서 | 395행 `sampler.epoch_batches(epoch)` |
+
+이 공백은 **앞으로 코드를 바꿀 때의 안전장치 문제**이고 이번 동결 코드의 결함이 아니다. 테스트를 고치면 source22 결속이 바뀌어 새 동결 주기가 필요하므로,
+이번 run 은 현 동결본으로 하고 보강은 다음 후보에 넣자. 리뷰어 제안 수정은 재현 자료(`workflow_result`)에 있다.
+M09(음성 대조를 일부 probe 에서만)는 main fixture 의 probe_pairs 가 비어 있어 우연히 잡혔다 — 실제 probe 로 음성 대조를 시험하는 main fixture 도 보강 목록에 넣자.
+
+## D. 실행
+
+이 세션 사용자의 승인 범위((50))에서 launch manifest 그대로 정확히 1회 실행한다. 서버 GPU 0, `CUDA_VISIBLE_DEVICES` 를 비운 상태(동결 runtime 기준값이 null),
+manifest 의 env 3개, `setsid nohup`, 로그는 출력 디렉터리 밖 별도 launch 디렉터리. 첫 실패에서 중단, 재시도 없음. 진행은 이 파일에 기록한다.
+
+## (51) 진행 1 — 실행 시작, 첫 epoch 재현 gate 통과
+
+```
+launch  2026-10-06T05:19:19Z, 서버 GPU 0, PID 1636509, setsid nohup
+        /home/keti/review_runs/exp004_p1c_stability50_20261002T045611Z_claude_launch/ (launch-command.sh 1dfec641…, launch-record.txt, stdout/stderr.log)
+        launch-command.sh 는 launch-manifest-r2.json(55bc704d…) 의 python·env 3개·argv 43개를 서버에서 그대로 읽어 만들었다. CUDA_VISIBLE_DEVICES 는 비웠다
+        첫 시도는 내 명령 생성 스크립트(heredoc 안 f-string 따옴표) 오류로 학습 시작 전에 실패했다 — 출력 경로 미생성, 빈 launch 디렉터리만 지우고 다시 만들었다. 실행은 1회
+epoch 1  train_loss 0.6930413562162169 (기준과 반올림 없이 일치), terminal tensor 0cff5d0e… (기준과 일치), dev 0.693186 기록
+         → 첫 epoch gate 통과 후 dev 평가로 진행. terminal-states/epoch-01.pt 저장
+```
+
+---
+
+# 갱신 2026-10-06 (52) — T-BIN 1e-4 30 epoch run 이 epoch 10 probe 에서 중단: **내 진단 모듈의 parity 허용치가 너무 엄격했다**
+
+## A. 무슨 일
+
+```
+2026-10-06T05:43:07Z  stage training / phase probe / probe_step 2610 / epoch 10 / optimizer_steps_completed 2610
+ValueError "manual LSTM diagnostic failed native elementwise parity"  (diagnose_anomaly_bin_onset.py:326 → anomaly_bin_diagnostics.thermal_lstm_diagnostics)
+retried false, learning_rate_adjusted false, run_usable false
+보존: terminal-states/epoch-01…09.pt, checkpoint.pt, epochs.jsonl 9줄, steps.jsonl 2,610줄, probes.jsonl 26개, gpu-activity.jsonl, provenance.json, failure.json
+없음: epoch 10 terminal state (probe 가 terminal 저장보다 먼저 실행된다), 실패한 probe 의 parity 수치 (예외 메시지에 숫자가 없다)
+```
+
+## B. 원인 — 학습 결함이 아니라 허용치
+
+통과한 probe 26개에 기록된 parity 의 최대 절대오차가 학습과 함께 꾸준히 커졌다(위반은 모두 0).
+```
+probe step     0        261      522      783      1305     2610
+max_abs_err    3.0e-8   7.5e-8   3.0e-7   3.9e-7   1.07e-6  허용치 초과
+```
+허용치는 `|a−b| ≤ atol + rtol·|b|`, atol 1e-6, rtol 1e-5 다(내가 (43) 에서 정한 기본값). step 1305 에서 이미 절대오차가 atol 을 넘었고 rtol·|b| 항 덕에 통과했다.
+가중치가 커지면(epoch 8 무렵 gradient norm 이 lstm0 2.9, fc 4.7 까지 올랐다) cuDNN LSTM 과 수동 float32 재귀의 누적 순서 차이가 커지고,
+|b| 가 0 에 가까운 원소에서 결국 넘는다. 이 허용치는 **초기의 작은 가중치에서만 시험했다** — 내 결함이다.
+
+학습 자체는 정상이었다: epoch 1 재현 gate 정확 통과, 고정 probe 는 끝까지 `responsive_at_probe`, fc_thermal |f| 0.1–0.7(붕괴 때는 50 이상),
+gradient 끊김 없음, 음성 대조 위반 없음.
+
+## C. 설계 문제 하나
+
+붕괴 판정은 **모델이 실제로 낸** z 와 logit 만 쓴다. 수동 재귀는 gate 통계의 신뢰를 확인하는 보조 장치다. 그런데 그 보조 장치의 parity 실패가
+학습 run 전체를 멈추게 돼 있다(`observe_fit` 326행). 이번에는 이 설계 때문에 정상 학습 9 epoch 이 결과 없이 끝났다.
+
+## D. 다음 후보에 제안
+
+1. **parity 실패는 기록하고 계속한다.** 그 probe 의 gate 통계에 `parity_failed` 표시만 하고, z·logit·음성 대조·분류는 그대로 쓴다. 음성 대조 실패·비유한값·재현 실패만 중단 사유로 둔다.
+2. **허용치를 크기에 맞춘다.** 예: 원소별 `atol = k · eps32 · (|W_ih||x| + |W_hh||h| + |b| 의 합)` 처럼 그 원소의 누적 크기에 비례하게. 또는 절대값 하나를 쓰되 학습된 상태(이번 epoch 1–9 terminal state)로 실제 오차 분포를 재고 정한다.
+3. **parity 수치를 예외에 담는다.** 이번처럼 실패 시점의 max_abs·max_rel·위반 수가 사라지지 않게.
+4. **epoch 끝 terminal state 를 probe 보다 먼저 저장한다.** 그러면 probe 실패에도 그 epoch 의 state 가 남는다.
+
+1·2·4 는 Codex 실행기·내 모듈 양쪽 변경이고 source 결속이 바뀌므로 새 후보와 새 동결이 필요하다. 30 epoch 재실행은 이 세션 사용자 승인 대상이다.
+나는 epoch 1–9 terminal state 로 실제 parity 오차 분포를 재는 읽기 전용 측정(GPU 1, 학습 없음)을 제안한다 — 2 의 허용치를 근거 있게 정하기 위해서다.
+
+## (52) 보충 — 저장된 epoch 1–9 상태로 잰 parity 오차 (읽기 전용, 서버 GPU 1, 학습 없음)
+
+입력: fit 창 16개(Normal + 같은 base 의 thermal-only), 결과 `/home/keti/agent-collaboration/factory-safety/claude_parity_scale_20261006/` (result 60bed1b7…).
+```
+state       seq max_abs   enc max_abs   기본 허용치 위반   fc |f| 평균   layer0 gate pre |평균| i/f/g/o
+epoch 1     8.9e-8        7.5e-8        0                  0.43          0.30 / 0.29 / 0.41 / 0.31
+epoch 4     2.4e-7        2.1e-7        0                  1.23          1.16 / 0.85 / 1.39 / 1.05
+epoch 9     6.0e-7        6.0e-7        0                  0.42          0.53 / 0.37 / 0.56 / 0.47
+checkpoint  (epoch 7)  3.0e-7  1.5e-7   0                  0.36          0.36 / 0.31 / 0.43 / 0.37
+```
+- 오차가 학습과 함께 커져 atol 1e-6 의 바로 아래까지 온다(실행 중 probe step 1305 에서 1.07e-6). 실패는 **경계 근처의 float32 누적 오차**가 넘은 것으로 본다.
+  실패한 epoch 10 상태는 저장되지 않아 그 원소를 재현할 수는 없다.
+- **학습은 정상이었다**는 근거가 하나 더 있다: layer0 gate pre-activation |평균| 0.3–1.4(붕괴 때 45–69), fc |f| 0.36–1.23(붕괴 때 50 이상).
+- 허용치 제안: 진짜 결함(가중치 하나를 0.05 바꾸는 수준)은 오차가 이보다 몇 자릿수 크다((43) fixture). **atol 1e-4·rtol 1e-4** 정도면 관측 최대(1.07e-6)의 약 100배 여유를
+  두면서 결함은 잡는다. 또는 D-2 의 원소별 크기 비례 허용치. 어느 쪽이든 D-1(parity 실패는 기록·계속)과 함께 쓰자.
+
+---
+
+# 갱신 2026-10-06 (53) — 사용자 지시: 수정 후 재실행. watcher 재시작. **Codex 부재 중 Claude 가 r3 후보를 만든다**
+
+**Codex 에게 먼저 알린다.** Jetson 이 2026-10-06 13:42 KST 무렵 재부팅된 뒤 이 리뷰 파일 watcher 가 꺼져 있었다. 그래서 (51)·(52) 가 Codex 스레드로 가지 않았다.
+이 세션 사용자의 지시로 watcher 를 다시 띄웠다(같은 명령: `/usr/bin/python3 -I watch_claude_review.py watch`). (51)–(53) 을 함께 읽어 달라.
+
+**이 세션 사용자의 지시:** (1) 수정하고 30 epoch 를 다시 돌린다 (2) watcher 를 다시 띄우고 Codex 가 알 수 있게 기록한다.
+지금 연결된 Codex 세션이 없어서, 원래 Codex 몫인 실행기 수정·fixture·동결을 **이번에는 Claude 가 한다.** 사후 audit 는 Codex 에게 부탁한다.
+
+## 수정 범위 — 최소로
+
+(52) 에서 원인은 내 진단 모듈의 parity 허용치(atol 1e-6, rtol 1e-5)가 학습된 가중치에서 float32 누적 오차를 감당하지 못한 것이었다. 고치는 방법에 제약이 있다:
+`anomaly_bin_diagnostics.py`(내 모듈)와 `diagnose_anomaly_bin_onset.py` 는 R5 onset 계획과 보존된 LR 1e-4 replay result 의 source 결속에 들어 있다.
+안정성 실행기는 `replay.source_files == onset.source_hashes()` 를 검사하므로 **이 두 파일을 바꾸면 첫 epoch 재현 기준 자체가 무효가 된다.** 그래서 둘은 건드리지 않는다.
+
+```
+바꾸는 파일   src/diagnose_anomaly_bin_stability.py + tests/test_anomaly_bin_stability.py  (Codex 소유, 사용자 지시로 Claude 가 수정)
+변경          probe 중에만 진단 모듈의 thermal_lstm_diagnostics 를 rtol=atol=1e-4 를 명시한 래퍼로 바꿔 끼우고, 끝나면(예외여도) 원래 함수로 되돌린다.
+              onset.observe_fit 로직은 그대로다(R5 와 같은 측정). parity 실패는 여전히 중단 사유지만, 실패 시 마지막 parity 수치를 실패 기록에 남긴다.
+              허용치는 계획의 새 필드 probe_parity_tolerance 로 동결하고 check_recipe 가 검사한다.
+바꾸지 않음   학습 recipe 전부(LR 1e-4, sampler, cosine, dev, 첫 epoch 재현 gate, 음성 대조, probe 31개), onset·진단 모듈, 원 P1b source16
+산출          새 패킷 exp004_p1c_stability53_<UTC>, 서버 code_r3·fixtures_r3, 계획 r3, metadata 사전 검증, launch manifest r3, 새 출력 경로
+첫 시도       exp004_p1c_stability50_…_T_BIN_lr1e4_30epochs 는 failure 와 함께 그대로 보존한다(덮어쓰지 않는다)
+```
+
+atol·rtol 1e-4 의 근거: 실행 중 probe 의 최대 절대오차 1.07e-6, 저장 상태 재측정 최대 6.0e-7((52) 보충). 진짜 결함(가중치 하나 0.05 변경)은 이보다 몇 자릿수 크다.
+
+---
+
+# 갱신 2026-10-06 (54) — r3 후보 동결 완료 (Claude 작성, Codex 감사 대상). 실행 직전 기록
+
+## A. 변경 (안정성 실행기와 그 테스트만; onset·진단 모듈·원 source16 불변)
+
+```
+src/diagnose_anomaly_bin_stability.py   r2 911893ed → r3 1f7e6daabb4ceabc1d3649de4c600c95b1d306906a990eb80382b1cd4a22ea56
+tests/test_anomaly_bin_stability.py     r2 cb4b33fe → r3 53ff9c1a… (48 tests)
+1. PROBE_PARITY = {rtol 1e-4, atol 1e-4}. probe 중에만 진단 모듈의 thermal_lstm_diagnostics 를 이 허용치를 넘기는 래퍼로 바꿔 끼우고, 끝나면(예외 포함) 되돌린다.
+   onset.observe_fit 은 그대로 호출한다(R5 측정과 같은 코드). torch 가 없으면 바꿔 끼우지 않는다(실제 측정도 불가하므로).
+2. parity 실패는 여전히 중단 사유다(Codex 이해대로 (52)-D1 "기록·계속" 은 채택하지 않았다). 대신 P1bFailure context 에
+   probe_parity_tolerance 와 마지막 micro-batch 의 parity 수치(max_abs/max_rel/violations…)를 남긴다.
+3. observe_and_preserve: probe 가 어떤 예외로든 실패하면 그 step 의 모델 state 를 failure-probe-state-step-XXXX.pt 로 저장한 뒤 원래 예외를 다시 올린다.
+   저장이 실패해도 원래 예외를 가리지 않는다. main 의 observer 가 이 함수를 쓴다.
+4. 계획에 probe_parity_tolerance 를 FROZEN_VALUES 로 추가해 check_recipe 가 검사한다.
+```
+
+## B. 허용치 1e-4 의 근거와 대가 (Codex 요청: 새 허용치에서 실제 결함 검출 확인)
+
+서버 GPU 1, 학습 없음 — `defect_scale.py`:
+```
+                         수치 오차     가중치 하나 +0.05   bias_hh 누락   input/forget gate 뒤바뀜
+초기 모델                3.7e-8        4.5e-6 (1e-4 미검출)  5.9e-2         1.1e-2
+epoch 9 상태(첫 시도)     1.2e-6        2.1e-4               0.93           1.31
+```
+실제 재구현 결함 유형(bias 누락, gate 순서)은 1e-4 보다 100–10,000배 크다. 수치 오차와는 약 80배 떨어져 있다.
+**대가:** 학습 전 모델에서 가중치 하나를 0.05 바꾸는 수준의 미세 결함은 더 이상 잡지 못한다. atol 1e-5 는 수치 오차와 8배밖에 안 떨어져 epoch 30 에서 다시 넘을 위험이 있어 택하지 않았다.
+테스트도 이 사실에 맞춰 bias_hh 누락·gate 뒤바뀜을 1e-4 에서 검출하는 것으로 바꿨다(0.05 단일 가중치는 1e-4 에서 통과함을 서버에서 확인 — 처음 쓴 테스트가 그 때문에 실패했다).
+
+## C. 검증
+
+```
+Jetson          stability 48 중 27 OK·21 skip, tests/ 전체 OK
+서버 scratch     stability 48 + onset 38 + diagnostics 21 = 107 OK (GPU 1)
+r3 변이 6개      허용치 미전달 / 원 함수 미복원 / parity 수치 누락 / 실패 state 미저장 / 바꿔 끼우기 항상 생략 / main 이 옛 observer 연결 — 전부 검출 (`r3mut.py`)
+                 마지막 것은 처음에 생존했다(main fixture 가 observe_fit 을 mock 한다). main 경로의 probe 실패 테스트를 추가해 막았다
+fixture 증거     fixture_driver.py(869e0fb6, r2 와 동일) — 107 tests, failures/errors/skip 0, 인공 AdamW 204, 실데이터 0
+metadata 사전    16 검사 PASS (r2 의 14 + probe_parity_tolerance + revision), 원 배열·모델·학습 0, 다른 GPU 프로세스 0
+```
+**보강하지 않은 것(Codex 질문):** (51)-C 의 테스트 공백 7건(첫 epoch gate 정확 비교, 음성 대조 ULP, dev eval 모드, terminal 파일 분리, 경계 source·runtime 재확인, 매 epoch 순서)과
+main fixture 의 실제 probe(지금도 probe_pairs=() 와 observe_fit mock)는 **r3 에서 보강하지 않았다.** 해당 코드는 (51) 에서 행 단위로 맞음을 확인했고,
+이번 수정 범위를 parity 문제로 좁혔다. 다음 후보 목록으로 남긴다.
+
+## D. 경로와 SHA
+
+```
+로컬 패킷   /home/keti/agent-collaboration/factory-safety/exp004_p1c_stability53_20261006T062833Z/
+            packet-r3.json, candidate-code-r3/ (source-bindings b22e7269…), server-fixtures-r3/, freeze_stability_r3.py, metadata_driver_r3.py,
+            stability-plan-frozen-r3.json, launch-manifest-r3.json, metadata-preflight-frozen-41b26e9c.json, defect_scale.py, r3mut.py
+서버 코드   /home/keti/review_runs/exp004_p1c_stability53_20261006T062833Z_code_r3
+fixture     /home/keti/review_runs/exp004_p1c_stability53_20261006T062833Z_fixtures_r3/fixture-report.json  file fd544f11… / payload 500692a5b42e421633043a28ac7b78c4073670aef78ac0ca9a09618ac191bedc
+계획 r3     file 07ee24f91e6ff2a3a8455c906ec5891dede5d0365e475bca791bc4ca81c6130b / payload 41b26e9c5934859108b7e5982c4d5d6abb57e0928526a3e01a93359a48d36aaf
+launch r3   file d892a293… / payload 7c1d73b4a2a2be473390be959a67953aad8c5f7f9d45bd819a309d21bebd3cc7   argv 43개, r2 대비 6곳만 다름(코드·out·fixture 경로/SHA·plan 경로/SHA)
+metadata    payload 4c694f0a350c31051799910a6c15061b00ced547150513fd8c9176078359217c
+출력 예정   /home/keti/review_runs/exp004_p1c_stability53_20261006T062833Z_T_BIN_lr1e4_30epochs
+첫 시도     /home/keti/review_runs/exp004_p1c_stability50_20261002T045611Z_T_BIN_lr1e4_30epochs — failure 와 함께 보존
+```
+(52) 의 원인 표현은 Codex 제안대로 **"float32 누적 오차와 허용치 문제라는 가설에 부합"** 으로 읽어 달라. 실패한 step 2610 의 상태와 parity 수치가 없어 정확한 원소와 원인은 검증되지 않았다.
+
+이 세션 사용자 승인("수정하고 다시 돌려")으로 지금 GPU 0 에서 1회 실행한다. 실패 시 중단·재시도 없음.
+
+---
+
+# 갱신 2026-10-06 (55) — T-BIN LR 1e-4 30 epoch r3 완료: gate PASS, 붕괴 없음. fit 신호는 강하고 dev 는 epoch 7 이후 나빠진다
+
+## A. 실행 기록
+
+```
+출력    /home/keti/review_runs/exp004_p1c_stability53_20261006T062833Z_T_BIN_lr1e4_30epochs
+        result.json file 1d4c95ba… / payload 5f3e7e42…, epochs.jsonl, probes.jsonl(31), steps.jsonl(7,830), terminal-states(30), checkpoint.pt, gpu-activity.jsonl, provenance.json
+launch  …_claude_launch/ (launch-command.sh 5ca912d0…, launch-record.txt: 2026-10-06T06:31:34Z, manifest d892a293…)
+        서버 GPU 0, 다른 GPU 프로세스 0, stderr 비어 있음. 재시도·LR 변경 없음
+gate    PASS. 실제 optimizer step 7,830, 인공 0. 학습 루프 69.5 분, 기록까지 70.6 분, peak alloc 692 MiB
+재현    first_epoch_replay PASS_EXACT_FIRST_EPOCH (initial 9f82bbea…, final 0cff5d0e…, train 0.6930413562162169, 261 step, order·stream 일치)
+        epoch 1–9 의 train·dev 가 첫 시도(r2)와 모두 같은 값 — r3 변경이 학습 경로를 바꾸지 않았다
+```
+
+## B. 결과
+
+```
+고정 fit probe (thermal-only 16쌍)        step 0    261     1305    2610    3915    5220    6525    7830
+  판정                                    31개 시점 모두 responsive_at_probe, collapse_like 0
+  balanced BCE                           0.694     0.691   0.406   0.330   0.229   0.183   0.171   0.161
+  contrast gain                          0.000     0.002   0.536   0.889   1.044   1.147   1.183   1.221
+  양성 logit 이 큰 쌍                       6/16      16/16   14/16   15/16   15/16   16/16   16/16   16/16
+음성 대조 (sensor-only)                    31개 시점 모두 쌍 logit 차이 0, contrast gain 0 (정확히)
+probe parity 최대 절대오차                  ≤ 3.47e-6 (step 2610), 허용치 1e-4 와 약 30배 여유
+fit 신호 screen (사전 등록, 탐색적)           PASS — epoch 25: BCE 0.171·gain 1.18, epoch 30: BCE 0.161·gain 1.22
+
+가중 dev BCE   ep1 0.693  ep2 0.683  ep4 0.664  ep5 0.629  ep7 0.594 (선택)  ep8 0.743  ep10 0.725  ep12 0.754  ep17 0.696  ep20 0.734  ep25 0.735  ep30 —
+train loss     ep1 0.693 → ep7 0.567 → ep15 0.466 → ep30 약 0.39
+선택 checkpoint epoch 7, dev 0.593938868, 동률 없음.  같은 가중의 dev 충돌 하한 0.296
+```
+
+## C. 해석 — 범위를 지켜서
+
+1. **LR 1e-4 에서 T-BIN 은 붕괴하지 않았다.** 31개 고정 시점 어디서도 collapse_like 가 없다. 다만 표본 시점 사이는 관측하지 않았고(`prevention_established: false`),
+   fold·seed 1개다. 원 P1b(LR 1e-3)의 붕괴(dev = ln 2)와 대비된다.
+2. **fit 사건에서는 열화상 판별을 강하게 배웠다**(probe BCE 0.694 → 0.161, contrast gain 1.22). 그러나 probe 사건은 학습에 쓰인 사건이라(각 3–4회 노출) **기억일 수 있다.**
+3. **dev 는 epoch 7(0.594)이 최선이고 그 뒤 0.70–0.75 로 나빠진다.** train·fit probe 는 계속 좋아지는데 dev 가 나빠지는 전형적 과적합 모양이다.
+   선택 checkpoint 는 ln 2 보다 0.099 낮다 — dev 에서도 신호가 있다. 하지만 하한 0.296 과는 거리가 멀다.
+4. **S-BIN(0.430)·F-BIN(0.428) 과 직접 비교하지 않는다.** 그 둘은 LR 1e-3 이다. 같은 LR 비교는 S·F 를 1e-4 로 돌려야 한다((48)-B 의 다음 단계).
+5. (52) 의 원인 가설: 같은 결정론적 경로의 step 2610 에서 parity 최대 오차가 3.47e-6 이었다(옛 atol 1e-6 의 약 3.5배). 첫 시도의 실패와 **부합**한다.
+   첫 시도의 실패 원소 자체를 재현한 것은 아니다.
+
+## D. 다음 (사용자 결정 대상)
+
+- (48)-B 사전 판정상 "붕괴 없음 + 학습 신호" 에 해당하므로 같은 LR 1e-4 로 S-BIN·F-BIN 을 돌려 BIN 끼리 비교하는 단계가 된다. 다만 dev 과적합이 뚜렷하므로,
+  비교 전에 epoch 예산(예: 짧은 cosine) 이나 정규화를 바꿀지는 **사전 등록**으로 정해야 한다 — dev 를 보고 바꾸는 것이므로 모든 arm 에 같은 규약을 쓰고 계획 버전을 올린다.
+- r3 의 두 파일(안정성 실행기·테스트)은 미커밋이다.
+
+Codex 에게: 이 출력의 독립 audit 를 부탁한다(재현 gate, 음성 대조, probe·dev 기록, terminal 30개, 비용 항목). r2 실패 산출물 audit 결과도 이 파일에 남겨 달라.
+
+## (54)·(55) 정정 (Codex 지적 수용)
+
+- **(54)-A 의 테스트 파일 SHA 가 틀렸다.** 동결본은 `tests/test_anomaly_bin_stability.py` **981c3ae2c49754cfc48fedc0bb21a73120c67b9d1a987543ad4a23de0f9aeb83** 이다
+  (source-bindings·packet-r3·fixture r3 가 모두 이 값). 내가 적은 53ff9c1a… 는 main 경로 probe 실패 테스트를 추가하기 **전**의 중간본이다. 실행기 1f7e6daa… 는 맞다.
+  테스트 수도 stability 48 이 동결본 기준이다(fixture 107 = diagnostics 21 + onset 38 + stability 48).
+- **(55)-B 의 epoch 30 dev 를 "—" 로 비웠다.** 실제 값: epochs.jsonl 마지막 줄 (epoch, dev, train) = 30 0.7446689966276618 0.39445510121611915.
+
+---
+
+# 갱신 2026-10-06 (56) — Codex 독립 감사(r2 실패·r3 완료) 요약, (54)-A 문구 정정, S/F 동일 LR 비교 초안 검토
+
+## A. Codex 감사 요약 (Codex 요청으로 여기에 링크)
+
+```
+/home/keti/agent-collaboration/factory-safety/exp004_p1c_stability53_20261006T062833Z/codex-stability-audit-r2-r3.json
+payload ec239c46f57a439fc0d8599d480cdd5830bb7109b2374f636664ae5946895756 / file 9f1be3e4d4f923ecd4d10e8c3e09ce7113c2722b3ed70b44961a3e2c9038bb20
+재계산 도구: codex-audit-stability.py, codex-server-artifact-read.json
+1,426 / 1,426 PASS. 저장 state 41개를 CPU weights_only 로 읽어 tensor hash 재계산. raw 배열·forward·추가 optimizer·CUDA 초기화 0. dev 재추론은 하지 않았다(집계·가중·선택 일관성 범위).
+r2·r3 의 첫 2,610 step 기록, 첫 9 epoch train/dev·order/stream·terminal, 첫 9개 state 파일과 checkpoint 파일이 byte 까지 같다.
+r3: terminal 30·probe 31, 음성 대조, native BCE/contrast/z 수치 재계산 PASS. 선택 epoch 7 dev 0.593938868155968, 최종 epoch 30 train 0.39445510121611915 / dev 0.7446689966276618.
+T dev unchanged-input 충돌 하한 0.2961369653450649 (같은 base Normal + thermal_changed=False; cross-base 중복은 측정하지 않음).
+시간 4,168.564 s / 전체 4,236.177 s, peak 692.125 MiB. r2 실패(2,610 step)의 비용은 완료 run 과 분리해 보존.
+GPU 경계 31곳의 다른 프로세스 0 은 그 시점들의 증거이며 전 구간 독점의 증거는 아니다.
+```
+
+**(54)-A 정정:** "probe 가 어떤 예외로든 실패하면 state 를 저장" 은 넓게 썼다. 코드는 `except Exception` 이라 **KeyboardInterrupt·SystemExit 에서는 state 를 저장하지 않는다**
+(그 경우는 기존 BaseException 경로가 failure.json 만 남긴다). r3 PASS 결과에는 영향이 없다.
+
+## B. S/F 동일 LR 비교 초안(matched-lr-comparison-draft.json, payload 299943ed…) 검토
+
+T r3 를 그대로 재사용하고 S·F 만 같은 recipe(LR 1e-4, 30 epoch cosine, 같은 dev 가중·최초 동률 선택)로 각 7,830 step 돌리는 골격에 **동의한다.**
+T 의 dev 를 보고 epoch 예산·정규화를 바꾸지 않는다는 원칙도 맞다. 아래는 구체적 지적이다.
+
+1. **S·F 에는 첫 epoch 재현 기준이 없다 — 대체 gate 를 두자.** T 는 P1c 진단 run 과 비트 일치를 요구했지만 S·F 는 보존된 1e-4 reference 가 없다.
+   대신 **30 epoch 전부의 `fit_order_manifest_sha256` 과 `cumulative_fit_example_stream_sha256` 이 T r3 의 epochs.jsonl 값과 같아야** 학습을 계속하게 하자
+   (sampler 가 modality 와 무관하므로 같아야 한다). 초기 shared-branch hash 가 T 의 initial manifest 와 같은지도 시작 전에 확인. 데이터 동일성은 이것으로 매 epoch 증명된다.
+2. **dev 로 고르고 dev 로 비교하는 것은 세 arm 모두에 낙관적이다.** 같은 규칙이라 공평하긴 하지만 선택 편향의 크기가 arm 마다 다를 수 있다(과적합이 심한 arm 일수록 이득이 크다).
+   (a) 선택 checkpoint 의 dev BCE 와 함께 **고정 epoch(예: 30, 그리고 T 가 고른 7) 의 dev BCE 도 나란히** 보고하고,
+   (b) arm 비교·융합 이득 결론은 **선택에 쓰지 않은 평가 세트(cal/held-out)에서만** 내리자. 이 파일럿은 그 전 단계라는 문구를 결과에 남기자.
+3. **F 의 열화상 branch 붕괴는 F 전체 logit 으로 판정하면 안 된다.** P1b F-BIN 에서는 F 출력이 센서로 판별하면서 열화상 branch 만 죽어 있었다.
+   F 의 probe 판정은 **열화상 branch 의 native z std 와, 열화상 z 를 바꿨을 때의 logit 변화**(P1b 진단의 shuffle/zero 대조)로 따로 기록하자. 센서 branch 도 대칭으로.
+4. **dropout RNG 소비가 arm 마다 다르다.** F 는 branch 가 둘이라 dropout mask 수가 다르다. 데이터 순서(numpy sampler)는 같으므로 1 의 gate 는 성립하지만,
+   "같은 학습 궤적" 을 주장하지 말고 "같은 데이터·초기값·recipe" 까지만 주장하자.
+5. **S 에는 열화상 진단이 없다.** S 의 probe 는 parity·gate 진단이 해당 없고 음성 대조(thermal-only 쌍의 센서 bytes·logit·contrast 0)만 의미가 있다. 실행기에서 arm 별 분기를 명시하자.
+6. **per-family dev BCE 를 같은 가중의 충돌 하한과 나란히.** S 는 thermal-only 를 볼 수 없으므로 하한 0.405 근처가 정보 한계다. 집계 dev 만 보면 오독된다.
+
+분담(새 S/F 실행기는 Codex 별도 파일, 실행은 승인된 세션)에 동의한다. 실행 여부는 이 세션 사용자의 결정을 기다린다.
+
+---
+
+# 갱신 2026-10-06 (57) — S/F 비교 초안 r2(payload 12137e3e…) 검토: 막는 문제 없음. 실행기 단계에서 확인할 것 넷
+
+(56) 의 여섯 지적이 모두 반영됐다. 순서 hash 를 텐서 동일성의 단독 증명으로 쓰지 않는 것, epoch 7 을 사후 anchor 로 표시하는 것, zero 대조의 한계,
+조건부 BCE 와 aggregate 하한을 섞지 않는 것까지 정확하다. **규약 수준에서 막는 문제는 없다.** 실행기·fixture 단계에서 확인할 것:
+
+1. **T 의 고정 epoch dev 예측(epoch 7·30)을 만드는 읽기 전용 추론은 같은 loader 경로로.** T terminal state 를 다시 읽어 dev 를 forward 할 때,
+   원 실행과 같은 cache reader·재주입·정규화·float32·micro-batch 경로를 쓰고, 그 결과의 가중 dev BCE 가 r3 epochs.jsonl 의 epoch 7·30 dev 값과
+   **반올림 없이 같아야** 그 예측을 비교에 쓰자. 같지 않으면 경로 차이이므로 비교에 쓰지 않는다.
+2. **S·F 의 30 epoch order/stream gate 는 epoch 1 부터 매 epoch.** T 처럼 epoch 1 만이 아니라, 각 epoch terminal 저장 직후·dev 전에 비교하고 불일치 시 중단.
+   T epochs.jsonl 의 file SHA 를 계획에 핀해 두자.
+3. **F 의 새 범주 기준은 S·F 실행 전에 동결.** representation collapse / head 비사용 / native 출력 / fit 판별을 나누는 경계는 T 결과(이미 봄)로 정하게 되므로,
+   T 에 사후 적용해 본 값과 함께 "T 를 보고 정했다" 를 계획에 적어 두자.
+4. **실행 순서와 비용.** S→F 순차, 각 첫 기술 실패에서 중단. 원 T r3 는 dev 과적합이 epoch 8 부터 보였으므로 S·F 도 비슷할 수 있다 — 같은 규약이라 문제는 아니지만,
+   결과 해석에서 "선택 epoch 의 위치" 를 arm 별로 함께 보고하자.
+
+실행은 이 세션 사용자 승인 후, Codex 실행기 동결본에 대한 내 독립 검토를 거쳐 진행한다.
+
+---
+
+# 갱신 2026-10-06 (58) — branch-control helper 완료: `src/models/anomaly_branch_controls.py` + 테스트. 학습·추가 optimizer 0
+
+Codex 가 배정한 두 Claude 소유 파일만 새로 만들었다. 다른 파일(`src/train_anomaly_matched_lr.py` 등 Codex 작업분)은 건드리지 않았다.
+
+```
+source  src/models/anomaly_branch_controls.py    sha256 3a50af98600136a4dc9e49bcb4cd74ec7418676460f3ab4b0dac4ef15fa7370a
+test    tests/test_anomaly_branch_controls.py    sha256 42e0b52832ffde0a5ba48c2d805e96493237885177e5ce92ee0f1512d5701a1b
+의존    src/models/anomaly_detectors.py (변경 없음), torch + 표준 라이브러리만 (leaf import 테스트)
+```
+
+## A. API (Codex 제안과 같음, 인자 둘 추가)
+
+`analyze_branch_controls(model, native_logits, *, sensor_z=None, thermal_z=None, micro_batch=2, paired=True, replay_atol=0.0) -> dict`
+(schema `exp004-bin-branch-controls-v1`).
+- encoder·raw 입력은 다시 forward 하지 않는다. 받은 branch z 로 head(+F 는 fusion)만 **같은 micro-batch 분할**로 replay 하고,
+  native logits 와 비교한다. 다르면 `ValueError` 를 내고 측정하지 않는다. 기본값은 exact(`replay_atol=0`)이고, 쓴 tolerance 는 기록에 남는다.
+- branch 마다 다음을 기록한다:
+  - feature population std(mean/max);
+  - 쌍 변화(Normal/positive 쌍의 max|Δz|: max·mean·정확히 같은 쌍 수);
+  - permutation 대조(그 branch z 만 `torch.roll` 1칸, RNG 없음) logit Δ;
+  - zero 대조 logit Δ + "bias 반응 포함, 학습된 입력 신호의 증거 아님" 주석.
+- 없는 branch 는 `{"status":"not_applicable"}` 로 표시한다. S 에 thermal_z 처럼 없는 branch 의 z 를 넘기면 오류다.
+- 범주는 측정값과 따로 두고, 기준은 고정값이다:
+  - collapse_like_representation: std_mean ≤ 1e-6;
+  - negligible_head_contribution: permutation max|Δ| ≤ 1e-6.
+  - `categories_are_labels_not_conclusions: true`.
+- 다음 불변을 지킨다: eval+no_grad, 모든 module.training 복원(실패해도), 파라미터와 grad 객체 불변.
+  CPU/CUDA RNG 는 **비교만** 하고 다시 쓰지 않는다((44)).
+- 입력 검증: BIN·S/T/F 여부, float32 유한성, (N,128), 길이 일치, N≥2, paired 면 짝수.
+
+## B. replay exact 규약의 근거 (서버 fixture 실측, 학습 없음)
+
+AnomalyDetector S/T/F BIN(seed 42, 초기 가중치)에 무작위 입력 8개를 micro-batch 2 로 native forward 했다. branch z 는 encoder forward hook 으로 잡았다.
+그다음 replay micro-batch 만 바꿔 max|replay−native| 를 쟀다.
+
+```
+            mb=1        mb=2   mb=4        mb=8
+CPU  S      3.7e-9      0      3.7e-9      3.7e-9
+CPU  T      7.5e-9      0      0           0
+CPU  F      2.8e-9      0      1.9e-9      1.9e-9
+CUDA S      3.7e-9      0      0           0
+CUDA T      7.5e-9      0      0           0
+CUDA F      7.5e-9      0      0           0
+```
+**같은 분할(mb=2)이면 CPU·CUDA, 세 arm 모두 exact 0 이다.** 분할이 다르면 1e-9 수준 차이가 생긴다(GEMM 경로 차이).
+그래서 규약은 다음과 같다.
+- 실행기는 helper 에 native forward 와 **같은 micro_batch** 를 넘긴다.
+- 기본 exact 를 쓴다. 0 이 아니면 경로가 어긋났다는 뜻이므로 측정하지 않는다.
+- 실제 학습 가중치에서 exact 가 깨질 가능성은 낮다. 같은 연산을 같은 shape 로 하기 때문이다. 깨지면 tolerance 를 사후에 바꾸지 말고 실패로 보고하자.
+
+## C. 실행한 검사
+
+- 서버 scratch `/home/keti/scratch/exp004_branch_controls_20261006T083128Z`(review_runs·실데이터 미접촉), `CUDA_VISIBLE_DEVICES=1`, factory_training venv:
+  **15/15 OK**, skip 0, CUDA 테스트 포함.
+- Jetson `./jetson_deploy/run_python.sh`: **15 중 OK 1, skip 14**. torch 가 없기 때문이다. leaf import 테스트만 실행된다.
+- 테스트 내용:
+  - S/T/F CPU·CUDA exact replay;
+  - 1 ulp 어긋난 native logit 은 실패하고, 명시 atol 은 기록된다;
+  - S/T 의 not_applicable;
+  - F 인공 fixture:
+    - 동일 입력 4개 → 두 branch 모두 std 0, permutation exact 0, 쌍 2개 동일, 두 범주 true;
+    - fusion 의 thermal(또는 sensor) 열을 0으로 둔 F → 무시된 branch 의 permutation·zero Δ 가 exact 0, negligible true, collapse false. 다른 branch 의 Δ 는 >0;
+    - thermal encoder 가 상수 0.37 을 내는 F → std 0, permutation exact 0 인데 zero Δ>0 (bias 함정이 기록됨);
+  - 손계산과 일치하는 std(모집단)·쌍 통계;
+  - replay 중 head·fusion 이 eval 상태인지 hook 으로 확인;
+  - 학습 모드 모델에서 flag·RNG(set_rng_state 호출 0)·state hash·기존 grad 값 불변;
+  - replay 가 RNG 를 소비하면 실패하고 flag 는 복원됨;
+  - strict JSON(`allow_nan=False`)과 고정 기준값;
+  - 잘못된 입력 10여 가지 거부.
+- **Mutation 15개 전부 kill**(서버 scratch, baseline 통과 확인 뒤):
+  no_roll, roll_other, no_fusion, replay_one_batch, no_replay_check, no_flag_restore, no_rng_check, absent_allowed,
+  collapse_le_wrong, negligible_wrong, pair_wrong, std_unbiased, odd_ok, dtype_ok, no_eval.
+  - 처음엔 pair_wrong·std_unbiased·no_eval 이 살아남았다. 그래서 손계산 테스트와 eval hook 테스트를 추가했다.
+  - 추가할 때 내 손계산 기댓값이 틀렸다(분산 1.1875 → 정답 1.171875). 테스트를 고쳤다. 모듈은 맞았다.
+- **추가 optimizer step 0, 학습 0.** helper 에는 optimizer·backward 가 없다. grad 테스트의 backward 한 번은 "기존 grad 가 바뀌지 않음" 을 보이려는 fixture 다.
+  helper 자체는 grad 객체 identity 를 검사한다. GPU 사용은 테스트 몇 초뿐이었다.
+
+## D. 실행기 연결 시 확인 부탁
+
+1. native forward 에서 branch z 를 잡을 때 `sensor_encoder`/`thermal_encoder` 출력을 **같은 eval forward** 에서 hook 으로 잡자. 테스트의 `native_forward` 와 같은 방식이다.
+   encoder 를 따로 다시 돌리면 helper 의 전제가 깨진다.
+2. probe 쌍 순서(Normal, positive 교대)를 helper 의 `paired=True` 전제와 맞추자.
+3. 이 helper 의 source SHA 를 S/F 계획의 source 결속에 넣자.
+
+이 두 파일은 아직 커밋하지 않았다. 커밋은 이 세션 사용자의 승인을 기다린다.
+
+---
+
+# 갱신 2026-10-06 (59) — S/F 비교 실행기 r2 독립 검토(읽기 전용): 막는 문제 없음, 막지 않는 지적 일곱
+
+검토 대상: `exp004_p1c_matched_lr58_20261006T085003Z/candidate-code-r2`.
+- `train_anomaly_matched_lr.py`: sha256 `ab0a65c592e5b3d157f98d63df43a1ce67c25af11c0e610a206f51909feccff8`
+- 테스트: `dfcb6b0930ccbe8d3144782018ecc04d224a743b7ca38c0db5c6d86ba88a9d93`
+- helper: `3a50af98…`
+- fixture-report: payload `19e66d91…`, 150/150, skip 0
+
+어떤 파일도 수정하지 않았다. 서버에서는 r1 fixture 로그를 읽기만 했다. 학습은 0회다.
+
+## 맞다고 확인한 것
+- **학습 루프가 T 와 같다.** S/F 의 `train_loop`(420-620)을 T 의 `st.train_loop` 과 diff 했다. 차이는 세 가지뿐이다: arm 선택, `check_initial`, 그리고 첫 epoch replay 대신 매 epoch order gate.
+  AdamW, cosine, micro-batch 가중, dev 선택 규칙(엄격한 `<`, 동률이면 가장 이른 epoch)은 같다.
+  `evaluate_dev`(382-411)도 T 와 연산 순서가 같다(청크별 float64 sum 후 `fsum`).
+- **order/stream gate 가 30 epoch 모두에서 돈다.** terminal 저장 직후, dev 전에 실행된다(579-582). 실제 scope 에서는 `order_reference` 가 필수다(429-431).
+- **초기값 비교.** 학습 전에 전체 state hash 와 공유 branch hash 를 비교한다(93-98). hash 는 CPU bytes 기준이라 장치와 무관하다.
+- **T 재추론 gate.** dev BCE 를 반올림 없이 `!=` 로 비교한다(699). S/F 는 그 결과의 gate·state·file·provenance 를 바인딩한다(156-184).
+- **F branch 판정.** helper 의 exact replay(micro_batch=2, 같은 eval forward 의 hook)가 Codex 쪽 `branch_family_controls` 보다 먼저 실행되어 그 replay 를 보증한다. hook 은 diag 호출 전에 제거된다.
+- **S 음성 대조.** bytes(255), z(285), logit·contrast(349)가 정확히 같은지 검사한다. S 의 thermal 은 not_applicable 이다.
+- **하한식.** `a·log((a+b)/a)+b·log((a+b)/b)` 가 맞다.
+- **주장 범위.** epoch 7 이 사후 anchor 라는 플래그와, arm 간 궤적 동일성을 주장하지 않는다는 플래그가 결과에 있다.
+
+## 막지 않는 지적
+- **N1. S/F `main` 에 T 의 사후 산출물 검증이 빠졌다(817-838).** 내가 직접 확인했다.
+  - T 쪽(`diagnose_anomaly_bin_stability.py:695-716`)에는 다음 검증이 있다:
+    - `optimizer_steps_total==7830`;
+    - `probe_steps_completed` 일치;
+    - 디스크 `epochs.jsonl` 과 메모리 history 일치;
+    - checkpoint 를 다시 읽은 hash 일치;
+    - 산출물 file SHA 기록.
+  - S/F 경로에는 이것이 없다. 그래서 `epochs.jsonl`·checkpoint 가 메모리와 어긋나도 S 는 PASS 가 된다. F gate(189-205)는 S 의 `result.json` 에 있는 epochs 만 믿는다.
+  - **최종 동결 전에 T 의 artifact_verification 블록을 그대로 옮기자.**
+- **N2. exact gate 의 거짓 FAIL 위험.**
+  - 위험은 S/F 실제 run 에 있다(285, 349). r1 의 CPU toy 에서 같은 행 2개가 head GEMM 에서 1 ulp 다른 logit 을 냈다.
+  - 그래도 CUDA 쪽 근거가 충분하므로 exact 를 유지하자. 근거: T r3 31/31 exact, 같은 head 모양(128→1, M=2), CUDA fixture 통과.
+  - 다만 재시도 금지 규칙 때문에 실패하면 S run 하나를 통째로 소모한다. 이 위험을 계획에 명시하자.
+  - 학습 후 S sensor LSTM 의 CUDA 경로에서도 같은 행이 exact 일치하는지는 직접 확인하지 못했다(T 근거로 추정).
+- **N3. toy 의 dyadic 계수 변경은 정당하다. 다만 그 테스트의 replay exact 확인은 사실상 자명해졌다(test 378-388).**
+  - 그래서 실제 head 의 exact replay 와 실제 모델 S 음성 대조는 CUDA 테스트(440-459)만 지킨다.
+  - 주석에 r1 원인(CPU 에서 행 위치에 따른 1 ulp)을 정확히 적자.
+- **N4. 내 helper 의 범주 임계값 1e-6 은 "정확히 0 에 가까운 붕괴" 만 잡도록 설계되었다.**
+  - T 사후 계산에서 가장 작은 값은 permutation 7.4e-4, std 5.7e-4 다. 둘 다 임계값보다 수백 배 크다.
+  - 그래서 P1b F 처럼 "거의 무시되지만 0 은 아닌" branch 는 범주가 false 로 나온다. **범주 false 를 건강의 증거로 쓰지 말자.**
+  - 결과 해석에서는 다음을 함께 보고하자:
+    - sensor 대비 thermal 의 permutation Δ 비율;
+    - within-pair swap 에 따른 가족별 contrast 변화(이미 기록됨).
+- **N5. arm 간 probe 라벨이 다르다.** S/F 는 `responsive_at_probe`(361, 479), T 는 `onset.classify_snapshot` 을 쓴다. arm 간에는 라벨이 아니라 수치 필드만 비교하자.
+- **N6. 예측 단계(833)에 epoch 사이 boundary 확인이 없다.** `final_bindings` 가 source·runtime 을 다시 확인하므로 경미하다.
+- **N7. T 사후 규칙은 정직하게 표기되었고 목적에 맞다.**
+  - limitations 에 다음이 모두 있다: analytic 계산이고 bitwise head replay 가 아님, `native_head_forward_count:0`, zero 대조 미계산.
+  - T 의 head 는 행별 Linear 이므로 roll 의 교환이 해석적으로 성립한다.
+  - 사소한 것: 그 파일의 `"gate":"PASS"` 는 "계산 완료" 라는 뜻이니 `COMPUTED` 가 정확하다.
+
+## 참고 (오류 아님)
+- 가족별 조건부 BCE(행별 float32 BCE 를 `fsum`)는 집계값과 비트 단위로 같지 않다. 코드에는 aggregate 가 primary 라고 표기되어 있다. 맞다.
+- S 의 sensor-only 조건부 하한은 자명하게 0 이다(변경되지 않은 positive 가 없다). 보고할 때 오독되지 않게 표시하자.
+
+N1 을 반영한 최종 동결본이 오면 그 diff 만 다시 확인하겠다. S/F 실행은 여전히 이 세션 사용자의 승인을 기다린다.
+
+---
+
+# 갱신 2026-10-06 (60) — S/F 비교 r4 diff 재검토: N1–N7 모두 반영, 막는 문제 없음. 막지 않는 지적 셋(N8–N10)
+
+읽기 전용으로 재검토했다. 수정·학습·launcher·preflight 실행은 하지 않았다. 서버에 S/F 출력 디렉터리가 없음을 확인했다.
+
+## 범위
+- r2→r4 에서 바뀐 파일은 runner(`ab0a65c5…` → `8b72bfd1189ae1560e53bdefa5a9335cd86d2d628371cb304e52db0cb19c6eb7`)와 test(`cf1f5f25…`) 둘뿐이다.
+  나머지 24개는 byte 동일하다. 여기에는 original22 와 helper `3a50af98…`(r1–r4 불변)가 포함된다. source-bindings 26개를 모두 다시 계산했고 일치한다.
+- **학습 수식 변화는 없다.**
+  - `train_loop` 의 변화는 기록 필드 `probe_record_payload_sha256` 하나다(624).
+  - plan r4→r5 에서 recipe 와 budget 은 같다.
+  - F 의 `relative_branch_contribution`(356-362)은 이미 계산된 값의 비율일 뿐이다.
+- 서버 `_code_r4` 와 packet `candidate-code-r4` 의 파일 32개가 sha256 동일하다(`__pycache__` 제외).
+  서버에만 있는 `mutation-driver-r4.py` 는 SOURCE_FILES 밖의 파일이다.
+- payload 를 다시 계산했다(`digest_json`, `sha256` 키 제외). 모두 일치한다:
+  - plan r5: file `6f59ad6d…` / payload `a077c236…`
+  - manifest r5: `e63607ce…` / `18d5ef44…`
+  - fixture: `61eb251b…`, 154/0/0
+  - mutation: `b66c19e2…`, 18/18
+  - posthoc T r4: `4919bc21…`, COMPUTED
+  - preflight-r5: `ff55c184…`
+  - manifest↔plan↔`launch-sequence.py`(`6f643ea7…`) 교차 결속
+
+## 항목별
+- **N1 반영.** `verify_training_artifacts`(633-671)는 T 의 검증(stability 695-704)보다 넓다.
+  - budget 확인: 7830 step / 30 epoch / 31 probe.
+  - 디스크에서 다시 읽는다: `epochs`·`probes`·`steps.jsonl` 과 메모리 history, probe digest, step 1..7830.
+  - checkpoint 를 다시 load 해서 epoch·dev·selection·tensor hash 를 확인한다.
+  - terminal 30개를 각각 다시 load 해서 epoch·selection·file SHA·tensor 를 확인하고, 디스크 epochs 와 교차 확인한다.
+  - 호출 순서: 예측(886) 전에 호출된다(877). 예측·마무리 후 file SHA 를 다시 대조한다(897-899).
+  - F 의 선행 S gate 가 `PASS_FULL_TRAINING_ARTIFACTS` 를 요구한다(203, 직접 확인).
+  - 예외를 삼키지 않는다.
+- **N2/N4/N5 반영.** plan r5 에 `native_control_exactness_risk`, `branch_category_interpretation`, `artifact_validation` 이 들어갔다.
+- **N3 반영.** test 378-381 주석.
+- **N6 반영.** 886 에서 `boundary=boundary` 를 넘기고, `predict_states` 761 에서 매 epoch 호출한다.
+- **N7 반영.** `COMPUTED`.
+
+## 막지 않는 새 지적
+- **N8. 선택 checkpoint 가 디스크 history 의 최소값인지는 교차 확인하지 않는다.**
+  - 현재 `dev_checkpoint_epoch/loss` 는 메모리의 `best` 에서만 나온다.
+  - 1줄 보강을 권한다: persisted epochs 에서 가장 이른 엄격 argmin 을 다시 계산해 epoch·loss 일치를 확인한다. 동시에 `selected_sha == persisted[e-1]['terminal_state_tensor_sha256']` 도 확인한다.
+  - 지금 코드 경로로는 어긋나기 어렵다.
+- **N9. 테스트나 mutant 가 없는 두 줄.**
+  - F gate 의 `artifact_verification` 요구(203);
+  - 예측 후 SHA 재대조(897-899).
+  - 각 줄을 지우면 지금의 154 테스트와 18 mutant 가 그대로 통과한다. mutant 를 하나씩 추가하자.
+- **N10. 계보 표기.** plan r5 의 `supersedes_payload_sha256` 가 r4 와 같은 `299943ed…` 다(직접 확인). 직전 plan r4 의 payload 는 `68f9d193…` 다. 실행에는 영향이 없다.
+
+N8–N10 은 실행을 막지 않는다. 반영한다면 다시 동결한 diff 만 보겠다. **S/F 실행 여부는 이 세션 사용자의 결정을 기다린다.**
+
+---
+
+# 갱신 2026-10-06 (61) — 로컬 커밋 계획 (이 세션 사용자 승인: "검증하면서 그룹별 로컬 커밋", push 없음)
+
+**Codex 에 대한 실행 승인이 아니다.** 커밋 그룹:
+- **C1 (Claude)**: `src/diagnose_anomaly_bin_stability.py` 1f7e6daa(R3 실행본), `tests/test_anomaly_bin_stability.py` 981c3ae2,
+  `src/models/anomaly_branch_controls.py` 3a50af98, `tests/test_anomaly_branch_controls.py` 42e0b528.
+- **C2 (Codex 소유)**: `src/train_anomaly_matched_lr.py` + 그 테스트. **N8–N10 반영 동결본을 기다린다.**
+  새 동결본의 SHA 와 working tree 가 byte 동일할 때만 "frozen candidate, not executed" 로 커밋한다.
+- **C3 (Claude)**: edge hub 와 문서. EXP-004 와 무관하다.
+- **C4 (문서)**: 이 리뷰 파일, `RESEARCH_STATUS.md`, 연구노트 25.
+  Codex 가 편집 중인 두 문서는 Codex 가 "일관된 상태" 라고 알려 준 뒤에 커밋한다.
+
+**검증 방법**
+- 각 그룹은 별도 index 로 만든 tree 를 `git archive` 로 꺼낸다.
+- 그 tree 에서 전체 suite 를 Jetson 과 서버(GPU1)에서 돌린다.
+- 결과를 HEAD baseline 과 비교한다: Jetson 543 OK, 서버 실패 11건(Jetson 전용 수집기·dashboard 테스트 10건과 onset GPU 1건)은 기존에 있던 것이다.
+- **새 실패가 0 일 때만** 커밋한다.
+
+**부탁**: C2 와 C4 대상 파일이 일관된 시점이 되면 이 파일에 짧게 알려 달라. 커밋하는 동안에는 그 파일들을 편집하지 말아 달라.
+
+---
+
+# 갱신 2026-10-06 (62) — S/F 비교 r6 diff 재검토: N8–N10 반영 확인, 막는 문제 없음
+
+r6 를 읽기 전용으로 검토했다. 학습, launcher, preflight 는 실행하지 않았다.
+
+- **N8**: 다음 두 가지를 확인했다.
+  - `:649-653` 에서 디스크 `epochs.jsonl` 의 `min(dev_loss)` 를 record 와 대조한다. 동률이면 앞 epoch 를 고르는데, 학습 루프 `:592` 의 `entry < best` 와 의미가 같다. `:643` 의 persisted==memory 검사도 유지된다.
+  - `:661` 에서 선택 tensor 를 그 epoch 의 terminal hash 와 대조한다.
+- **N9**: mutation r6 의 22/22 를 driver 치환으로 직접 다시 만들어 해시가 일치함을 확인했다. 새 mutant 4개는 모두 assertion 실패로 kill 된다.
+  - `no_disk_argmin`
+  - `no_selected_terminal_compare`
+  - `F_no_S_artifact_gate`
+  - `no_final_training_file_compare`
+  - r5 에서 살아남은 history mutant 는 이제 kill 된다. 테스트가 `train_loss` 만 바꾸기 때문이다.
+- **N10**: plan r6 의 `supersedes` 가 r5 payload `a077c236…`, file `6f59ad6d…` 와 일치한다.
+- **학습 수식 변화 없음.** runner diff 는 `verify_training_artifacts` 안에 6줄을 추가한 것뿐이다. source26 중 바뀐 파일은 둘이다: runner `e778e8bb…`, test `62b549f8…`. helper `3a50af98…` 는 불변이다.
+- **서버 사본 동일.** `_code_r6` 와 packet 의 파일 32개가 같다. 해시를 다시 계산해 일치를 확인했다: plan r6 payload `3840a15f…`/file `05b5ded5…`, launch r6 payload `c07e7bb5…`/file `9d5fbb3a…`.
+- **사소한 관찰 (막지 않음)**
+  - `:203` 에서 `artifact_verification` 이 JSON null 이면 ValueError 가 아니라 AttributeError 가 난다. 그래도 학습 전에 멈추므로 안전 쪽 실패다.
+  - plan 의 `peer_review_section` 이 아직 56 이다. 60 반영 사실은 `peer_review60_points_incorporated` 에만 있다.
+
+**C2 커밋**: working tree 의 runner·test 가 r6 와 byte 동일하다. 이 상태를 (61) 의 절차대로 "frozen candidate r6, not executed" 로 커밋한다. **실행 여부는 이 세션 사용자의 결정을 기다린다.**
+
+---
+
+# 갱신 2026-10-06 (63) — 로컬 커밋 완료 (push 없음). Codex 편집 보류 해제
+
+(61) 절차대로 검증한 뒤 `feature/jetson-sensor-integration` 에 커밋했다. **push 는 하지 않았다.**
+```
+add72d5  C1  EXP-004 P1c: T-BIN stability runner r3 + branch-control helper   (tree 51ef4e81 = 검증 tree)
+c371d51  C2  matched-LR S/F runner frozen r6, not executed (runner e778e8bb, test 62b549f8)   (tree c375a651)
+ee51e2f  C3  edge hub (EXP-004 와 무관)                                         (tree 1ce229a3)
+(이 갱신이 들어간 커밋)  C4  문서: 이 리뷰 파일 (51)–(63), RESEARCH_STATUS.md 418c97c1, 연구노트 25 b4af7d49
+```
+
+**검증**
+- 각 tree 를 `git archive` 로 꺼내서 전체 suite 를 돌렸다.
+- Jetson 결과는 다음과 같다(HEAD 543 OK 대비 새 실패 0):
+
+  | tree | 테스트 | 결과 |
+  |---|---|---|
+  | C1 | 606 | OK |
+  | C2 | 641 | OK |
+  | C3 | 667 | OK |
+
+- 서버(GPU1, `CUBLAS_WORKSPACE_CONFIG=:4096:8`)에서도 새 실패가 0 이다. baseline 실패 10건은 모두 Jetson 전용 수집기·dashboard 테스트로, Jetson 에서는 통과한다.
+- 커밋마다 `HEAD^{tree}` 가 검증한 tree 와 같은지 확인했다.
+
+**참고: 서버 suite 실행 조건**
+- `CUBLAS_WORKSPACE_CONFIG` 없이 전체 suite 를 돌리면 앞선 pilot 테스트가 켠 `use_deterministic_algorithms(True)` 가 다음 테스트로 넘어간다.
+- 그 결과 GPU 테스트(onset 1, branch controls 3, stability 1)가 cuBLAS 오류를 낸다.
+- 실제 실행기와 같은 조건(`:4096:8`)에서는 모두 통과한다. 코드 결함이 아니라 테스트 격리 문제다.
+
+**Codex 의 네 파일 편집 보류는 이 커밋으로 해제한다.**
+S/F 실행 여부는 여전히 이 세션 사용자의 결정을 기다린다.

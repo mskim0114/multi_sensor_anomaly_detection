@@ -1,0 +1,444 @@
+"""The uplink agent: scan → hash → resumable upload → verified commit, plus heartbeats.
+
+Config (JSON, default ~/.config/factory_safety/uplink.json)::
+
+    {"device_id": "jetson-keti-01",
+     "server_urls": ["https://10.252.219.59:8443", "https://<public-ip>:<forwarded-port>"],
+     "token_file": "~/.config/factory_safety/uplink.token",
+     "ca_file": "~/.config/factory_safety/hub-ca.pem",
+     "roots": {"dataset": "~/projects/factory_safety/dataset",
+               "runs": "~/projects/factory_safety/jetson_deploy/results/sensor_collection"},
+     "include_test_units": true, "settle_s": 120, "scan_interval_s": 60,
+     "heartbeat_interval_s": 10, "thermal_every_s": 30, "chunk_bytes": 4194304,
+     "max_upload_bytes_per_s": 0}
+
+Nothing local is ever deleted. A unit whose files change after it was committed is reported
+as ``local_changed_after_commit`` and never re-uploaded over the hub copy.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import logging.handlers
+import os
+from pathlib import Path
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+from urllib.parse import urlsplit
+
+from . import AGENT_VERSION, PROTOCOL
+from .client import HubClient, HubRejected, HubUnavailable
+from .ledger import Ledger
+from .units import Unit, discover, list_files, manifest_digest, sha256_file
+
+REPO = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG = Path("~/.config/factory_safety/uplink.json").expanduser()
+STATE_DIR = Path("~/.cache/factory_safety/uplink").expanduser()
+DEFAULTS = {"include_test_units": True, "settle_s": 120, "scan_interval_s": 60,
+            "heartbeat_interval_s": 10, "thermal_every_s": 30, "chunk_bytes": 4 * 1024 * 1024,
+            "max_upload_bytes_per_s": 0, "ca_file": None,
+            "roots": {"dataset": str(REPO / "dataset"),
+                      "runs": str(REPO / "jetson_deploy" / "results" / "sensor_collection")}}
+
+log = logging.getLogger("uplink")
+
+
+def load_config(path: Path) -> dict:
+    config = dict(DEFAULTS)
+    config.update(json.loads(Path(path).expanduser().read_text()))
+    for key in ("device_id", "server_urls", "token_file"):
+        if not config.get(key):
+            raise ValueError(f"config needs {key}")
+    token_path = Path(config["token_file"]).expanduser()
+    mode = token_path.stat().st_mode
+    if mode & 0o077:
+        raise PermissionError(f"{token_path} must not be readable by others (chmod 600)")
+    config["token"] = token_path.read_text().strip()
+    if config.get("ca_file"):
+        config["ca_file"] = str(Path(config["ca_file"]).expanduser())
+    config["roots"] = {k: Path(v).expanduser() for k, v in config["roots"].items()}
+    return config
+
+
+class Throttle:
+    def __init__(self, bytes_per_s: float):
+        self.rate, self.start, self.sent = bytes_per_s, time.monotonic(), 0
+
+    def consume(self, n: int) -> None:
+        if self.rate <= 0:
+            return
+        self.sent += n
+        ahead = self.sent / self.rate - (time.monotonic() - self.start)
+        if ahead > 0:
+            time.sleep(ahead)
+
+
+class Agent:
+    def __init__(self, config: dict, *, state_dir: Path = STATE_DIR, client: HubClient | None = None):
+        self.config = config
+        self.ledger = Ledger(Path(state_dir) / "ledger.sqlite")
+        self.client = client or HubClient(config["server_urls"], config["token"], config["device_id"],
+                                          ca_file=config.get("ca_file"))
+        self.stop = threading.Event()
+        self.last_scan: dict = {}
+        self.connected = None
+        self.current = None
+        self._last_thermal = 0.0
+        self._git = _git_state()
+
+    # ----------------------------------------------------------- manifests
+    def manifest(self, unit: Unit) -> list[dict]:
+        files = []
+        for rel, info in list_files(unit.path):
+            sha = self.ledger.cached_hash(unit.key, rel, info.st_size, info.st_mtime_ns)
+            if sha is None:
+                sha = sha256_file(unit.path / rel)
+                after = (unit.path / rel).stat()
+                if (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
+                    raise RuntimeError(f"{rel} changed while hashing")
+                self.ledger.store_hash(unit.key, rel, info.st_size, info.st_mtime_ns, sha)
+            files.append({"path": rel, "size": info.st_size, "sha256": sha,
+                          "mtime_ns": info.st_mtime_ns})
+        return files
+
+    # -------------------------------------------------------------- upload
+    def upload(self, unit: Unit) -> str:
+        """Upload one unit; returns its resulting ledger state."""
+        record = self.ledger.unit(unit.key)
+        files = self.manifest(unit)
+        digest = manifest_digest(files, unit.key)
+        total = sum(f["size"] for f in files)
+        if record and record["state"] in ("committed", "local_changed_after_commit"):
+            if record["manifest_sha256"] == digest:
+                return "committed"
+            self.ledger.set_state(unit.key, "local_changed_after_commit",
+                                  error=f"local manifest {digest[:12]} differs from committed "
+                                        f"{record['manifest_sha256'][:12]}; not re-uploaded")
+            log.error("local raw unit %s changed after commit; NOT re-uploading", unit.key)
+            return "local_changed_after_commit"
+        self.ledger.set_state(unit.key, "uploading", manifest_sha256=digest, files=len(files), total=total,
+                              attempt=True)
+        self.current = {"unit": unit.key, "bytes": total, "sent": 0}
+        meta = {"status": unit.status, "agent_version": AGENT_VERSION, "git": self._git,
+                "local_path": str(unit.path)}
+        wire = [{k: f[k] for k in ("path", "size", "sha256")} for f in files]
+        begin = self.client.request("POST", "/api/v1/device/units/begin",
+                                    json_body={"unit": unit.key, "files": wire, "meta": meta})
+        if begin["state"] != "committed":
+            if begin.get("manifest_sha256") != digest:
+                raise RuntimeError("hub computed a different manifest digest")
+            throttle = Throttle(float(self.config["max_upload_bytes_per_s"]))
+            for f in files:
+                self._send_file(unit, f, int(begin["received"].get(f["path"], 0)), throttle)
+            for f in files:   # the unit must still be exactly what was hashed
+                info = (unit.path / f["path"]).stat()
+                if (info.st_size, info.st_mtime_ns) != (f["size"], f["mtime_ns"]):
+                    raise RuntimeError(f"{f['path']} changed during upload")
+            receipt = self.client.request("POST", "/api/v1/device/units/commit",
+                                          json_body={"unit": unit.key, "manifest_sha256": digest})
+        else:
+            receipt = begin["receipt"]
+        if receipt.get("manifest_sha256") != digest or receipt.get("files") != len(files) \
+                or receipt.get("bytes") != total:
+            raise RuntimeError("hub receipt does not match the local manifest")
+        self.ledger.set_state(unit.key, "committed", receipt=receipt)
+        self.current = None
+        log.info("committed %s (%d files, %d bytes)", unit.key, len(files), total)
+        return "committed"
+
+    def _send_file(self, unit: Unit, entry: dict, offset: int, throttle: Throttle) -> None:
+        size, chunk = entry["size"], int(self.config["chunk_bytes"])
+        if offset >= size and size > 0:
+            return
+        with open(unit.path / entry["path"], "rb") as stream:
+            while True:
+                stream.seek(offset)
+                data = stream.read(min(chunk, size - offset))
+                query = {"unit": unit.key, "path": entry["path"], "offset": offset}
+                try:
+                    reply = self.client.request("PUT", "/api/v1/device/units/file", query=query, body=data)
+                except HubRejected as error:
+                    if error.status == 409 and "received" in error.body:
+                        offset = int(error.body["received"])   # resume where the hub actually is
+                        continue
+                    if error.status == 422:
+                        self.ledger.forget_hashes(unit.key)     # re-hash next time; never overwrite
+                    raise
+                throttle.consume(len(data))
+                offset = int(reply["received"])
+                if self.current:
+                    self.current["sent"] += len(data)
+                if reply.get("complete") or offset >= size:
+                    return
+
+    def scan_once(self) -> dict:
+        units, skipped = discover(self.config["roots"], include_test=self.config["include_test_units"],
+                                  settle_s=float(self.config["settle_s"]))
+        result = {"final": len(units), "skipped": len(skipped), "committed": 0, "errors": 0}
+        for unit in sorted(units, key=lambda u: u.newest_mtime):
+            if self.stop.is_set():
+                break
+            record = self.ledger.unit(unit.key)
+            if record and record["state"] == "committed" and self._unchanged(unit, record):
+                continue
+            try:
+                state = self.upload(unit)
+                result["committed"] += state == "committed"
+                self.connected = True
+            except HubUnavailable as error:
+                self.connected = False
+                self.ledger.set_state(unit.key, "pending", error=f"hub unreachable: {error}")
+                log.warning("hub unreachable, will retry: %s", error)
+                break
+            except (HubRejected, RuntimeError, OSError, ValueError) as error:
+                result["errors"] += 1
+                self.ledger.set_state(unit.key, "error", error=str(error))
+                log.error("upload of %s failed: %s", unit.key, error)
+            finally:
+                self.current = None
+        result["skipped_detail"] = skipped[:50]
+        self.last_scan = dict(result, utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        return result
+
+    def _unchanged(self, unit: Unit, record: dict) -> bool:
+        """Cheap check: every file still matches its cached (size, mtime) hash entry."""
+        try:
+            files = list_files(unit.path)
+        except (OSError, ValueError):
+            return False
+        return len(files) == record["files"] and all(
+            self.ledger.cached_hash(unit.key, rel, info.st_size, info.st_mtime_ns) for rel, info in files)
+
+    # ----------------------------------------------------------- heartbeat
+    def heartbeat_body(self) -> dict:
+        body = {"protocol": PROTOCOL, "agent_version": AGENT_VERSION, "device_id": self.config["device_id"],
+                "interval_s": self.config["heartbeat_interval_s"], "sent_utc": _utc(),
+                "host": socket.gethostname(), "uptime_s": _uptime(), "load": os.getloadavg(),
+                "memory": _meminfo(), "temperatures_c": _thermal_zones(), "local_ip": self._local_ip(),
+                "disks": {k: _disk(v) for k, v in self.config["roots"].items()},
+                "collector": _collector_state(), "uploads": self.ledger.summary(),
+                "current_upload": self.current, "last_scan": {k: v for k, v in self.last_scan.items()
+                                                              if k != "skipped_detail"},
+                "git": self._git}
+        live = _latest_preview()
+        if live is not None:
+            due = time.time() - self._last_thermal >= float(self.config["thermal_every_s"])
+            if due and live.get("thermal"):
+                self._last_thermal = time.time()
+            else:
+                live["thermal"] = None
+            body["live"] = live
+        return body
+
+    def _local_ip(self) -> str | None:
+        host = urlsplit(self.client.active_url).hostname
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect((host, 9))   # no packet is sent for UDP connect
+                return probe.getsockname()[0]
+        except OSError:
+            return None
+
+    def heartbeat_loop(self) -> None:
+        while not self.stop.is_set():
+            try:
+                self.client.request("POST", "/api/v1/device/heartbeat", json_body=self.heartbeat_body())
+                if self.connected is not True:
+                    log.info("hub reachable at %s", self.client.active_url)
+                self.connected = True
+            except HubUnavailable as error:
+                if self.connected is not False:
+                    log.warning("heartbeat: hub unreachable: %s", error)
+                self.connected = False
+            except Exception as error:  # a heartbeat problem must not stop uploads
+                log.error("heartbeat failed: %r", error)
+            self.stop.wait(float(self.config["heartbeat_interval_s"]))
+
+    def run(self) -> None:
+        threading.Thread(target=self.heartbeat_loop, name="heartbeat", daemon=True).start()
+        backoff = 0.0
+        while not self.stop.is_set():
+            try:
+                result = self.scan_once()
+                backoff = 0.0 if self.connected else min(600.0, max(15.0, backoff * 2))
+                if result["committed"] or result["errors"]:
+                    log.info("scan: %s", {k: v for k, v in result.items() if k != "skipped_detail"})
+            except Exception as error:
+                log.exception("scan failed: %r", error)
+                backoff = min(600.0, max(15.0, backoff * 2))
+            self.stop.wait(max(float(self.config["scan_interval_s"]), backoff))
+
+
+# --------------------------------------------------------------- host facts
+def _utc() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _uptime() -> float | None:
+    try:
+        return float(Path("/proc/uptime").read_text().split()[0])
+    except (OSError, ValueError):
+        return None
+
+
+def _meminfo() -> dict:
+    out = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, value = line.split(":", 1)
+            if key in ("MemTotal", "MemAvailable"):
+                out[key] = int(value.split()[0]) * 1024
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def _thermal_zones() -> dict:
+    out = {}
+    for zone in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
+        try:
+            out[(zone / "type").read_text().strip()] = int((zone / "temp").read_text()) / 1000
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _disk(path: Path) -> dict | None:
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return None
+    return {"total": usage.total, "free": usage.free}
+
+
+def _git_state() -> dict:
+    def git(*args):
+        try:
+            return subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+    return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
+
+
+def _collector_state() -> dict | None:
+    """Collector state as collect.py reports it, without its control token or process identity."""
+    path = Path("~/.cache/factory_safety/acquisition/session.json").expanduser()
+    try:
+        session = json.loads(path.read_text())
+        control = json.loads((Path(session["run_dir"]) / "control.json").read_text())
+    except (OSError, ValueError, KeyError, TypeError):
+        control = {}
+        try:
+            session = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return {"status": "stopped", "alive": False}
+    identity = session.get("identity") or {}
+    alive = _process_alive(identity)
+    status = control.get("status") if control.get("token") == session.get("token") else "starting"
+    if not alive and status not in ("completed", "stopped", "failed"):
+        status = "failed"   # same rule as collect.py: exited before finalization
+    keep = ("updated_utc", "started_utc", "completed_utc", "error", "failure")
+    return {"status": status, "alive": alive, "run_dir": session.get("run_dir"),
+            **{k: control[k] for k in keep if k in control}}
+
+
+def _process_alive(identity: dict) -> bool:
+    """pid alive and the same process (start ticks and boot id), read from /proc only."""
+    try:
+        pid = int(identity["pid"])
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        ticks = stat.rsplit(")", 1)[1].split()[19]
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except (OSError, KeyError, ValueError, IndexError, TypeError):
+        return False
+    return ticks == str(identity.get("start_ticks")) and boot == identity.get("boot_id")
+
+
+def _latest_preview(max_age_s: float = 5.0) -> dict | None:
+    """The collector's volatile latest-only preview (not raw data), if fresh."""
+    roots = [Path("/run/user") / str(os.getuid()) / "factory-safety-preview",
+             Path("/dev/shm") / f"factory-safety-preview-{os.getuid()}"]
+    candidates = [p for root in roots if root.is_dir() for p in root.glob("run-*.json")]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    age = time.time() - newest.stat().st_mtime
+    if age > max_age_s:
+        return None
+    try:
+        value = json.loads(newest.read_text())
+    except (OSError, ValueError):
+        return None
+    snapshot = value.get("snapshot") or {}
+    sensors = {}
+    for name, record in (snapshot.get("sensors") or {}).items():
+        record = record or {}
+        values = {k: v for k, v in (record.get("values") or {}).items()
+                  if not isinstance(v, (dict, list)) and "monotonic" not in k}
+        sensors[name] = {"status": record.get("status"), "fresh": record.get("fresh"),
+                         "age_ms": record.get("age_ms"), "values": values}
+    return {"run_id": value.get("run_id"), "age_s": round(age, 1),
+            "snapshot": {"sequence": snapshot.get("sequence"), "timestamp_utc": snapshot.get("timestamp_utc"),
+                         "quality": snapshot.get("quality"), "sensors": sensors},
+            "thermal": value.get("thermal")}
+
+
+# --------------------------------------------------------------------- CLI
+def _setup_logging(state_dir: Path, verbose: bool) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(state_dir / "uplink.log", maxBytes=5_000_000, backupCount=5)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    handler.setFormatter(fmt)
+    stream = logging.StreamHandler()
+    stream.setFormatter(fmt)
+    log.handlers[:] = [handler, stream]
+    log.setLevel(logging.DEBUG if verbose else logging.INFO)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="uplink_agent.py",
+                                     description="Ship completed raw units to the edge hub.")
+    parser.add_argument("command", choices=["run", "once", "check", "status", "pending"])
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--state-dir", type=Path, default=STATE_DIR)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args(argv)
+    _setup_logging(args.state_dir, args.verbose)
+    config = load_config(args.config)
+    agent = Agent(config, state_dir=args.state_dir)
+    if args.command == "check":
+        reply = agent.client.request("GET", "/api/v1/device/whoami")
+        print(json.dumps({"hub": agent.client.active_url, **reply}))
+        return 0 if reply.get("device") == config["device_id"] else 1
+    if args.command == "status":
+        print(json.dumps(agent.ledger.summary(), indent=1))
+        return 0
+    if args.command == "pending":
+        units, skipped = discover(config["roots"], include_test=config["include_test_units"],
+                                  settle_s=float(config["settle_s"]))
+        rows = [{"unit": u.key, "status": u.status, "ledger": (agent.ledger.unit(u.key) or {}).get("state")}
+                for u in units]
+        print(json.dumps({"final": rows, "skipped": skipped}, indent=1))
+        return 0
+    if args.command == "once":
+        result = agent.scan_once()
+        print(json.dumps({k: v for k, v in result.items() if k != "skipped_detail"}))
+        return 0 if result["errors"] == 0 and agent.connected is not False else 1
+    signal.signal(signal.SIGTERM, lambda *_: agent.stop.set())
+    log.info("uplink agent %s for %s → %s", AGENT_VERSION, config["device_id"], config["server_urls"])
+    try:
+        agent.run()
+    except KeyboardInterrupt:
+        agent.stop.set()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

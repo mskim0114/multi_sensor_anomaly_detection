@@ -1,0 +1,23 @@
+# systemd --user unit for the edge hub on the training server.
+#   cp src/edge_hub/edge-hub.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now edge-hub
+# Edit DATA_ROOT / bind address first (docs/EDGE_HUB.md §5). Standard library only: the
+# system python3 is used read-only with -E -s; nothing is installed.
+[Unit]
+Description=factory_safety edge hub (raw unit ingest + monitoring page)
+After=network-online.target local-fs.target
+Wants=network-online.target
+# the data disk is mounted with nofail; do not start on the root disk by accident
+ConditionPathIsMountPoint=/mnt/data-hdd
+
+[Service]
+Type=simple
+Environment=DATA_ROOT=/mnt/data-hdd/keti_data/edge_hub
+WorkingDirectory=%h/projects/factory_safety
+ExecStart=/usr/bin/python3 -E -s -m src.edge_hub serve --data-root ${DATA_ROOT} --host 0.0.0.0 --port 8443 --tls-cert ${DATA_ROOT}/tls/server.pem --tls-key ${DATA_ROOT}/tls/server.key
+Restart=always
+RestartSec=10
+UMask=0027
+
+[Install]
+WantedBy=default.target

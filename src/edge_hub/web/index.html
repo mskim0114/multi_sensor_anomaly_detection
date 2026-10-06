@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Factory Edge Hub</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1>Factory Edge Hub</h1>
+  <nav id="nav" hidden>
+    <button data-view="overview" class="active">장치 현황</button>
+    <button data-view="live">실시간</button>
+    <button data-view="units">수신 데이터</button>
+  </nav>
+  <div id="who" hidden><span id="user"></span> <button id="logout">로그아웃</button></div>
+</header>
+<main>
+  <section id="login" hidden>
+    <form id="login-form" class="card narrow">
+      <h2>로그인</h2>
+      <label>사용자 <input name="user" autocomplete="username" required></label>
+      <label>비밀번호 <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">로그인</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
+
+  <section id="overview" hidden>
+    <p class="muted" id="server-time"></p>
+    <div id="device-cards" class="grid"></div>
+  </section>
+
+  <section id="live" hidden>
+    <div class="toolbar">
+      <label>장치 <select id="live-device"></select></label>
+      <label>추세 범위 <select id="live-range">
+        <option value="900">15분</option><option value="3600" selected>1시간</option>
+        <option value="21600">6시간</option><option value="86400">24시간</option>
+      </select></label>
+      <span id="live-age" class="muted"></span>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <h3>열화상 <span class="muted" id="thermal-info"></span></h3>
+        <canvas id="thermal" width="160" height="120" class="thermal"></canvas>
+        <div class="legend"><span id="t-min"></span><span class="ramp"></span><span id="t-max"></span></div>
+      </div>
+      <div class="card"><h3>센서 최신값</h3><table id="sensor-table"></table></div>
+    </div>
+    <div class="card"><h3>추세 (heartbeat 기준)</h3>
+      <label>항목 <select id="trend-keys" multiple size="6"></select></label>
+      <canvas id="trend" width="1100" height="320" class="chart"></canvas>
+    </div>
+  </section>
+
+  <section id="units" hidden>
+    <div class="toolbar">
+      <label>장치 <select id="units-device"><option value="">전체</option></select></label>
+      <span id="units-count" class="muted"></span>
+    </div>
+    <div class="card scroll"><table id="units-table"></table></div>
+    <div id="unit-detail" class="card" hidden>
+      <h3 id="unit-title"></h3>
+      <div id="unit-meta" class="meta"></div>
+      <div class="toolbar">
+        <label>열 <select id="unit-cols" multiple size="6"></select></label>
+        <button id="unit-plot">그리기</button>
+      </div>
+      <canvas id="unit-chart" width="1100" height="300" class="chart"></canvas>
+      <div class="toolbar">
+        <label>열화상 chunk <select id="unit-chunk"></select></label>
+        <label>frame <input id="unit-frame" type="range" min="0" max="29" value="0"></label>
+        <span id="unit-frame-info" class="muted"></span>
+      </div>
+      <canvas id="unit-thermal" width="160" height="120" class="thermal"></canvas>
+      <div class="legend"><span id="u-min"></span><span class="ramp"></span><span id="u-max"></span></div>
+    </div>
+  </section>
+</main>
+</body>
+</html>

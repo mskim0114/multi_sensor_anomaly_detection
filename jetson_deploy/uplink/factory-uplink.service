@@ -1,0 +1,24 @@
+# systemd --user unit for the uplink agent (no sudo needed to install a user unit).
+#   mkdir -p ~/.config/systemd/user
+#   cp jetson_deploy/uplink/factory-uplink.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now factory-uplink
+#   journalctl --user -u factory-uplink -f
+# To keep running without a login session: `loginctl enable-linger $USER` (one-time; may ask
+# for authorisation — run it yourself, never from an automated agent).
+[Unit]
+Description=factory_safety uplink: completed raw units -> edge hub (outbound HTTPS only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/projects/factory_safety/jetson_deploy/run_python.sh %h/projects/factory_safety/jetson_deploy/uplink_agent.py run
+Restart=always
+RestartSec=30
+# acquisition keeps priority: the 1 Hz collector must never wait on uploads or hashing
+Nice=10
+IOSchedulingClass=idle
+Environment=PYTHONNOUSERSITE=1
+
+[Install]
+WantedBy=default.target

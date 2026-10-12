@@ -14,6 +14,7 @@
   <nav id="nav" hidden>
     <button data-view="overview" class="active">장치 현황</button>
     <button data-view="live">실시간</button>
+    <button data-view="scenarios">시나리오</button>
     <button data-view="units">수신 데이터</button>
   </nav>
   <div id="who" hidden><span id="user"></span> <button id="logout">로그아웃</button></div>
@@ -55,6 +56,11 @@
       <label>항목 <select id="trend-keys" multiple size="6"></select></label>
       <canvas id="trend" width="1100" height="320" class="chart"></canvas>
     </div>
+  </section>
+
+  <section id="scenarios" hidden>
+    <p class="muted" id="scenario-note"></p>
+    <div id="scenario-cards" class="grid two"></div>
   </section>
 
   <section id="units" hidden>

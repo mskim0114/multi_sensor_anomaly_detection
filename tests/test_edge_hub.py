@@ -763,6 +763,41 @@ class InterruptedUnitTests(HubFixture):
         self.assertIn("is not final", skipped[0]["reason"])
 
 
+
+class ScenarioViewTests(HubFixture):
+    def test_definitions_match_the_trial_runner_and_the_recorded_columns(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("runner_for_hub", ROOT / "jetson_deploy/scripts/12_run_trial.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        from sensors.snapshot import SCALAR_FIELDS
+        definitions = json.loads((ROOT / "src/edge_hub/scenarios.json").read_text())
+        ids = [s["id"] for s in definitions["scenarios"]]
+        self.assertEqual(sorted(ids), sorted(runner.SCENARIOS), "every runner scenario is described, and only those")
+        self.assertEqual({s["id"] for s in definitions["scenarios"] if s["status"] == "bench"},
+                         {"combustion", "vapor_release", "dust"})
+        for s in definitions["scenarios"]:
+            with self.subTest(scenario=s["id"]):
+                self.assertTrue(set(s["relevant_columns"]) <= set(SCALAR_FIELDS), s["relevant_columns"])
+                if s["status"] == "bench":
+                    self.assertTrue(s["expected"] and s["safety"] and s["bench_intervention"])
+
+    def test_scenarios_api_needs_login_and_counts_received_trials(self):
+        status, _, _ = self.https("GET", "/api/v1/scenarios")
+        self.assertEqual(status, 401)
+        make_trial(self.dataset, "dust", "dust_20261012T090000Z")
+        self.agent().scan_once()
+        cookie = self.login()
+        status, _, spec = self.https("GET", "/api/v1/scenarios", headers={"Cookie": cookie})
+        self.assertEqual(status, 200)
+        self.assertEqual(spec["definitions_version"], "multisensor-v0.2")
+        dust = next(s for s in spec["scenarios"] if s["id"] == "dust")
+        self.assertGreaterEqual(dust["received"]["count"], 1)
+        self.assertIn("dust_20261012T090000Z", [t["unit"].split("/")[-1] for t in dust["received"]["recent"]])
+        combustion = next(s for s in spec["scenarios"] if s["id"] == "combustion")
+        self.assertEqual(combustion["received"]["count"], 0)
+
+
 import unittest.mock  # noqa: E402
 
 if __name__ == "__main__":

@@ -1,0 +1,81 @@
+{
+ "definitions_version": "multisensor-v0.2",
+ "sources": ["docs/ANOMALY_STATES_MULTISENSOR.md", "docs/JETSON_DATASET_PROTOCOL.md"],
+ "note": "시나리오는 '무엇을 개입했는가'이고 상태는 '센서에 무엇이 나타났는가'다. 아래 예상 반응은 검증할 가설이며 라벨이 아니다. 사무실 bench 데이터는 현장 데이터가 아니다.",
+ "scenarios": [
+  {
+   "id": "combustion",
+   "status": "bench",
+   "name_ko": "연소 이상 (화기·발화 징후)",
+   "name_en": "Combustion Abnormality",
+   "phenomenon": "combustion_abnormality",
+   "factory_situation": "설비 주변에서 화염·발화가 생긴 상황. 국소 초고온과 연소 생성물(CO₂·미연소 가스·미세입자)이 함께 나타난다.",
+   "target_state": "A8 개방 화염",
+   "bench_intervention": "라이터: 센서 묶음에서 20~30 cm 이상 떨어져 개입 구간 동안 5~10초씩 여러 번 점화",
+   "primary_sensors": ["FLIR"],
+   "secondary_sensors": ["SCD30 (CO₂)", "BME680 (gas)", "SPS30"],
+   "expected": [
+    {"sensor": "FLIR 최고온도", "change": "급상승 (아주 작은 영역, 포화 가능)", "timing": "점화 즉시"},
+    {"sensor": "CO₂", "change": "소폭 상승", "timing": "수십 초 지연"},
+    {"sensor": "BME680 gas 저항", "change": "하락 (미연소 연료)", "timing": "수십 초 지연"},
+    {"sensor": "PM1/PM2.5", "change": "소량 (깨끗한 연소)", "timing": "—"}
+   ],
+   "must_not_change": ["굵은 입자 (PM10 비중)"],
+   "relevant_columns": ["flir_max_c", "flir_mean_c", "co2_ppm", "bme680_gas_ohm", "pm1_0_ug_m3"],
+   "safety": ["vapor_release·dust 와 같은 날·같은 공간 금지 — 먼저 했다면 환기 후 gas 저항·PM 기준선 복귀 확인", "보드·케이블·플라스틱·SPS30 흡입구·BME680 바로 아래·카메라 렌즈 근접 금지", "연속 장시간 점화 금지, 소화기 비치"]
+  },
+  {
+   "id": "vapor_release",
+   "status": "bench",
+   "name_ko": "유해 증기 누출",
+   "name_en": "Chemical Vapor Release",
+   "phenomenon": "chemical_vapor_abnormality",
+   "factory_situation": "용제·화학물질 증기가 설비 주변에 퍼진 상황. 가스 종류는 식별할 수 없고, 휘발성 가스 증가라는 조기 징후로만 본다.",
+   "target_state": "A6 공기질 변화 (VOC)",
+   "bench_intervention": "에탄올: 솜·거즈에 적셔 작은 접시에 담아 BME680 근처에 두고 회복 신호에 치움",
+   "primary_sensors": ["BME680 (gas)"],
+   "secondary_sensors": ["SCD30", "FLIR"],
+   "expected": [
+    {"sensor": "BME680 gas 저항", "change": "크게 하락", "timing": "수 초~수십 초"},
+    {"sensor": "FLIR", "change": "젖은 솜 부위가 증발 냉각으로 약간 낮게 보일 수 있음", "timing": "—"}
+   ],
+   "must_not_change": ["PM (입자)", "CO₂"],
+   "relevant_columns": ["bme680_gas_ohm", "co2_ppm", "bme680_humidity_pct", "pm2_5_ug_m3", "flir_min_c"],
+   "safety": ["분무 금지 — 액적이 입자로 잡히고 화재 위험", "라이터(combustion)와 같은 날 금지, 실험 후 환기"]
+  },
+  {
+   "id": "dust",
+   "status": "bench",
+   "name_ko": "분진 발생",
+   "name_en": "Particulate Matter Abnormality",
+   "phenomenon": "particulate_abnormality",
+   "factory_situation": "가공·마모·청소 등으로 공기 중 분진이 늘어난 상황.",
+   "target_state": "A5 분진 이상",
+   "bench_intervention": "불연성 가루(분필가루·탈크): 30 cm 이상 떨어져 살짝 털거나 뿌림",
+   "primary_sensors": ["SPS30"],
+   "secondary_sensors": [],
+   "expected": [
+    {"sensor": "PM10·PM4", "change": "상승 (굵은 입자 비중 증가)", "timing": "수 초"},
+    {"sensor": "PM 전체", "change": "개입 후 수 분에 걸쳐 가라앉음", "timing": "회복 구간"}
+   ],
+   "must_not_change": ["FLIR·NTC (열)", "BME680 gas", "CO₂"],
+   "relevant_columns": ["pm10_ug_m3", "pm4_0_ug_m3", "pm2_5_ug_m3", "pm1_0_ug_m3"],
+   "safety": ["밀가루·설탕·톱밥 등 가연성 분말 금지 (분진 폭발)", "SPS30 흡입구에 직접 불기 금지, 측정이 이상하면 SPS30 리셋으로 확인"]
+  },
+  {"id": "thermal_abnormal", "status": "field", "name_ko": "열 이상", "name_en": "Thermal Abnormality",
+   "phenomenon": "thermal_abnormality", "factory_situation": "장비 표면·국소 과열.", "target_state": "A2 / A3",
+   "bench_intervention": null, "primary_sensors": ["FLIR", "NTC"], "secondary_sensors": ["CT"],
+   "expected": [], "must_not_change": [], "relevant_columns": ["flir_max_c", "flir_mean_c", "ntc_temperature_c"],
+   "safety": [], "remark": "유도 방법은 컨소시엄 협의(TBD). 현재 bench 시나리오 아님"},
+  {"id": "overload", "status": "blocked", "name_ko": "부하 이상", "name_en": "Load Abnormality",
+   "phenomenon": "load_abnormality", "factory_situation": "정상 대비 전기·기계 부하 변화.", "target_state": "A1 / A7",
+   "bench_intervention": null, "primary_sensors": ["CT"], "secondary_sensors": ["NTC", "FLIR"],
+   "expected": [], "must_not_change": [], "relevant_columns": ["ct1_vrms", "ct1_current_a_nominal", "ntc_temperature_c"],
+   "safety": [], "remark": "CT1 이 실제 부하에 물려 있지 않아(noise floor) 관측 불가"},
+  {"id": "normal", "status": "baseline", "name_ko": "정상", "name_en": "Normal",
+   "phenomenon": null, "factory_situation": "개입 없음, 정상 운전 기준선.", "target_state": "normal",
+   "bench_intervention": null, "primary_sensors": [], "secondary_sensors": [],
+   "expected": [], "must_not_change": [], "relevant_columns": ["ntc_temperature_c", "flir_max_c", "pm2_5_ug_m3", "bme680_gas_ohm", "co2_ppm"],
+   "safety": [], "remark": "모든 판정의 기준선. 같은 설치 위치의 정상 데이터가 먼저 필요"}
+ ]
+}

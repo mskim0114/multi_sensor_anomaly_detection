@@ -389,6 +389,10 @@ class Handler(BaseHTTPRequestHandler):
                         f"{record['action']} id={record['id']}")
         self.send_json(200, record)
 
+    def r_scenarios(self, query):
+        self.viewer()
+        self.send_json(200, self.hub.store.scenarios())
+
     def r_commands(self, query):
         self.viewer()
         self.send_json(200, {"commands": self.hub.store.commands(query.get("device", ""))})
@@ -442,6 +446,7 @@ ROUTES = {
     ("POST", "/api/v1/device/command_result"): Handler.r_command_result,
     ("POST", "/api/v1/control"): Handler.r_control,
     ("GET", "/api/v1/commands"): Handler.r_commands,
+    ("GET", "/api/v1/scenarios"): Handler.r_scenarios,
     ("POST", "/api/v1/login"): Handler.r_login,
     ("POST", "/api/v1/logout"): Handler.r_logout,
     ("GET", "/api/v1/me"): Handler.r_me,

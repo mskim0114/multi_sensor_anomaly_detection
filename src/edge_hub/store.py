@@ -37,6 +37,7 @@ MAX_OPEN_UNITS = 64                              # unfinished uploads per device
 MIN_FREE_BYTES = 20 * 1024 ** 3                  # keep this much free on the data disk
 MAX_FRAMES_PER_CHUNK = 1000
 COMMAND_ACTIONS = ("start", "stop", "reset_sps30")
+SCENARIOS_FILE = Path(__file__).with_name("scenarios.json")
 COMMAND_DELIVERY_S = 120          # not picked up by the device in time -> expired, never run later
 COMMAND_RESULT_S = 180            # delivered but no result reported -> no_result
 COMMAND_KEEP_S = 90 * 86400       # audit rows kept 90 days
@@ -576,6 +577,28 @@ class Store:
         return {"chunk": chunk, "index": index, "frames_in_chunk": shape[0], "sequence": seq,
                 "shape": [120, 160], "dtype": "<u2", "conversion": "raw / 100 - 273.15",
                 "data": base64.b64encode(frame).decode()}
+
+    # -------------------------------------------------------------- scenarios
+    def scenarios(self) -> dict:
+        """Scenario definitions (scenarios.json, versioned with the code) plus the received
+        trials of each scenario from the index. Definitions describe, they never label."""
+        spec = json.loads(SCENARIOS_FILE.read_text(encoding="utf-8"))
+        by_scenario: dict[str, list] = {}
+        for unit in self.units():
+            scenario = (unit.get("summary") or {}).get("scenario_id")
+            if isinstance(scenario, str):
+                by_scenario.setdefault(scenario, []).append(unit)
+        for entry in spec["scenarios"]:
+            trials = by_scenario.get(entry["id"], [])
+            entry["received"] = {"count": len(trials),
+                                 "bench": sum(1 for u in trials if (u.get("summary") or {}).get("test_mode")),
+                                 "recent": [{"device": u["device"], "unit": u["unit"],
+                                             "status": u["summary"].get("status"),
+                                             "severity_level": u["summary"].get("severity_level"),
+                                             "started_utc": u["summary"].get("started_utc"),
+                                             "operator_note": (u["summary"].get("operator_note") or "")[:200]}
+                                            for u in trials[:20]]}
+        return spec
 
     # --------------------------------------------------------- remote control
     def request_command(self, device: str, action: str, user: str) -> dict:

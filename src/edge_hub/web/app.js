@@ -31,7 +31,7 @@ const fmtNum = (v) => typeof v === "number" ? (Math.abs(v) >= 1000 ? v.toFixed(0
 // ------------------------------------------------------------------ login
 function showLogin() {
   clearInterval(state.timer);
-  for (const id of ["overview", "live", "units"]) $(id).hidden = true;
+  for (const id of ["overview", "live", "scenarios", "units"]) $(id).hidden = true;
   $("nav").hidden = true; $("who").hidden = true; $("login").hidden = false;
 }
 
@@ -63,11 +63,11 @@ function start(me) {
 function show(view) {
   state.view = view;
   for (const b of document.querySelectorAll("nav button")) b.classList.toggle("active", b.dataset.view === view);
-  for (const id of ["overview", "live", "units"]) $(id).hidden = id !== view;
+  for (const id of ["overview", "live", "scenarios", "units"]) $(id).hidden = id !== view;
   clearInterval(state.timer);
-  const tick = { overview: refreshOverview, live: refreshLive, units: refreshUnits }[view];
+  const tick = { overview: refreshOverview, live: refreshLive, scenarios: refreshScenarios, units: refreshUnits }[view];
   tick();
-  if (view !== "units") state.timer = setInterval(tick, 5000);
+  if (view === "overview" || view === "live") state.timer = setInterval(tick, 5000);
 }
 
 // --------------------------------------------------------------- overview
@@ -212,7 +212,7 @@ $("live-range").addEventListener("change", refreshLive);
 $("trend-keys").addEventListener("change", refreshLive);
 
 const LINE_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d"];
-function drawChart(canvas, xs, series, timeAxis) {
+function drawChart(canvas, xs, series, timeAxis, markers = []) {
   const ctx = canvas.getContext("2d"); const W = canvas.width, H = canvas.height, L = 60, R = 10, T = 10, B = 40;
   const css = getComputedStyle(document.body);
   ctx.clearRect(0, 0, W, H); ctx.font = "12px system-ui"; ctx.fillStyle = css.color; ctx.strokeStyle = "#8884";
@@ -233,12 +233,58 @@ function drawChart(canvas, xs, series, timeAxis) {
     ctx.fillText(`${name} [${fmtNum(lo)} … ${fmtNum(hi)}]`, L + 4, T + 14 + 14 * n);
   });
   ctx.fillStyle = css.color;
+  for (const m of markers) {   // experiment phase boundaries (procedure, not labels)
+    if (m.x < x0 || m.x > x1) continue;
+    const x = L + (m.x - x0) / (x1 - x0 || 1) * (W - L - R);
+    ctx.save(); ctx.setLineDash([4, 4]); ctx.strokeStyle = "#8888"; ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, H - B); ctx.stroke(); ctx.restore();
+    ctx.fillText(m.label, x + 3, H - B - 4);
+  }
   const label = (x) => timeAxis ? new Date(x).toLocaleTimeString() : String(Math.round(x));
   ctx.fillText(label(x0), L, H - 12); const right = label(x1); ctx.fillText(right, W - R - ctx.measureText(right).width, H - 12);
 }
 
+// -------------------------------------------------------------- scenarios
+const SCENARIO_STATUS = { bench: "사무실 bench 시나리오", field: "현장 시나리오 (유도 방법 TBD)", blocked: "현재 관측 불가", baseline: "기준선" };
+async function refreshScenarios() {
+  const spec = await api("/api/v1/scenarios");
+  state.scenarioSpec = spec.scenarios;
+  $("scenario-note").textContent = `정의 ${spec.definitions_version} · ${spec.note}`;
+  const cards = $("scenario-cards"); cards.replaceChildren();
+  for (const s of spec.scenarios) cards.append(scenarioCard(s));
+}
+
+function scenarioCard(s) {
+  const kv = el("dl", { class: "kv" },
+    el("dt", {}, "scenario_id"), el("dd", {}, s.id),
+    el("dt", {}, "공장 상황"), el("dd", {}, s.factory_situation || "—"),
+    el("dt", {}, "대상 상태"), el("dd", {}, s.target_state || "—"),
+    el("dt", {}, "주 센서"), el("dd", {}, [...(s.primary_sensors || []), ...((s.secondary_sensors || []).map((x) => `(${x})`))].join(", ") || "—"),
+    el("dt", {}, "bench 개입"), el("dd", {}, s.bench_intervention || s.remark || "—"));
+  const card = el("div", { class: "card" },
+    el("h3", {}, `${s.name_ko} `, el("span", { class: "badge" }, SCENARIO_STATUS[s.status] || s.status)),
+    el("p", { class: "muted" }, s.name_en), kv);
+  if ((s.expected || []).length) {
+    const table = el("table", {}, el("tr", {}, el("th", {}, "센서"), el("th", {}, "예상 반응 (가설)"), el("th", {}, "시점")));
+    for (const e of s.expected) table.append(el("tr", {}, el("td", {}, e.sensor), el("td", {}, e.change), el("td", {}, e.timing)));
+    if ((s.must_not_change || []).length) table.append(el("tr", {}, el("td", {}, "변하지 않아야 함"), el("td", {}, s.must_not_change.join(", ")), el("td", {}, "")));
+    card.append(el("h3", {}, "멀티센서 서명"), table);
+  }
+  if ((s.safety || []).length) card.append(el("h3", {}, "안전 수칙"), el("ul", {}, ...s.safety.map((x) => el("li", {}, x))));
+  const r = s.received || { count: 0, recent: [] };
+  card.append(el("h3", {}, `수신된 trial ${r.count}개${r.bench ? ` (bench ${r.bench})` : ""}`));
+  if (r.recent.length) {
+    const list = el("table", {}, el("tr", {}, ...["unit", "상태", "severity", "시작(UTC)", "메모"].map((h) => el("th", {}, h))));
+    for (const t of r.recent) list.append(el("tr", { class: "clickable", onclick: () => { show("units"); openUnit(t.device, t.unit); } },
+      el("td", {}, t.unit.split("/").pop()), el("td", {}, String(t.status ?? "—")), el("td", {}, String(t.severity_level ?? "—")),
+      el("td", {}, (t.started_utc || "—").slice(0, 19)), el("td", {}, t.operator_note || "")));
+    card.append(el("div", { class: "scroll" }, list));
+  } else card.append(el("p", { class: "muted" }, "아직 없음"));
+  return card;
+}
+
 // ------------------------------------------------------------------ units
 async function refreshUnits() {
+  if (!state.scenarioSpec) state.scenarioSpec = (await api("/api/v1/scenarios").catch(() => ({ scenarios: [] }))).scenarios;
   if (!state.overview) await refreshOverview().catch(() => {});
   const device = $("units-device").value;
   const data = await api(`/api/v1/units${device ? "?device=" + encodeURIComponent(device) : ""}`);
@@ -267,7 +313,12 @@ async function openUnit(device, unit) {
   for (const [k, v] of rows) kv.append(el("dt", {}, k), el("dd", {}, v));
   meta.append(kv);
   const numeric = d.scalar_columns.filter((c) => !["timestamp_utc", "quality_invalid_reasons"].includes(c) && !c.endsWith("_status"));
-  $("unit-cols").replaceChildren(...numeric.map((c) => { const o = el("option", { value: c }, c); o.selected = ["ntc_temperature_c", "flir_max_c"].includes(c); return o; }));
+  const experiment = (d.documents || {})["experiment.json"] || {};
+  const scenario = (state.scenarioSpec || []).find((s) => s.id === experiment.scenario_id);
+  const preferred = scenario ? scenario.relevant_columns : ["ntc_temperature_c", "flir_max_c"];
+  state.unitMarkers = (experiment.phase_plan || []).filter((p) => p.start_tick > 0)
+    .map((p) => ({ x: p.start_tick, label: { anomaly: "개입 시작", recovery: "회복 시작" }[p.phase] || p.phase }));
+  $("unit-cols").replaceChildren(...numeric.map((c) => { const o = el("option", { value: c }, c); o.selected = preferred.includes(c); return o; }));
   $("unit-chunk").replaceChildren(...d.thermal_chunks.map((c) => el("option", { value: c }, c)));
   $("unit-detail").scrollIntoView({ behavior: "smooth" });
   plotUnit(); showFrame();
@@ -278,7 +329,7 @@ async function plotUnit() {
   const cols = [...$("unit-cols").selectedOptions].map((o) => o.value);
   const { device, unit } = state.unit;
   const d = await api(`/api/v1/unit/scalars?device=${encodeURIComponent(device)}&unit=${encodeURIComponent(unit)}&columns=${encodeURIComponent(cols.join(","))}`);
-  drawChart($("unit-chart"), d.sequence, d.series, false);
+  drawChart($("unit-chart"), d.sequence, d.series, false, state.unitMarkers || []);
 }
 $("unit-plot").addEventListener("click", plotUnit);
 

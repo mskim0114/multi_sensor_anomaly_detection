@@ -36,7 +36,7 @@ UNIT_ROOTS = {"dataset": 3, "runs": 2}           # first component -> number of 
 MAX_OPEN_UNITS = 64                              # unfinished uploads per device
 MIN_FREE_BYTES = 20 * 1024 ** 3                  # keep this much free on the data disk
 MAX_FRAMES_PER_CHUNK = 1000
-COMMAND_ACTIONS = ("start", "stop")
+COMMAND_ACTIONS = ("start", "stop", "reset_sps30")
 COMMAND_DELIVERY_S = 120          # not picked up by the device in time -> expired, never run later
 COMMAND_RESULT_S = 180            # delivered but no result reported -> no_result
 COMMAND_KEEP_S = 90 * 86400       # audit rows kept 90 days
@@ -576,7 +576,7 @@ class Store:
         """Queue start/stop for a device. Only these two actions exist; nothing is executed here."""
         check_device(device)
         if action not in COMMAND_ACTIONS:
-            raise HubError(400, "action must be start or stop")
+            raise HubError(400, "action must be start, stop or reset_sps30")
         entry = self.devices().get(device)
         if not entry or entry.get("revoked"):
             raise HubError(404, "no such device")

@@ -119,7 +119,7 @@ function controlBlock(d) {
   if (state.role === "operator" && d.registered) {
     const collecting = (s.collector || {}).status === "running";
     const send = async (action) => {
-      const label = action === "start" ? "수집을 시작" : "수집을 정지";
+      const label = { start: "수집을 시작", stop: "수집을 정지", reset_sps30: "SPS30 센서를 리셋" }[action];
       if (!confirm(`${d.device} 에서 ${label}할까요? (자유 수집 run, 기록이 남습니다)`)) return;
       try {
         await api("/api/v1/control", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" },
@@ -129,13 +129,19 @@ function controlBlock(d) {
     };
     const startButton = el("button", { onclick: () => send("start") }, "수집 시작");
     const stopButton = el("button", { onclick: () => send("stop") }, "수집 정지");
+    const resetButton = el("button", { onclick: () => send("reset_sps30"),
+      title: "수집기가 멈춘 상태에서만. SPS30 에 device reset 을 보내고 응답·측정을 확인합니다" }, "SPS30 리셋");
     startButton.disabled = Boolean(open) || !d.online || !allowed || collecting;
     stopButton.disabled = Boolean(open) || !d.online || !allowed || !collecting;
-    box.append(el("div", { class: "toolbar" }, startButton, stopButton));
+    resetButton.disabled = Boolean(open) || !d.online || !allowed || collecting;
+    box.append(el("div", { class: "toolbar" }, startButton, stopButton, resetButton));
   }
   const last = history[0];
   if (last) {
-    const detail = last.result ? String(last.result.error || (last.result.collector || {}).status || "") : "";
+    const r = last.result || {};
+    const sps = r.sps30 || null;
+    const detail = sps ? `SPS30 ${sps.ok ? "정상 응답" + (sps.measurement ? ` (PM2.5 ${fmtNum(sps.measurement.pm2_5)})` : "") : "실패: " + String(sps.hint || sps.error || "")}`
+      : String(r.error || (r.collector || {}).status || "");
     box.append(el("p", { class: "muted" }, `최근 명령: ${last.action} · ${COMMAND_STATE[last.state] || last.state} · ${last.requested_by} · ${(last.requested_utc || "").slice(0, 19)}${detail ? " · " + detail : ""}`));
   }
   return box;

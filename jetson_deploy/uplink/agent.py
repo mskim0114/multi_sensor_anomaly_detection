@@ -264,7 +264,7 @@ class Agent:
             log.info("hub command %s %s requested by %s", command_id, action, command.get("requested_by"))
             if not self.config.get("allow_remote_control"):
                 result = {"ok": False, "error": "remote control is disabled on this device (allow_remote_control)"}
-            elif action not in ("start", "stop"):
+            elif action not in ("start", "stop", "reset_sps30"):
                 result = {"ok": False, "error": f"unsupported action {action!r}"}
             elif not self._command_lock.acquire(blocking=False):
                 result = {"ok": False, "error": "another command is still running on the device"}
@@ -290,6 +290,8 @@ class Agent:
         inheriting this agent's Nice=10 / idle I/O; stop: collect.py's own graceful stop."""
         launcher = str(REPO / "jetson_deploy" / "run_python.sh")
         collect = str(REPO / "jetson_deploy" / "collect.py")
+        if action == "reset_sps30":
+            return self.reset_sps30(launcher)
         if action == "start":
             suffix = command_id if re.fullmatch(r"[0-9a-f]{24}", command_id or "") else f"{time.time_ns():x}"
             argv = ["systemd-run", "--user", "--collect", "--quiet", f"--unit=factory-collect-{suffix}",
@@ -312,6 +314,28 @@ class Agent:
         ok = done.returncode == 0 and state.get("status") in expected
         return {"ok": bool(ok), "returncode": done.returncode, "collector": state,
                 "stderr_tail": done.stderr[-300:] if done.returncode else ""}
+
+    def reset_sps30(self, launcher: str) -> dict:
+        """Operator-requested SPS30 soft reset, only while no acquisition runs (the tool also
+        takes the hardware lock itself and refuses if anything holds the bus)."""
+        state = _collector_state() or {}
+        if state.get("alive"):
+            return {"ok": False, "error": "collector is running; stop it before resetting the SPS30",
+                    "collector": state}
+        tool = str(REPO / "jetson_deploy" / "scripts" / "13_reset_sps30.py")
+        done = subprocess.run([launcher, tool], capture_output=True, text=True, timeout=60,
+                              env=dict(os.environ, PYTHONNOUSERSITE="1"))
+        try:
+            report = json.loads(done.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            report = {"stdout_tail": done.stdout[-300:]}
+        steps = report.get("steps") or {}
+        summary = {name: ("ok" if step.get("ok") else step.get("error", "failed"))
+                   for name, step in steps.items() if isinstance(step, dict)}
+        return {"ok": done.returncode == 0, "returncode": done.returncode, "sps30": {
+            "ok": report.get("ok"), "steps": summary, "measurement": report.get("measurement"),
+            "hint": report.get("hint"), "error": report.get("error"), "log": report.get("log")},
+            "stderr_tail": done.stderr[-300:] if done.returncode not in (0, 1) else ""}
 
     def report_command_results(self) -> None:
         if not self._report_lock.acquire(blocking=False):

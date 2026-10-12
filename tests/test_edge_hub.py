@@ -665,6 +665,28 @@ class RemoteControlTests(HubFixture):
         self.assertEqual(self.store.commands("jetson-test-01")[0]["state"], "done")
         self.assertEqual(agent.ledger.unreported_commands(), [])
 
+    def test_reset_sps30_is_queued_and_refused_on_the_device_while_collecting(self):
+        self.finish_open_commands()
+        record = self.store.request_command("jetson-test-01", "reset_sps30", "boss")
+        self.assertEqual(record["action"], "reset_sps30")
+        self.finish_open_commands()
+        agent = self.agent()
+        with unittest.mock.patch("uplink.agent._collector_state", return_value={"status": "running", "alive": True}), \
+                unittest.mock.patch("uplink.agent.subprocess.run") as run:
+            result = agent.collector_command("reset_sps30", "d" * 24)
+        self.assertFalse(result["ok"])
+        self.assertIn("stop it", result["error"])
+        run.assert_not_called()
+        done = unittest.mock.Mock(returncode=1, stdout=json.dumps({"ok": False, "hint": "power cycle needed",
+                                  "steps": {"probe_before": {"ok": False, "error": "TimeoutError"}}}) + "\n", stderr="")
+        with unittest.mock.patch("uplink.agent._collector_state", return_value={"status": "failed", "alive": False}), \
+                unittest.mock.patch("uplink.agent.subprocess.run", return_value=done) as run:
+            result = agent.collector_command("reset_sps30", "e" * 24)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["sps30"]["hint"], "power cycle needed")
+        self.assertEqual(result["sps30"]["steps"], {"probe_before": "TimeoutError"})
+        self.assertTrue(run.call_args[0][0][1].endswith("13_reset_sps30.py"))
+
     def test_set_role_cli(self):
         viewers = self.data_root / "config" / "viewers.json"
         saved = viewers.read_text()

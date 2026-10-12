@@ -80,7 +80,8 @@ class HubFixture(unittest.TestCase):
                       "--token-out", str(other)])
         cls.other_token = other.read_text().strip()
         viewers = cls.data_root / "config" / "viewers.json"
-        viewers.write_text(json.dumps({"viewer": hash_password("correct horse battery")}))
+        viewers.write_text(json.dumps({"viewer": hash_password("correct horse battery"),
+                                       "boss": dict(hash_password("operator horse battery"), role="operator")}))
         tls = cls.data_root / "tls"
         cls.server = make_server(cls.store, "127.0.0.1", 0, tls_cert=str(tls / "server.pem"),
                                  tls_key=str(tls / "server.key"), log=lambda m: None)
@@ -94,9 +95,12 @@ class HubFixture(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         for path in sorted(cls.tmp.rglob("*"), reverse=True):   # raw is read-only by design
-            if not path.is_symlink():
-                os.chmod(path, 0o700 if path.is_dir() else 0o600)
-        shutil.rmtree(cls.tmp)
+            try:
+                if not path.is_symlink():
+                    os.chmod(path, 0o700 if path.is_dir() else 0o600)
+            except FileNotFoundError:   # e.g. a SQLite -wal file removed as its connection closes
+                pass
+        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
         self.edge = Path(tempfile.mkdtemp(dir=self.tmp, prefix="edge_"))
@@ -125,9 +129,9 @@ class HubFixture(unittest.TestCase):
         conn.close()
         return response.status, dict(response.getheaders()), (json.loads(data) if data[:1] in (b"{", b"[") else data)
 
-    def login(self) -> str:
+    def login(self, user="viewer", password="correct horse battery") -> str:
         status, headers, _ = self.https("POST", "/api/v1/login", json.dumps(
-            {"user": "viewer", "password": "correct horse battery"}), {"Content-Type": "application/json"})
+            {"user": user, "password": password}), {"Content-Type": "application/json"})
         self.assertEqual(status, 200)
         return headers["Set-Cookie"].split(";")[0]
 
@@ -523,6 +527,155 @@ class HardeningTests(HubFixture):
         os.symlink(real.parent, self.dataset / "linkedgroup")
         units, _ = discover({"dataset": self.dataset}, settle_s=60)
         self.assertEqual([u.key for u in units], [])
+
+
+
+class RemoteControlTests(HubFixture):
+    """Operator start/stop: queued on the hub, delivered once via heartbeat, device opt-in."""
+
+    def setUp(self):
+        super().setUp()
+        self.online(True)
+
+    def online(self, remote_control):
+        self.store.heartbeat("jetson-test-01", "127.0.0.1", {"remote_control": remote_control, "interval_s": 10})
+
+    def test_commands_are_refused_for_offline_or_non_opted_in_devices(self):
+        self.finish_open_commands()
+        self.online(False)
+        with self.assertRaises(HubError) as caught:
+            self.store.request_command("jetson-test-01", "start", "boss")
+        self.assertIn("disabled", caught.exception.message)
+        self.online(True)
+        with self.store._db_lock:
+            self.store.db.execute("UPDATE devices SET last_seen_epoch=0 WHERE device='jetson-test-01'")
+            self.store.db.commit()
+        with self.assertRaises(HubError) as caught:
+            self.store.request_command("jetson-test-01", "start", "boss")
+        self.assertIn("offline", caught.exception.message)
+        self.online(True)
+
+    def test_add_viewer_rerun_keeps_the_operator_role(self):
+        viewers = self.data_root / "config" / "viewers.json"
+        saved = viewers.read_text()
+        try:
+            with unittest.mock.patch("getpass.getpass", return_value="a new long password"):
+                self.assertEqual(hub_cli.main(["add-viewer", "--data-root", str(self.data_root), "--user", "boss"]), 0)
+            self.assertEqual(json.loads(viewers.read_text())["boss"]["role"], "operator")
+        finally:
+            viewers.write_text(saved)
+
+    def control(self, cookie, action="start", device="jetson-test-01", headers=None):
+        base = {"Cookie": cookie, "Content-Type": "application/json", "X-Hub-Request": "1"}
+        base.update(headers or {})
+        return self.https("POST", "/api/v1/control", json.dumps({"device": device, "action": action}), base)
+
+    def finish_open_commands(self):
+        for command in self.store.take_commands("jetson-test-01"):
+            self.store.command_result("jetson-test-01", command["id"], True, {})
+
+    def test_only_operators_can_queue_and_only_from_the_same_origin(self):
+        self.finish_open_commands()
+        viewer = self.login()
+        self.assertEqual(self.control(viewer)[0], 403)
+        boss = self.login("boss", "operator horse battery")
+        _, _, me = self.https("GET", "/api/v1/me", headers={"Cookie": boss})
+        self.assertEqual(me["role"], "operator")
+        self.assertEqual(self.control(boss, headers={"X-Hub-Request": "0"})[0], 403)
+        self.assertEqual(self.control(boss, headers={"Origin": "https://evil.example"})[0], 403)
+        self.assertEqual(self.control(boss, action="reboot")[0], 400)
+        self.assertEqual(self.control(boss, device="jetson-nope-99")[0], 404)
+        status, _, record = self.control(boss, headers={"Origin": f"https://127.0.0.1:{self.port}"})
+        self.assertEqual((status, record["state"], record["requested_by"]), (200, "pending", "boss"))
+        self.assertEqual(self.control(boss, action="stop")[0], 409, "one open command per device")
+        self.finish_open_commands()
+
+    def test_a_command_is_delivered_once_and_its_result_recorded(self):
+        self.finish_open_commands()
+        record = self.store.request_command("jetson-test-01", "start", "boss")
+        auth = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        beat = json.dumps({"remote_control": True}).encode()
+        _, _, first = self.https("POST", "/api/v1/device/heartbeat", beat, auth)
+        _, _, second = self.https("POST", "/api/v1/device/heartbeat", beat, auth)
+        self.assertEqual([c["id"] for c in first["commands"]], [record["id"]])
+        self.assertEqual(second["commands"], [])
+        other = {"Authorization": f"Bearer {self.other_token}", "Content-Type": "application/json"}
+        status, _, _ = self.https("POST", "/api/v1/device/command_result",
+                                  json.dumps({"id": record["id"], "ok": True}), other)
+        self.assertEqual(status, 404, "a device cannot report another device's command")
+        status, _, reply = self.https("POST", "/api/v1/device/command_result",
+                                      json.dumps({"id": record["id"], "ok": True, "result": {"collector": {"status": "running"}}}), auth)
+        self.assertEqual(reply["state"], "done")
+        _, _, again = self.https("POST", "/api/v1/device/command_result", json.dumps({"id": record["id"], "ok": False}), auth)
+        self.assertTrue(again["duplicate"])
+        cookie = self.login()
+        _, _, listed = self.https("GET", "/api/v1/commands?device=jetson-test-01", headers={"Cookie": cookie})
+        self.assertEqual(listed["commands"][0]["state"], "done")
+        self.assertEqual(listed["commands"][0]["result"]["collector"]["status"], "running")
+
+    def test_undelivered_commands_expire_and_are_never_run_later(self):
+        self.finish_open_commands()
+        record = self.store.request_command("jetson-test-01", "stop", "boss")
+        with self.store._db_lock:
+            self.store.db.execute("UPDATE commands SET expires_epoch=0 WHERE id=?", (record["id"],))
+            self.store.db.commit()
+        self.assertEqual(self.store.take_commands("jetson-test-01"), [])
+        self.assertEqual(self.store.commands("jetson-test-01")[0]["state"], "expired")
+
+    def test_revoked_devices_cannot_be_commanded(self):
+        token_file = self.tmp / "rc.token"
+        hub_cli.main(["add-device", "--data-root", str(self.data_root), "--device-id", "jetson-test-07",
+                      "--token-out", str(token_file)])
+        hub_cli.main(["revoke-device", "--data-root", str(self.data_root), "--device-id", "jetson-test-07"])
+        with self.assertRaises(HubError) as caught:
+            self.store.request_command("jetson-test-07", "start", "boss")
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_device_runs_only_when_it_opted_in_and_never_twice(self):
+        agent = self.agent()
+        calls = []
+        agent.collector_command = lambda action, command_id=None: calls.append(action) or {"ok": True, "collector": {"status": "running"}}
+        agent.handle_commands([{"id": "a" * 24, "action": "start"}])
+        self.assertEqual(calls, [], "allow_remote_control defaults to off")
+        self.assertIn("disabled", agent.ledger.unreported_commands()[0][1]["error"])
+        agent.config["allow_remote_control"] = True
+        for _ in range(2):   # the same id twice (redelivery) runs once
+            agent.handle_commands([{"id": "b" * 24, "action": "start"}, {"id": "c" * 24, "action": "rm -rf"},
+                                   "junk", {"id": 5}])
+        for _ in range(50):
+            if any(cid == "b" * 24 for cid, _ in agent.ledger.unreported_commands()):
+                break
+            time.sleep(0.05)
+        self.assertEqual(calls, ["start"])
+        results = dict(agent.ledger.unreported_commands())
+        self.assertIn("unsupported", results["c" * 24]["error"])
+
+    def test_results_reach_the_hub_and_are_not_resent(self):
+        self.finish_open_commands()
+        record = self.store.request_command("jetson-test-01", "start", "boss")
+        agent = self.agent()
+        agent.config["allow_remote_control"] = True
+        agent.collector_command = lambda action, command_id=None: {"ok": True, "collector": {"status": "running"}}
+        reply = agent.client.request("POST", "/api/v1/device/heartbeat", json_body={"remote_control": True})
+        agent.handle_commands(reply["commands"])
+        for _ in range(100):
+            if self.store.commands("jetson-test-01")[0]["state"] == "done" and not agent.ledger.unreported_commands():
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.store.commands("jetson-test-01")[0]["state"], "done")
+        self.assertEqual(agent.ledger.unreported_commands(), [])
+
+    def test_set_role_cli(self):
+        viewers = self.data_root / "config" / "viewers.json"
+        saved = viewers.read_text()
+        try:
+            self.assertEqual(hub_cli.main(["set-role", "--data-root", str(self.data_root), "--user", "viewer",
+                                           "--role", "operator"]), 0)
+            self.assertEqual(json.loads(viewers.read_text())["viewer"]["role"], "operator")
+            self.assertEqual(hub_cli.main(["set-role", "--data-root", str(self.data_root), "--user", "ghost",
+                                           "--role", "operator"]), 1)
+        finally:
+            viewers.write_text(saved)
 
 
 import unittest.mock  # noqa: E402

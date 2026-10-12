@@ -26,6 +26,8 @@ class Ledger:
                 unit TEXT PRIMARY KEY, state TEXT, manifest_sha256 TEXT, files INTEGER,
                 bytes INTEGER, attempts INTEGER DEFAULT 0, last_error TEXT, receipt TEXT,
                 updated_utc TEXT);
+            CREATE TABLE IF NOT EXISTS commands(
+                id TEXT PRIMARY KEY, action TEXT, received_utc TEXT, result TEXT, reported INTEGER DEFAULT 0);
         """)
         self.db.commit()
 
@@ -69,6 +71,32 @@ class Ledger:
                 "receipt=COALESCE(?, receipt), attempts=attempts+?, updated_utc=? WHERE unit=?",
                 (state, manifest_sha256, files, total, error,
                  json.dumps(receipt) if receipt is not None else None, 1 if attempt else 0, utc_now(), unit))
+            self.db.commit()
+
+    def command_seen(self, command_id: str, action: str) -> bool:
+        """Record a command id; False if it was already recorded (never execute twice)."""
+        with self.lock:
+            cursor = self.db.execute("INSERT OR IGNORE INTO commands(id, action, received_utc) VALUES(?,?,?)",
+                                     (command_id, action, utc_now()))
+            # bounded: keep the newest 1000 reported rows (ids stay unique per hub, which never reuses them)
+            self.db.execute("DELETE FROM commands WHERE reported=1 AND rowid NOT IN "
+                            "(SELECT rowid FROM commands ORDER BY rowid DESC LIMIT 1000)")
+            self.db.commit()
+            return cursor.rowcount == 1
+
+    def command_done(self, command_id: str, result: dict) -> None:
+        with self.lock:
+            self.db.execute("UPDATE commands SET result=? WHERE id=?", (json.dumps(result), command_id))
+            self.db.commit()
+
+    def unreported_commands(self) -> list[tuple[str, dict]]:
+        with self.lock:
+            rows = self.db.execute("SELECT id, result FROM commands WHERE result IS NOT NULL AND reported=0").fetchall()
+        return [(r[0], json.loads(r[1])) for r in rows]
+
+    def command_reported(self, command_id: str) -> None:
+        with self.lock:
+            self.db.execute("UPDATE commands SET reported=1 WHERE id=?", (command_id,))
             self.db.commit()
 
     def summary(self) -> dict:

@@ -3,7 +3,8 @@
   init         --data-root DIR
   add-device   --data-root DIR --device-id ID --token-out FILE   (token written 0600, never printed)
   revoke-device --data-root DIR --device-id ID                   (token stops working at once)
-  add-viewer   --data-root DIR --user NAME                       (password typed at a prompt)
+  add-viewer   --data-root DIR --user NAME [--role operator]     (password typed at a prompt)
+  set-role     --data-root DIR --user NAME --role viewer|operator  (operator may start/stop collection)
   gen-cert     --data-root DIR --san IP:10.252.219.59 --san DNS:hub.example
   serve        --data-root DIR [--host 0.0.0.0] [--port 8443] [--tls-cert --tls-key | --plain-http]
   verify       --data-root DIR [--device ID]                     (re-hash committed units)
@@ -55,13 +56,30 @@ def cmd_add_viewer(args) -> int:
         return 2
     path = store.root / "config" / "viewers.json"
     viewers = json.loads(path.read_text()) if path.exists() else {}
-    viewers[args.user] = hash_password(password)
+    role = args.role or (viewers.get(args.user) or {}).get("role", "viewer")   # a password reset keeps the role
+    viewers[args.user] = dict(hash_password(password), role=role)
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as stream:
         json.dump(viewers, stream, indent=1)
     os.replace(tmp, path)
     print(f"viewer {args.user} saved")
+    return 0
+
+
+def cmd_set_role(args) -> int:
+    path = Store(args.data_root).root / "config" / "viewers.json"
+    viewers = json.loads(path.read_text()) if path.exists() else {}
+    if args.user not in viewers:
+        print(f"no viewer {args.user}", file=sys.stderr)
+        return 1
+    viewers[args.user]["role"] = args.role
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(viewers, stream, indent=1)
+    os.replace(tmp, path)
+    print(f"{args.user} is now {args.role}")
     return 0
 
 
@@ -121,7 +139,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python -m src.edge_hub", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "add-device", "revoke-device", "add-viewer", "gen-cert", "serve", "verify", "reindex"):
+    for name in ("init", "add-device", "revoke-device", "add-viewer", "set-role", "gen-cert", "serve", "verify",
+                 "reindex"):
         p = sub.add_parser(name)
         p.add_argument("--data-root", required=True, type=Path)
         if name == "revoke-device":
@@ -130,8 +149,9 @@ def main(argv=None) -> int:
             p.add_argument("--device-id", required=True)
             p.add_argument("--token-out", required=True)
             p.add_argument("--note")
-        if name == "add-viewer":
+        if name in ("add-viewer", "set-role"):
             p.add_argument("--user", required=True)
+            p.add_argument("--role", choices=("viewer", "operator"), default=None, required=name == "set-role")
         if name == "gen-cert":
             p.add_argument("--san", action="append", required=True,
                            help="subjectAltName entry, e.g. IP:10.252.219.59 or DNS:hub.example.org")
@@ -157,6 +177,8 @@ def main(argv=None) -> int:
         return 0 if ok else 1
     if args.command == "add-viewer":
         return cmd_add_viewer(args)
+    if args.command == "set-role":
+        return cmd_set_role(args)
     if args.command == "gen-cert":
         return cmd_gen_cert(args)
     if args.command == "serve":

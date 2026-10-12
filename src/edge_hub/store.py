@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import sqlite3
 import threading
@@ -35,6 +36,10 @@ UNIT_ROOTS = {"dataset": 3, "runs": 2}           # first component -> number of 
 MAX_OPEN_UNITS = 64                              # unfinished uploads per device
 MIN_FREE_BYTES = 20 * 1024 ** 3                  # keep this much free on the data disk
 MAX_FRAMES_PER_CHUNK = 1000
+COMMAND_ACTIONS = ("start", "stop")
+COMMAND_DELIVERY_S = 120          # not picked up by the device in time -> expired, never run later
+COMMAND_RESULT_S = 180            # delivered but no result reported -> no_result
+COMMAND_KEEP_S = 90 * 86400       # audit rows kept 90 days
 MAX_FILES = 20000
 MAX_FILE_BYTES = 64 * 1024 ** 3
 SHA = re.compile(r"^[0-9a-f]{64}$")
@@ -179,10 +184,16 @@ class Store:
                 device TEXT, epoch REAL, values_json TEXT);
             CREATE INDEX IF NOT EXISTS telemetry_device_epoch ON telemetry(device, epoch);
             CREATE INDEX IF NOT EXISTS telemetry_epoch ON telemetry(epoch);
+            CREATE TABLE IF NOT EXISTS commands(
+                id TEXT PRIMARY KEY, device TEXT, action TEXT, requested_by TEXT,
+                requested_utc TEXT, requested_epoch REAL, expires_epoch REAL, state TEXT,
+                delivered_utc TEXT, delivered_epoch REAL, done_utc TEXT, result TEXT);
+            CREATE INDEX IF NOT EXISTS commands_device ON commands(device, requested_epoch);
         """)
         self.db.commit()
         self.live: dict[str, dict] = {}
         self._last_telemetry: dict[str, float] = {}
+        self.command_events: list[str] = []      # drained into the server log
 
     # ---------------------------------------------------------------- helpers
     def _lock(self, key: str) -> threading.Lock:
@@ -559,6 +570,96 @@ class Store:
         return {"chunk": chunk, "index": index, "frames_in_chunk": shape[0], "sequence": seq,
                 "shape": [120, 160], "dtype": "<u2", "conversion": "raw / 100 - 273.15",
                 "data": base64.b64encode(frame).decode()}
+
+    # --------------------------------------------------------- remote control
+    def request_command(self, device: str, action: str, user: str) -> dict:
+        """Queue start/stop for a device. Only these two actions exist; nothing is executed here."""
+        check_device(device)
+        if action not in COMMAND_ACTIONS:
+            raise HubError(400, "action must be start or stop")
+        entry = self.devices().get(device)
+        if not entry or entry.get("revoked"):
+            raise HubError(404, "no such device")
+        now = time.time()
+        with self._db_lock:
+            row = self.db.execute("SELECT last_seen_epoch, status FROM devices WHERE device=?", (device,)).fetchone()
+        try:
+            status = json.loads(row[1]) if row else {}
+        except ValueError:
+            status = {}
+        if not row or now - row[0] > 3 * float(status.get("interval_s", 10)) + 5:
+            raise HubError(409, "device is offline; a command would only expire")
+        if status.get("remote_control") is not True:
+            raise HubError(409, "remote control is disabled on this device")
+        with self._db_lock:
+            self._expire_commands(now)
+            open_rows = self.db.execute("SELECT id FROM commands WHERE device=? AND state IN ('pending','delivered')",
+                                        (device,)).fetchall()
+            if open_rows:
+                raise HubError(409, "a previous command for this device has not finished yet")
+            record = {"id": secrets.token_hex(12), "device": device, "action": action, "requested_by": user,
+                      "requested_utc": utc_now(), "state": "pending"}
+            self.db.execute("INSERT INTO commands VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (record["id"], device, action, user, record["requested_utc"], now,
+                             now + COMMAND_DELIVERY_S, "pending", None, None, None, None))
+            self.db.commit()
+        return record
+
+    def _expire_commands(self, now: float) -> int:
+        """Caller holds the db lock. Returns how many commands changed state (logged by the server)."""
+        changed = self.db.execute("UPDATE commands SET state='expired', done_utc=? WHERE state='pending' "
+                                  "AND expires_epoch<?", (utc_now(), now)).rowcount
+        changed += self.db.execute("UPDATE commands SET state='no_result', done_utc=? WHERE state='delivered' "
+                                   "AND delivered_epoch<?", (utc_now(), now - COMMAND_RESULT_S)).rowcount
+        self.db.execute("DELETE FROM commands WHERE requested_epoch<?", (now - COMMAND_KEEP_S,))
+        if changed:
+            self.command_events.append(f"{changed} command(s) expired or got no result")
+        return changed
+
+    def take_commands(self, device: str) -> list[dict]:
+        """Pending commands for this device, handed out once (marked delivered)."""
+        check_device(device)
+        now = time.time()
+        with self._db_lock:
+            self._expire_commands(now)
+            rows = self.db.execute("SELECT id, action, requested_utc, requested_by FROM commands "
+                                   "WHERE device=? AND state='pending' ORDER BY requested_epoch", (device,)).fetchall()
+            for row in rows:
+                self.db.execute("UPDATE commands SET state='delivered', delivered_utc=?, delivered_epoch=? WHERE id=?",
+                                (utc_now(), now, row[0]))
+            self.db.commit()
+        return [{"id": r[0], "action": r[1], "requested_utc": r[2], "requested_by": r[3]} for r in rows]
+
+    def command_result(self, device: str, command_id: str, ok, result) -> dict:
+        check_device(device)
+        if not isinstance(command_id, str) or not re.fullmatch(r"[0-9a-f]{24}", command_id) or not isinstance(ok, bool):
+            raise HubError(400, "id and ok are required")
+        clean = _clean_tree(result if isinstance(result, dict) else {})
+        with self._db_lock:
+            row = self.db.execute("SELECT state FROM commands WHERE id=? AND device=?", (command_id, device)).fetchone()
+            if row is None:
+                raise HubError(404, "no such command for this device")
+            if row[0] not in ("delivered", "no_result"):
+                return {"id": command_id, "state": row[0], "duplicate": True}
+            state = "done" if ok else "failed"
+            self.db.execute("UPDATE commands SET state=?, done_utc=?, result=? WHERE id=?",
+                            (state, utc_now(), json.dumps(clean), command_id))
+            self.db.commit()
+        return {"id": command_id, "state": state}
+
+    def commands(self, device: str, limit: int = 20) -> list[dict]:
+        check_device(device)
+        with self._db_lock:
+            self._expire_commands(time.time())
+            self.db.commit()
+            rows = self.db.execute("SELECT id, action, requested_by, requested_utc, state, delivered_utc, done_utc, result "
+                                   "FROM commands WHERE device=? ORDER BY requested_epoch DESC LIMIT ?",
+                                   (device, limit)).fetchall()
+        keys = ("id", "action", "requested_by", "requested_utc", "state", "delivered_utc", "done_utc", "result")
+        out = [dict(zip(keys, r)) for r in rows]
+        for item in out:
+            item["result"] = json.loads(item["result"]) if item["result"] else None
+        return out
 
     # ---------------------------------------------------------------- devices
     def devices(self) -> dict:

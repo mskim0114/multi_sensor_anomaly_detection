@@ -18,7 +18,9 @@ nav button.active { border-color: var(--accent); color: var(--accent); }
 #who { margin-left: auto; color: var(--muted); }
 button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line);
          background: var(--card); color: var(--text); cursor: pointer; }
-button:hover { border-color: var(--accent); }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.control { margin: 8px 0; }
 input, select { font: inherit; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line);
                 background: var(--card); color: var(--text); max-width: 100%; }
 main { padding: 16px; max-width: 1240px; margin: 0 auto; }

@@ -2,7 +2,7 @@
 // Edge hub monitoring page. All server data is inserted as text (never as HTML).
 
 const $ = (id) => document.getElementById(id);
-const state = { view: "overview", overview: null, timer: null, unit: null };
+const state = { view: "overview", overview: null, timer: null, unit: null, role: "viewer", commands: {} };
 
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: "same-origin", ...options });
@@ -43,7 +43,7 @@ $("login-form").addEventListener("submit", async (event) => {
     const me = await api("/api/v1/login", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user: form.get("user"), password: form.get("password") }) });
     event.target.reset();
-    start(me.user);
+    start(me);
   } catch (error) { $("login-error").textContent = error.message; }
 });
 
@@ -53,8 +53,10 @@ for (const button of document.querySelectorAll("nav button")) {
   button.addEventListener("click", () => show(button.dataset.view));
 }
 
-function start(user) {
-  $("login").hidden = true; $("nav").hidden = false; $("who").hidden = false; $("user").textContent = user;
+function start(me) {
+  state.role = me.role || "viewer";
+  $("login").hidden = true; $("nav").hidden = false; $("who").hidden = false;
+  $("user").textContent = `${me.user}${state.role === "operator" ? " (운영자)" : ""}`;
   show(state.view);
 }
 
@@ -71,6 +73,9 @@ function show(view) {
 // --------------------------------------------------------------- overview
 async function refreshOverview() {
   const data = await api("/api/v1/overview"); state.overview = data;
+  await Promise.all(data.devices.filter((d) => d.registered).map(async (d) => {
+    state.commands[d.device] = (await api(`/api/v1/commands?device=${encodeURIComponent(d.device)}`).catch(() => ({ commands: [] }))).commands;
+  }));
   $("server-time").textContent = `서버 시각 ${data.server_utc} · 5초마다 갱신`;
   const cards = $("device-cards"); cards.replaceChildren();
   if (!data.devices.length) cards.append(el("p", { class: "muted" }, "등록된 장치가 없습니다. 서버에서 add-device 로 등록하세요."));
@@ -100,8 +105,40 @@ function deviceCard(d) {
   const status = !d.registered ? ["warn", "미등록"] : d.online ? ["ok", "온라인"] : ["bad", "오프라인"];
   return el("div", { class: "card" },
     el("h3", {}, el("span", { class: `dot ${status[0]}` }), `${d.device} `, el("span", { class: "badge" }, status[1])),
-    kv, latest,
+    kv, latest, controlBlock(d),
     el("button", { onclick: () => { $("live-device").value = d.device; show("live"); } }, "실시간 보기"));
+}
+
+const COMMAND_STATE = { pending: "전달 대기", delivered: "장치 실행 중", done: "완료", failed: "실패", expired: "만료(장치 미수신)", no_result: "결과 없음" };
+function controlBlock(d) {
+  const s = d.status || {}; const history = state.commands[d.device] || [];
+  const open = history.find((c) => c.state === "pending" || c.state === "delivered");
+  const box = el("div", { class: "control" });
+  const allowed = s.remote_control === true;
+  box.append(el("p", { class: "muted" }, `원격 수집 제어: ${allowed ? "장치에서 허용됨" : "장치에서 비활성 (uplink.json allow_remote_control)"}`));
+  if (state.role === "operator" && d.registered) {
+    const collecting = (s.collector || {}).status === "running";
+    const send = async (action) => {
+      const label = action === "start" ? "수집을 시작" : "수집을 정지";
+      if (!confirm(`${d.device} 에서 ${label}할까요? (자유 수집 run, 기록이 남습니다)`)) return;
+      try {
+        await api("/api/v1/control", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" },
+          body: JSON.stringify({ device: d.device, action }) });
+      } catch (error) { alert(error.message); }
+      refreshOverview();
+    };
+    const startButton = el("button", { onclick: () => send("start") }, "수집 시작");
+    const stopButton = el("button", { onclick: () => send("stop") }, "수집 정지");
+    startButton.disabled = Boolean(open) || !d.online || !allowed || collecting;
+    stopButton.disabled = Boolean(open) || !d.online || !allowed || !collecting;
+    box.append(el("div", { class: "toolbar" }, startButton, stopButton));
+  }
+  const last = history[0];
+  if (last) {
+    const detail = last.result ? String(last.result.error || (last.result.collector || {}).status || "") : "";
+    box.append(el("p", { class: "muted" }, `최근 명령: ${last.action} · ${COMMAND_STATE[last.state] || last.state} · ${last.requested_by} · ${(last.requested_utc || "").slice(0, 19)}${detail ? " · " + detail : ""}`));
+  }
+  return box;
 }
 
 function fillDeviceSelects(devices) {
@@ -252,4 +289,4 @@ async function showFrame() {
 $("unit-chunk").addEventListener("change", () => { $("unit-frame").value = "0"; showFrame(); });
 $("unit-frame").addEventListener("input", showFrame);
 
-api("/api/v1/me").then((me) => start(me.user)).catch(() => showLogin());
+api("/api/v1/me").then((me) => start(me)).catch(() => showLogin());

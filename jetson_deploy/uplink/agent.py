@@ -10,7 +10,11 @@ Config (JSON, default ~/.config/factory_safety/uplink.json)::
                "runs": "~/projects/factory_safety/jetson_deploy/results/sensor_collection"},
      "include_test_units": true, "settle_s": 120, "scan_interval_s": 60,
      "heartbeat_interval_s": 10, "thermal_every_s": 30, "chunk_bytes": 4194304,
-     "max_upload_bytes_per_s": 0}
+     "max_upload_bytes_per_s": 0, "allow_remote_control": false}
+
+``allow_remote_control`` (default false) lets an operator on the hub start/stop the free-run
+collector (``collect.py start|stop`` only; trials are never started remotely). It is a
+device-side opt-in: a hub cannot turn it on.
 
 Nothing local is ever deleted. A unit whose files change after it was committed is reported
 as ``local_changed_after_commit`` and never re-uploaded over the hub copy.
@@ -23,6 +27,7 @@ import logging
 import logging.handlers
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -42,7 +47,7 @@ DEFAULT_CONFIG = Path("~/.config/factory_safety/uplink.json").expanduser()
 STATE_DIR = Path("~/.cache/factory_safety/uplink").expanduser()
 DEFAULTS = {"include_test_units": True, "settle_s": 120, "scan_interval_s": 60,
             "heartbeat_interval_s": 10, "thermal_every_s": 30, "chunk_bytes": 4 * 1024 * 1024,
-            "max_upload_bytes_per_s": 0, "ca_file": None,
+            "max_upload_bytes_per_s": 0, "ca_file": None, "allow_remote_control": False,
             "roots": {"dataset": str(REPO / "dataset"),
                       "runs": str(REPO / "jetson_deploy" / "results" / "sensor_collection")}}
 
@@ -90,6 +95,8 @@ class Agent:
         self.connected = None
         self.current = None
         self._last_thermal = 0.0
+        self._command_lock = threading.Lock()
+        self._report_lock = threading.Lock()
         self._git = _git_state()
 
     # ----------------------------------------------------------- manifests
@@ -225,7 +232,7 @@ class Agent:
                 "collector": _collector_state(), "uploads": self.ledger.summary(),
                 "current_upload": self.current, "last_scan": {k: v for k, v in self.last_scan.items()
                                                               if k != "skipped_detail"},
-                "git": self._git}
+                "git": self._git, "remote_control": bool(self.config.get("allow_remote_control"))}
         live = _latest_preview()
         if live is not None:
             due = time.time() - self._last_thermal >= float(self.config["thermal_every_s"])
@@ -245,10 +252,94 @@ class Agent:
         except OSError:
             return None
 
+    # -------------------------------------------------------- remote control
+    def handle_commands(self, commands) -> None:
+        """Run hub commands one at a time in a worker thread; results are reported later."""
+        for command in commands if isinstance(commands, list) else []:
+            if not isinstance(command, dict):
+                continue
+            command_id, action = command.get("id"), command.get("action")
+            if not isinstance(command_id, str) or not self.ledger.command_seen(command_id, str(action)):
+                continue                                   # malformed, or already handled
+            log.info("hub command %s %s requested by %s", command_id, action, command.get("requested_by"))
+            if not self.config.get("allow_remote_control"):
+                result = {"ok": False, "error": "remote control is disabled on this device (allow_remote_control)"}
+            elif action not in ("start", "stop"):
+                result = {"ok": False, "error": f"unsupported action {action!r}"}
+            elif not self._command_lock.acquire(blocking=False):
+                result = {"ok": False, "error": "another command is still running on the device"}
+            else:
+                threading.Thread(target=self._execute, args=(command_id, action), name="command",
+                                 daemon=True).start()
+                continue
+            self.ledger.command_done(command_id, result)
+
+    def _execute(self, command_id: str, action: str) -> None:
+        try:
+            result = self.collector_command(action, command_id)
+        except Exception as error:   # report, never crash the agent
+            result = {"ok": False, "error": repr(error)[:300]}
+        finally:
+            self._command_lock.release()
+        log.info("hub command %s %s -> %s", command_id, action, result)
+        self.ledger.command_done(command_id, result)
+        self.report_command_results()
+
+    def collector_command(self, action: str, command_id: str = "manual") -> dict:
+        """start: a transient user unit, so the collector runs at normal priority instead of
+        inheriting this agent's Nice=10 / idle I/O; stop: collect.py's own graceful stop."""
+        launcher = str(REPO / "jetson_deploy" / "run_python.sh")
+        collect = str(REPO / "jetson_deploy" / "collect.py")
+        if action == "start":
+            suffix = command_id if re.fullmatch(r"[0-9a-f]{24}", command_id or "") else f"{time.time_ns():x}"
+            argv = ["systemd-run", "--user", "--collect", "--quiet", f"--unit=factory-collect-{suffix}",
+                    "-p", "Type=forking", "-p", "TimeoutStartSec=60", f"--working-directory={REPO}"]
+            if os.environ.get("FACTORY_JETSON_VENV"):
+                argv.append(f"--setenv=FACTORY_JETSON_VENV={os.environ['FACTORY_JETSON_VENV']}")
+            argv += [launcher, collect, "start"]
+            timeout = 90
+        else:
+            argv = [launcher, collect, "stop", "--timeout", "90"]
+            timeout = 120
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                              env=dict(os.environ, PYTHONNOUSERSITE="1"))
+        state = _collector_state() or {}
+        deadline = time.monotonic() + 40
+        while state.get("status") == "starting" and time.monotonic() < deadline:   # collect.py gives up at 20 s
+            time.sleep(1)
+            state = _collector_state() or {}
+        expected = ("running",) if action == "start" else ("stopped", "completed")
+        ok = done.returncode == 0 and state.get("status") in expected
+        return {"ok": bool(ok), "returncode": done.returncode, "collector": state,
+                "stderr_tail": done.stderr[-300:] if done.returncode else ""}
+
+    def report_command_results(self) -> None:
+        if not self._report_lock.acquire(blocking=False):
+            return                                      # the other thread is already reporting
+        try:
+            self._report_pending()
+        finally:
+            self._report_lock.release()
+
+    def _report_pending(self) -> None:
+        for command_id, result in self.ledger.unreported_commands():
+            try:
+                self.client.request("POST", "/api/v1/device/command_result",
+                                    json_body={"id": command_id, "ok": bool(result.get("ok")), "result": result})
+            except HubRejected as error:
+                if error.status in (400, 404):             # the hub will never accept it; stop retrying
+                    self.ledger.command_reported(command_id)
+                continue
+            except HubUnavailable:
+                return
+            self.ledger.command_reported(command_id)
+
     def heartbeat_loop(self) -> None:
         while not self.stop.is_set():
             try:
-                self.client.request("POST", "/api/v1/device/heartbeat", json_body=self.heartbeat_body())
+                reply = self.client.request("POST", "/api/v1/device/heartbeat", json_body=self.heartbeat_body())
+                self.handle_commands(reply.get("commands"))
+                self.report_command_results()
                 if self.connected is not True:
                     log.info("hub reachable at %s", self.client.active_url)
                 self.connected = True

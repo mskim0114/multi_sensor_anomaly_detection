@@ -114,6 +114,10 @@ class Hub:
         except (OSError, ValueError):
             return {}
 
+    def role(self, user: str) -> str:
+        entry = self.viewers().get(user) or {}
+        return "operator" if entry.get("role") == "operator" else "viewer"
+
 
 class _CountingReader:
     def __init__(self, stream):
@@ -316,7 +320,19 @@ class Handler(BaseHTTPRequestHandler):
         device = self.device()
         body = self.read_json(MAX_HEARTBEAT)
         self.hub.store.heartbeat(device, self.client_ip(), body)
-        self.send_json(200, {"ok": True, "server_utc": utc_now()})
+        commands = self.hub.store.take_commands(device)
+        while self.hub.store.command_events:
+            self.server.log(f"control {self.hub.store.command_events.pop(0)}")
+        for command in commands:
+            self.server.log(f"control delivered {device} {command['action']} id={command['id']}")
+        self.send_json(200, {"ok": True, "server_utc": utc_now(), "commands": commands})
+
+    def r_command_result(self, query):
+        device = self.device()
+        body = self.read_json(64 * 1024)
+        reply = self.hub.store.command_result(device, body.get("id"), body.get("ok"), body.get("result"))
+        self.server.log(f"control result {device} id={body.get('id')} state={reply['state']}")
+        self.send_json(200, reply)
 
     # ------------------------------------------------------------ viewer API
     def r_login(self, query):
@@ -337,7 +353,8 @@ class Handler(BaseHTTPRequestHandler):
         token = self.hub.sessions.create(user)
         flags = "HttpOnly; SameSite=Strict; Path=/" + ("; Secure" if self.hub.secure_cookie else "")
         self.server.log(f"login {user} from {addr}")
-        self.send_json(200, {"user": user}, {"Set-Cookie": f"hub_session={token}; Max-Age={SESSION_S}; {flags}"})
+        self.send_json(200, {"user": user, "role": self.hub.role(user)},
+                       {"Set-Cookie": f"hub_session={token}; Max-Age={SESSION_S}; {flags}"})
 
     def r_logout(self, query):
         self.hub.sessions.drop(self.cookie("hub_session"))
@@ -345,7 +362,36 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True}, {"Set-Cookie": f"hub_session=; Max-Age=0; {flags}"})
 
     def r_me(self, query):
-        self.send_json(200, {"user": self.viewer()})
+        user = self.viewer()
+        self.send_json(200, {"user": user, "role": self.hub.role(user)})
+
+    def same_origin(self) -> None:
+        """State-changing viewer requests: custom header (forces a CORS preflight we never
+        answer) plus, when the browser sends one, an Origin equal to this host."""
+        if self.headers.get("X-Hub-Request") != "1":
+            raise HubError(403, "missing X-Hub-Request header")
+        origin, host = self.headers.get("Origin"), self.headers.get("Host")
+        if origin is not None and (not host or urlsplit(origin).netloc != host):
+            raise HubError(403, "cross-origin request refused")
+
+    def r_control(self, query):
+        user = self.viewer()
+        try:
+            self.same_origin()
+            if self.hub.role(user) != "operator":
+                raise HubError(403, "operator role required")
+            body = self.read_json(4096)
+            record = self.hub.store.request_command(body.get("device", ""), body.get("action"), user)
+        except HubError as error:
+            self.server.log(f"control refused for {user} from {self.client_ip()}: {error.status} {error.message}")
+            raise
+        self.server.log(f"control requested by {user} from {self.client_ip()}: {record['device']} "
+                        f"{record['action']} id={record['id']}")
+        self.send_json(200, record)
+
+    def r_commands(self, query):
+        self.viewer()
+        self.send_json(200, {"commands": self.hub.store.commands(query.get("device", ""))})
 
     def r_overview(self, query):
         self.viewer()
@@ -393,6 +439,9 @@ ROUTES = {
     ("PUT", "/api/v1/device/units/file"): Handler.r_put,
     ("POST", "/api/v1/device/units/commit"): Handler.r_commit,
     ("POST", "/api/v1/device/heartbeat"): Handler.r_heartbeat,
+    ("POST", "/api/v1/device/command_result"): Handler.r_command_result,
+    ("POST", "/api/v1/control"): Handler.r_control,
+    ("GET", "/api/v1/commands"): Handler.r_commands,
     ("POST", "/api/v1/login"): Handler.r_login,
     ("POST", "/api/v1/logout"): Handler.r_logout,
     ("GET", "/api/v1/me"): Handler.r_me,

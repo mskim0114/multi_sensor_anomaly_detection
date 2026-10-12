@@ -35,6 +35,8 @@ normal
 overload
 thermal_abnormal
 dust
+combustion        (2026-10-12 추가)
+vapor_release     (2026-10-12 추가)
 ```
 
 > **`overload` 라는 식별자가 실제 정격 초과 운전을 의미한다고 해석하지 않는다.**
@@ -51,6 +53,11 @@ phenomenon 과 display name 을 쓴다.
 | `overload` | `load_abnormality` | Load Abnormality / 부하 이상 | 정상 운전 대비 electrical·mechanical load signature 변화 | CT | NTC, FLIR |
 | `thermal_abnormal` | `thermal_abnormality` | Thermal Abnormality / 열 이상 | local·system thermal signature 변화 | FLIR, NTC | CT |
 | `dust` | `particulate_abnormality` | Particulate Matter Abnormality / 입자상 물질 이상 | airborne particulate concentration 변화 | SPS30 | — |
+| `combustion` | `combustion_abnormality` | Combustion Abnormality / 연소 이상 (화기·발화 징후) | 화염·연소에 따른 국소 고온 + 연소 생성물(CO₂·VOC·미세입자) 변화 | FLIR | SCD30, BME680, SPS30 |
+| `vapor_release` | `chemical_vapor_abnormality` | Chemical Vapor Release / 유해 증기 누출 | 휘발성 화학 증기 농도 변화 (가스 종류 식별 불가) | BME680 (gas) | SCD30, FLIR |
+
+> `combustion` / `vapor_release` 는 2026-10-12 사용자 결정으로 추가했다. 정의 근거는 `ANOMALY_STATES_MULTISENSOR.md` 다.
+> 두 현상의 primary 센서(BME680, SCD30)는 **context 센서이며 2026 모델 V1 입력이 아니다.** 수집과 데이터셋 정의에만 쓴다.
 
 **2026 범위에서 이상상태는 physical phenomenon 수준으로만 정의한다.**
 
@@ -592,6 +599,7 @@ hardware gain / PGA / burden 저항은 변경하지 않는다.
 | `bench_soak` | 파이프라인 내구: tick 누락·jitter·FFC·센서 warm-up/stale·저장 지연 | 무관 (아무 구도) | `--duration 28800` 이상, 2~3회 |
 | `bench_thermal_xcal` | FLIR 픽셀 온도 vs NTC 접촉 온도 대응 (관측만, 보정 상수는 만들지 않는다) | NTC 를 온도가 변하는 표면에 접촉, FLIR 가 같은 표면을 정면 30~50 cm 에서 관측 | canonical 360 s × 3~5회, 온도가 오르내리는 구간 |
 | `bench_transition` | 탐지 파이프라인 end-to-end 반응 리허설 | 위 구도 + 사람이 조작하는 상태 변화(PC 부하, 창문 개방 등) | 조작 시각을 operator_note 에 **사람이** 기록. 자동 label 없음 |
+| `bench_intervention` | 멀티센서 상태 정의의 반응 서명 확인 (`combustion` / `vapor_release` / `dust`) | 센서 묶음 주변 사무실 책상. 개입 방법은 `ANOMALY_STATES_MULTISENSOR.md` §8 | canonical 90/180/90, `--test-mode`. 현장 데이터 아님 |
 
 원칙은 §13 그대로다. 가열·부하·팬 등을 제어하는 코드는 만들지 않고 **수동 조작 + 수동 기록**만
 한다. CT1 은 §14 의 noise floor 상태로 남는다. bench 트라이얼은 `protocol_compliant` 와 무관하게

@@ -16,7 +16,8 @@ This program performs DATA ACQUISITION AND EXPERIMENT ORCHESTRATION ONLY.
 
 It never creates or controls an anomaly. There is no mains switching, no
 electrical load control, no heater control, no fan control, no dust generator
-control, no relay and no actuator anywhere in this file. The physical
+control, no ignition or vapour source, no relay and no actuator anywhere in this
+file. The physical
 intervention is the responsibility of a separate safe testbed and of the
 operator procedure.
 
@@ -66,7 +67,9 @@ from sensors.snapshot import (  # noqa: E402
 
 EXPERIMENT_SCHEMA_VERSION = 1
 
-SCENARIOS = ("normal", "overload", "thermal_abnormal", "dust")
+# Stable dataset identifiers (never renamed once data exists). Phenomena and display names:
+# docs/JETSON_DATASET_PROTOCOL.md §1. combustion / vapor_release added 2026-10-12.
+SCENARIOS = ("normal", "overload", "thermal_abnormal", "dust", "combustion", "vapor_release")
 SEVERITY_NAMES = {0: "normal", 1: "mild", 2: "moderate", 3: "severe"}
 
 # Canonical anomaly trial, docs/JETSON_DATASET_PROTOCOL.md section 4.

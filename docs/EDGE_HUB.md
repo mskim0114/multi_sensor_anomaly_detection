@@ -211,6 +211,22 @@ systemctl --user restart factory-uplink
   4. 서버 추론 서비스
 - 서버 추론에는 1 Hz 실시간 스트림이 필요하다. 지금의 10 s heartbeat 로는 30 s 창을 만들 수 없다.
 
+## 3c. 개입 기록과 라벨링 (P1, 2026-10-12)
+
+- 방법과 기준은 [`LABELING_GUIDE.md`](LABELING_GUIDE.md) 에 있다. 여기서는 구현 위치만 적는다.
+- **[실시간] 탭 개입 기록**
+  - [개입 시작] / [개입 종료] / [메모만 기록] 은 운영자만 쓸 수 있다. 서버 시계로 남기고, heartbeat 로 잰 Jetson 시계 차이(`clock_offset_s`)를 함께 저장한다.
+  - 잘못 누른 기록은 무효로 표시된다. 삭제되지 않는다.
+  - DB 테이블은 `events` 다.
+- **trial 상세 라벨링**
+  - 화면에 겹쳐 보이는 것: 기준선 띠(baseline 구간 평균 ±3σ, 참고용), 실제 개입 음영, 계획 신호음 점선, 라벨 막대.
+  - 그래프를 두 번 클릭해 구간을 지정하고, 라벨(정상·연소·유해 증기·분진·전이·무효)과 확신도를 고른다. 센서별 반응 시작점도 찍을 수 있다.
+  - 저장하면 새 revision 이 생긴다. 위치는 `annotations/anno-v1/<device>/<unit>/rev-NNNN.json` 이며, 읽기 전용이고 원본 manifest SHA 에 묶인다. 동시 저장은 409 로 막는다.
+- **API** (변경은 운영자만, `X-Hub-Request` 필요)
+  - `/api/v1/events`, `/api/v1/events/void`
+  - `/api/v1/unit/events`, `/api/v1/unit/baseline`
+  - `/api/v1/annotation`, `/api/v1/annotations/export`
+
 ## 4. 검증 기록 (2026-10-06)
 
 **자동 테스트** `tests/test_edge_hub.py`: 26개(보안 리뷰 회귀 8개 포함), Jetson `run_python.sh` 에서 통과. 실제 TLS(사설 CA)로 localhost 서버를 띄워 확인한 항목:

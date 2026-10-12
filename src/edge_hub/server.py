@@ -21,6 +21,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from . import PROTOCOL
+from .labels import Labels
 from .store import HubError, Store, check_device, utc_now
 
 WEB = Path(__file__).with_name("web")
@@ -105,6 +106,7 @@ class Sessions:
 class Hub:
     def __init__(self, store: Store, *, secure_cookie: bool, trust_proxy: bool = False):
         self.store, self.sessions = store, Sessions()
+        self.labels = Labels(store)
         self.secure_cookie, self.trust_proxy = secure_cookie, trust_proxy
 
     def viewers(self) -> dict:
@@ -389,6 +391,63 @@ class Handler(BaseHTTPRequestHandler):
                         f"{record['action']} id={record['id']}")
         self.send_json(200, record)
 
+    # ------------------------------------------------- events and annotations
+    def operator(self) -> str:
+        user = self.viewer()
+        self.same_origin()
+        if self.hub.role(user) != "operator":
+            raise HubError(403, "operator role required")
+        return user
+
+    def r_event_add(self, query):
+        user = self.operator()
+        body = self.read_json(4096)
+        record = self.hub.labels.add_event(body.get("device", ""), body.get("kind"), user, body.get("scenario"),
+                                           body.get("note") or "")
+        self.server.log(f"event {record['kind']} {record['device']} by {user} id={record['id']}")
+        self.send_json(200, record)
+
+    def r_event_void(self, query):
+        user = self.operator()
+        body = self.read_json(4096)
+        self.send_json(200, self.hub.labels.void_event(body.get("id"), user))
+
+    def r_events(self, query):
+        self.viewer()
+        device = query.get("device", "")
+        try:
+            since = min(7 * 86400.0, max(60.0, float(query.get("since_s", 3600))))
+        except ValueError:
+            raise HubError(400, "since_s must be a number")
+        self.send_json(200, {"events": self.hub.labels.events(device, time.time() - since),
+                             "open": self.hub.labels.open_intervention(device)})
+
+    def r_unit_events(self, query):
+        self.viewer()
+        self.send_json(200, self.hub.labels.unit_events(query.get("device", ""), query.get("unit", "")))
+
+    def r_unit_baseline(self, query):
+        self.viewer()
+        columns = [c for c in query.get("columns", "").split(",") if c]
+        self.send_json(200, self.hub.labels.baseline(query.get("device", ""), query.get("unit", ""), columns))
+
+    def r_annotation(self, query):
+        self.viewer()
+        self.send_json(200, self.hub.labels.annotation(query.get("device", ""), query.get("unit", "")))
+
+    def r_annotation_save(self, query):
+        user = self.operator()
+        body = self.read_json(256 * 1024)
+        device, unit = body.get("device", ""), body.get("unit", "")
+        with self.hub.store._lock(f"annotation:{device}:{unit}"):
+            result = self.hub.labels.save(device, unit, user, body)
+        self.server.log(f"annotation {device} {unit} rev={result['revision']} by {user}")
+        self.send_json(200, result)
+
+    def r_annotations_export(self, query):
+        self.viewer()
+        self.send_json(200, {"annotations": self.hub.labels.export()})
+
     def r_scenarios(self, query):
         self.viewer()
         self.send_json(200, self.hub.store.scenarios())
@@ -447,6 +506,14 @@ ROUTES = {
     ("POST", "/api/v1/control"): Handler.r_control,
     ("GET", "/api/v1/commands"): Handler.r_commands,
     ("GET", "/api/v1/scenarios"): Handler.r_scenarios,
+    ("POST", "/api/v1/events"): Handler.r_event_add,
+    ("POST", "/api/v1/events/void"): Handler.r_event_void,
+    ("GET", "/api/v1/events"): Handler.r_events,
+    ("GET", "/api/v1/unit/events"): Handler.r_unit_events,
+    ("GET", "/api/v1/unit/baseline"): Handler.r_unit_baseline,
+    ("GET", "/api/v1/annotation"): Handler.r_annotation,
+    ("POST", "/api/v1/annotation"): Handler.r_annotation_save,
+    ("GET", "/api/v1/annotations/export"): Handler.r_annotations_export,
     ("POST", "/api/v1/login"): Handler.r_login,
     ("POST", "/api/v1/logout"): Handler.r_logout,
     ("GET", "/api/v1/me"): Handler.r_me,

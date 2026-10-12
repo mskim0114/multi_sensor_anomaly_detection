@@ -20,6 +20,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -430,6 +431,10 @@ class Store:
         live = _clean_live(body.get("live"))
         status = _clean_status(body)
         status["received_utc"] = utc_now()
+        sent = body.get("sent_epoch")
+        if isinstance(sent, (int, float)) and not isinstance(sent, bool) and math.isfinite(sent):
+            # hub clock minus device clock (plus one-way latency); maps hub-time events to device ticks
+            status["clock_offset_s"] = round(now - float(sent), 3)
         record = self.live.setdefault(device, {})
         record["status"] = status
         previous = record.get("live") or {}

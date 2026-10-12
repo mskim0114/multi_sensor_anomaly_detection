@@ -44,6 +44,20 @@
       </select></label>
       <span id="live-age" class="muted"></span>
     </div>
+    <div class="card" id="event-panel">
+      <h3>개입 기록 <span id="event-open" class="badge"></span></h3>
+      <p class="muted">실험 중 <b>실제로 개입한 순간</b>에 누릅니다(예: 라이터를 켤 때 [개입 시작], 끌 때 [개입 종료]). 한 trial 에서 여러 번 눌러도 됩니다. 라벨이 아니라 "언제 무엇을 했는가"의 기록입니다.</p>
+      <div class="toolbar" id="event-controls">
+        <label>시나리오 <select id="event-scenario">
+          <option value="combustion">연소 이상</option><option value="vapor_release">유해 증기 누출</option>
+          <option value="dust">분진 발생</option><option value="other">기타</option></select></label>
+        <label>메모 <input id="event-note" size="28" placeholder="예: 30cm, 5초"></label>
+        <button id="event-start" class="big">개입 시작</button>
+        <button id="event-end" class="big">개입 종료</button>
+        <button id="event-memo">메모만 기록</button>
+      </div>
+      <div class="scroll"><table id="event-table"></table></div>
+    </div>
     <div class="grid two">
       <div class="card">
         <h3>열화상 <span class="muted" id="thermal-info"></span></h3>
@@ -76,7 +90,28 @@
         <label>열 <select id="unit-cols" multiple size="6"></select></label>
         <button id="unit-plot">그리기</button>
       </div>
-      <canvas id="unit-chart" width="1100" height="300" class="chart"></canvas>
+      <canvas id="unit-chart" width="1100" height="320" class="chart clickable-chart"></canvas>
+      <p class="muted" id="chart-legend">띠: 기준선 평균±3σ(참고) · 회색 음영: 실제 개입 기록 · 점선: 계획상 신호음 · 상단 색 막대: 라벨 구간</p>
+      <div id="anno">
+        <h3>라벨링 <span id="anno-rev" class="muted"></span></h3>
+        <p class="muted">그래프를 두 번 클릭해 구간의 시작과 끝을 찍고, 라벨과 확신도를 고른 뒤 [구간 추가]. 센서 반응 시작점은 모드를 바꿔 한 번 클릭합니다. 라벨을 붙이지 않은 tick 은 학습에서 제외됩니다. 기준: docs/LABELING_GUIDE.md</p>
+        <div class="toolbar" id="anno-controls">
+          <label>모드 <select id="anno-mode"><option value="interval">구간</option><option value="onset">센서 반응 시작점</option></select></label>
+          <label>라벨 <select id="anno-label"></select></label>
+          <label>확신도 <select id="anno-conf"></select></label>
+          <label>센서 <select id="anno-modality"></select></label>
+          <span id="anno-pending" class="muted"></span>
+          <button id="anno-add">구간 추가</button>
+          <button id="anno-clear">선택 취소</button>
+        </div>
+        <div class="scroll"><table id="anno-intervals"></table></div>
+        <p id="anno-onsets" class="muted"></p>
+        <div class="toolbar" id="anno-save-row">
+          <label>메모 <input id="anno-note" size="60"></label>
+          <button id="anno-save">저장 (새 revision)</button>
+          <span id="anno-status" class="muted"></span>
+        </div>
+      </div>
       <div class="toolbar">
         <label>열화상 chunk <select id="unit-chunk"></select></label>
         <label>frame <input id="unit-frame" type="range" min="0" max="29" value="0"></label>

@@ -798,6 +798,118 @@ class ScenarioViewTests(HubFixture):
         self.assertEqual(combustion["received"]["count"], 0)
 
 
+
+class LabelingTests(HubFixture):
+    """P1: live intervention events and human annotations (labels) for received units."""
+
+    START = 1791820800.0   # 2026-10-12T03:00:00Z, device clock of tick 0
+
+    def bench_trial(self, name="dust_20261012T030000Z", ticks=120, scenario="dust"):
+        trial = make_trial(self.dataset, "_smoke", name, frames=3)
+        import datetime as dt
+        rows = ["sequence,timestamp_utc,pm10_ug_m3,pm2_5_ug_m3"]
+        for i in range(ticks):
+            stamp = dt.datetime.fromtimestamp(self.START + i, dt.timezone.utc).isoformat()
+            rows.append(f"{i},{stamp},{10 + (i % 10) * 0.1 if i < 30 else 50 + i:.2f},{5 + (i % 5) * 0.1:.2f}")
+        write(trial / "scalars.csv", ("\n".join(rows) + "\n").encode())
+        write(trial / "experiment.json", json.dumps({
+            "trial_id": name, "scenario_id": scenario, "status": "completed", "test_mode": True,
+            "phase_plan": [{"phase": "baseline", "start_tick": 0, "end_tick": 29},
+                           {"phase": "anomaly", "start_tick": 30, "end_tick": 89},
+                           {"phase": "recovery", "start_tick": 90, "end_tick": ticks - 1}]}).encode())
+        self.agent().scan_once()
+        return f"dataset/_smoke/{name}"
+
+    def post(self, path, body, cookie, headers=None):
+        base = {"Cookie": cookie, "Content-Type": "application/json", "X-Hub-Request": "1"}
+        base.update(headers or {})
+        return self.https("POST", path, json.dumps(body), base)
+
+    def labels(self):
+        return self.server.RequestHandlerClass.hub.labels
+
+    def test_events_are_operator_only_voidable_and_report_the_open_intervention(self):
+        viewer, boss = self.login(), self.login("boss", "operator horse battery")
+        body = {"device": "jetson-test-01", "kind": "intervention_start", "scenario": "combustion", "note": "30 cm"}
+        self.assertEqual(self.post("/api/v1/events", body, viewer)[0], 403)
+        self.assertEqual(self.post("/api/v1/events", body, boss, {"X-Hub-Request": "0"})[0], 403)
+        self.assertEqual(self.post("/api/v1/events", dict(body, kind="label_it"), boss)[0], 400)
+        status, _, start = self.post("/api/v1/events", body, boss)
+        self.assertEqual((status, start["user"]), (200, "boss"))
+        _, _, listed = self.https("GET", "/api/v1/events?device=jetson-test-01", headers={"Cookie": viewer})
+        self.assertEqual(listed["open"]["id"], start["id"])
+        self.assertEqual(self.post("/api/v1/events", dict(body, kind="intervention_end"), boss)[0], 200)
+        _, _, listed = self.https("GET", "/api/v1/events?device=jetson-test-01", headers={"Cookie": viewer})
+        self.assertIsNone(listed["open"])
+        status, _, _ = self.post("/api/v1/events/void", {"id": start["id"]}, boss)
+        self.assertEqual(status, 200)
+        _, _, listed = self.https("GET", "/api/v1/events?device=jetson-test-01", headers={"Cookie": viewer})
+        voided = next(e for e in listed["events"] if e["id"] == start["id"])
+        self.assertTrue(voided["voided"], "voided, never deleted")
+        self.assertEqual(self.post("/api/v1/events/void", {"id": start["id"]}, boss)[0], 404)
+
+    def test_heartbeat_clock_offset_maps_hub_time_events_to_device_ticks(self):
+        unit = self.bench_trial()
+        self.store.heartbeat("jetson-test-01", "x", {"sent_epoch": time.time() - 2.5})
+        offset = self.store.live["jetson-test-01"]["status"]["clock_offset_s"]
+        self.assertAlmostEqual(offset, 2.5, delta=0.5)
+        labels = self.labels()
+        start = labels.add_event("jetson-test-01", "intervention_start", "boss", "dust")
+        end = labels.add_event("jetson-test-01", "intervention_end", "boss", "dust")
+        with self.store._db_lock:   # place them at device ticks 40 and 75 (hub clock = device clock + offset)
+            for event, tick in ((start, 40), (end, 75)):
+                self.store.db.execute("UPDATE events SET hub_epoch=? WHERE id=?", (self.START + tick + offset, event["id"]))
+            self.store.db.commit()
+        mapped = {e["id"]: e for e in labels.unit_events("jetson-test-01", unit)["events"]}
+        self.assertEqual((mapped[start["id"]]["tick"], mapped[end["id"]]["tick"]), (40, 75))
+        self.assertLess(mapped[start["id"]]["tick_error_s"], 0.01)
+
+    def test_baseline_band_comes_from_the_baseline_phase_only(self):
+        unit = self.bench_trial()
+        band = self.labels().baseline("jetson-test-01", unit, ["pm10_ug_m3", "nope"])
+        self.assertTrue(band["available"])
+        pm = band["stats"]["pm10_ug_m3"]
+        self.assertEqual(pm["n"], 30)
+        self.assertAlmostEqual(pm["mean"], 10.45, places=6)       # ticks 0..29 only, the jump at 30 is excluded
+        self.assertAlmostEqual(pm["high"] - pm["mean"], 3 * pm["std"], places=9)
+        self.assertNotIn("nope", band["stats"])
+
+    def test_annotations_are_validated_revisioned_bound_to_raw_and_operator_only(self):
+        unit = self.bench_trial()
+        viewer, boss = self.login(), self.login("boss", "operator horse battery")
+        good = {"device": "jetson-test-01", "unit": unit, "base_revision": 0, "note": "first pass",
+                "intervals": [{"start_tick": 0, "end_tick": 29, "label": "normal"},
+                              {"start_tick": 31, "end_tick": 80, "label": "dust", "confidence": "high"},
+                              {"start_tick": 81, "end_tick": 110, "label": "transition", "confidence": "medium"}],
+                "onsets": {"pm": 31}}
+        self.assertEqual(self.post("/api/v1/annotation", good, viewer)[0], 403)
+        bad_cases = [dict(good, intervals=[{"start_tick": 0, "end_tick": 40, "label": "dust"},
+                                           {"start_tick": 40, "end_tick": 50, "label": "normal"}]),     # overlap
+                     dict(good, intervals=[{"start_tick": 0, "end_tick": 120, "label": "dust"}]),       # past end
+                     dict(good, intervals=[{"start_tick": 0, "end_tick": 5, "label": "cat"}]),          # label
+                     dict(good, intervals=[{"start_tick": 0, "end_tick": 5, "label": "dust", "confidence": "sure"}]),
+                     dict(good, onsets={"smell": 3}), dict(good, base_revision="0")]
+        for body in bad_cases:
+            self.assertEqual(self.post("/api/v1/annotation", body, boss)[0], 400, body)
+        status, _, saved = self.post("/api/v1/annotation", good, boss)
+        self.assertEqual((status, saved["revision"]), (200, 1))
+        self.assertEqual(self.post("/api/v1/annotation", good, boss)[0], 409, "stale base_revision")
+        second = dict(good, base_revision=1, intervals=good["intervals"][:2])
+        self.assertEqual(self.post("/api/v1/annotation", second, boss)[2]["revision"], 2)
+        _, _, current = self.https("GET", f"/api/v1/annotation?device=jetson-test-01&unit={unit}", headers={"Cookie": viewer})
+        self.assertEqual((current["revision"], len(current["current"]["intervals"])), (2, 2))
+        self.assertEqual(current["current"]["guide_version"], "labeling-guide-v1")
+        receipt = json.loads((self.data_root / "receipts/jetson-test-01" / (unit + ".json")).read_text())
+        self.assertEqual(current["current"]["manifest_sha256"], receipt["manifest_sha256"])
+        files = sorted((self.data_root / "annotations/anno-v1/jetson-test-01" / unit).glob("rev-*.json"))
+        self.assertEqual(len(files), 2)
+        self.assertTrue(all(p.stat().st_mode & 0o222 == 0 for p in files), "revisions are read-only")
+        _, _, exported = self.https("GET", "/api/v1/annotations/export", headers={"Cookie": viewer})
+        mine = next(a for a in exported["annotations"] if a["unit"] == unit)
+        self.assertTrue(mine["raw_matches"])
+        self.assertEqual(self.store.verify("jetson-test-01")[-1]["ok"], True, "raw untouched by labeling")
+
+
 import unittest.mock  # noqa: E402
 
 if __name__ == "__main__":

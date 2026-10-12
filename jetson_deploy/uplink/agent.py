@@ -227,7 +227,7 @@ class Agent:
     # ----------------------------------------------------------- heartbeat
     def heartbeat_body(self) -> dict:
         body = {"protocol": PROTOCOL, "agent_version": AGENT_VERSION, "device_id": self.config["device_id"],
-                "interval_s": self.config["heartbeat_interval_s"], "sent_utc": _utc(),
+                "interval_s": self.config["heartbeat_interval_s"], "sent_utc": _utc(), "sent_epoch": time.time(),
                 "host": socket.gethostname(), "uptime_s": _uptime(), "load": os.getloadavg(),
                 "memory": _meminfo(), "temperatures_c": _thermal_zones(), "local_ip": self._local_ip(),
                 "disks": {k: _disk(v) for k, v in self.config["roots"].items()},

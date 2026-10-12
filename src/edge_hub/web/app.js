@@ -178,9 +178,44 @@ function drawThermal(canvas, b64, minId, maxId) {
   $(minId).textContent = `${(lo / 100 - 273.15).toFixed(1)}°C`; $(maxId).textContent = `${(hi / 100 - 273.15).toFixed(1)}°C`;
 }
 
+const EVENT_NAMES = { intervention_start: "개입 시작", intervention_end: "개입 종료", note: "메모" };
+async function refreshEvents(device) {
+  const data = await api(`/api/v1/events?device=${encodeURIComponent(device)}&since_s=7200`);
+  const open = data.open;
+  $("event-open").textContent = open ? `개입 중 · ${open.scenario || ""} · ${Math.round(Date.now() / 1000 - open.hub_epoch)}초` : "대기";
+  $("event-open").classList.toggle("error", Boolean(open));
+  $("event-controls").hidden = state.role !== "operator";
+  $("event-start").disabled = Boolean(open); $("event-end").disabled = !open;
+  const t = $("event-table");
+  t.replaceChildren(el("tr", {}, ...["시각", "종류", "시나리오", "메모", "기록자", ""].map((h) => el("th", {}, h))));
+  for (const e of data.events.slice(-30).reverse()) {
+    const voidButton = el("button", { onclick: async () => {
+      if (!confirm("이 기록을 무효 처리할까요? (삭제되지 않고 무효로 표시됩니다)")) return;
+      await api("/api/v1/events/void", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" }, body: JSON.stringify({ id: e.id }) });
+      refreshEvents(device);
+    } }, "무효");
+    voidButton.hidden = e.voided || state.role !== "operator";
+    t.append(el("tr", {}, el("td", {}, new Date(e.hub_epoch * 1000).toLocaleTimeString()), el("td", {}, `${EVENT_NAMES[e.kind] || e.kind}${e.voided ? " (무효)" : ""}`),
+      el("td", {}, e.scenario || "—"), el("td", {}, e.note || ""), el("td", {}, e.user), el("td", {}, voidButton)));
+  }
+}
+async function sendEvent(kind) {
+  const device = $("live-device").value; if (!device) return;
+  try {
+    await api("/api/v1/events", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" },
+      body: JSON.stringify({ device, kind, scenario: $("event-scenario").value, note: $("event-note").value }) });
+    $("event-note").value = "";
+  } catch (error) { alert(error.message); }
+  refreshEvents(device);
+}
+$("event-start").addEventListener("click", () => sendEvent("intervention_start"));
+$("event-end").addEventListener("click", () => sendEvent("intervention_end"));
+$("event-memo").addEventListener("click", () => sendEvent("note"));
+
 async function refreshLive() {
   if (!state.overview) await refreshOverview().catch(() => {});
   const device = $("live-device").value; if (!device) return;
+  refreshEvents(device).catch(() => {});
   const [live, trend] = await Promise.all([api(`/api/v1/live?device=${encodeURIComponent(device)}`),
     api(`/api/v1/telemetry?device=${encodeURIComponent(device)}&since_s=${$("live-range").value}`)]);
   const s = live.status || {}; const snap = (live.live || {}).snapshot || {};
@@ -212,18 +247,39 @@ $("live-range").addEventListener("change", refreshLive);
 $("trend-keys").addEventListener("change", refreshLive);
 
 const LINE_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d"];
-function drawChart(canvas, xs, series, timeAxis, markers = []) {
-  const ctx = canvas.getContext("2d"); const W = canvas.width, H = canvas.height, L = 60, R = 10, T = 10, B = 40;
+const LABEL_COLORS = { normal: "#16a34a", combustion: "#dc2626", vapor_release: "#7c3aed", dust: "#a16207", transition: "#eab308", invalid: "#334155" };
+const LABEL_NAMES = { normal: "정상", combustion: "연소 이상", vapor_release: "유해 증기", dust: "분진", transition: "전이(애매)", invalid: "무효" };
+function drawChart(canvas, xs, series, timeAxis, markers = [], extras = {}) {
+  const ctx = canvas.getContext("2d"); const W = canvas.width, H = canvas.height, L = 60, R = 10, T = extras.intervals ? 24 : 10, B = 40;
   const css = getComputedStyle(document.body);
   ctx.clearRect(0, 0, W, H); ctx.font = "12px system-ui"; ctx.fillStyle = css.color; ctx.strokeStyle = "#8884";
   const names = Object.keys(series);
   if (!xs.length || !names.length) { ctx.fillText("데이터 없음 — 항목을 고르세요", L, H / 2); return; }
   const x0 = Math.min(...xs), x1 = Math.max(...xs) || x0 + 1;
+  const px = (v) => L + (v - x0) / (x1 - x0 || 1) * (W - L - R);
+  canvas._geom = { x0, x1, L, R, W };
+  for (const s of extras.spans || []) {      // recorded interventions (facts, not labels)
+    const a = px(Math.max(x0, s.start)), b = px(Math.min(x1, s.end));
+    if (b >= a) { ctx.fillStyle = "#64748b33"; ctx.fillRect(a, T, Math.max(2, b - a), H - T - B); }
+  }
+  for (const iv of extras.intervals || []) {  // human labels: strip on top + light fill
+    const a = px(Math.max(x0, iv.start_tick)), b = px(Math.min(x1, iv.end_tick + 1)); if (b < a) continue;
+    const c = LABEL_COLORS[iv.label] || "#888";
+    ctx.fillStyle = c; ctx.fillRect(a, 4, b - a, 12);
+    ctx.fillStyle = c + "14"; ctx.fillRect(a, T, b - a, H - T - B);
+  }
+  if (extras.pending != null) { ctx.fillStyle = "#2563eb"; ctx.fillRect(px(extras.pending) - 1, T, 2, H - T - B); }
   names.forEach((name, n) => {
     const ys = series[name].filter((v) => v != null); if (!ys.length) return;
+    const band = (extras.bands || {})[name];
     // each series gets its own y range (units differ); range shown in the legend
-    let lo = Math.min(...ys), hi = Math.max(...ys); if (hi === lo) { hi += 1; lo -= 1; }
-    ctx.strokeStyle = LINE_COLORS[n % LINE_COLORS.length]; ctx.beginPath(); let pen = false;
+    let lo = Math.min(...ys, ...(band ? [band.low] : [])), hi = Math.max(...ys, ...(band ? [band.high] : [])); if (hi === lo) { hi += 1; lo -= 1; }
+    const color = LINE_COLORS[n % LINE_COLORS.length];
+    if (band) {   // baseline mean ± k·std: a visual reference, not a threshold
+      const yb = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+      ctx.fillStyle = color + "22"; ctx.fillRect(L, yb(band.high), W - L - R, Math.max(1, yb(band.low) - yb(band.high)));
+    }
+    ctx.strokeStyle = color; ctx.beginPath(); let pen = false;
     series[name].forEach((v, i) => {
       if (v == null) { pen = false; return; }
       const x = L + (xs[i] - x0) / (x1 - x0 || 1) * (W - L - R), y = T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
@@ -239,6 +295,13 @@ function drawChart(canvas, xs, series, timeAxis, markers = []) {
     ctx.save(); ctx.setLineDash([4, 4]); ctx.strokeStyle = "#8888"; ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, H - B); ctx.stroke(); ctx.restore();
     ctx.fillText(m.label, x + 3, H - B - 4);
   }
+  for (const [modality, tick] of Object.entries(extras.onsets || {})) {
+    if (tick == null || tick < x0 || tick > x1) continue;
+    const x = px(tick); ctx.fillStyle = "#0891b2";
+    ctx.beginPath(); ctx.moveTo(x, H - B); ctx.lineTo(x - 5, H - B + 9); ctx.lineTo(x + 5, H - B + 9); ctx.fill();
+    ctx.fillText(modality, x + 6, H - B + 10);
+  }
+  ctx.fillStyle = css.color;
   const label = (x) => timeAxis ? new Date(x).toLocaleTimeString() : String(Math.round(x));
   ctx.fillText(label(x0), L, H - 12); const right = label(x1); ctx.fillText(right, W - R - ctx.measureText(right).width, H - 12);
 }
@@ -317,10 +380,11 @@ async function openUnit(device, unit) {
   const scenario = (state.scenarioSpec || []).find((s) => s.id === experiment.scenario_id);
   const preferred = scenario ? scenario.relevant_columns : ["ntc_temperature_c", "flir_max_c"];
   state.unitMarkers = (experiment.phase_plan || []).filter((p) => p.start_tick > 0)
-    .map((p) => ({ x: p.start_tick, label: { anomaly: "개입 시작", recovery: "회복 시작" }[p.phase] || p.phase }));
+    .map((p) => ({ x: p.start_tick, label: { anomaly: "계획상 개입(신호음)", recovery: "계획상 회복" }[p.phase] || p.phase }));
   $("unit-cols").replaceChildren(...numeric.map((c) => { const o = el("option", { value: c }, c); o.selected = preferred.includes(c); return o; }));
   $("unit-chunk").replaceChildren(...d.thermal_chunks.map((c) => el("option", { value: c }, c)));
   $("unit-detail").scrollIntoView({ behavior: "smooth" });
+  await loadAnnotation();
   plotUnit(); showFrame();
 }
 
@@ -328,9 +392,98 @@ async function plotUnit() {
   if (!state.unit) return;
   const cols = [...$("unit-cols").selectedOptions].map((o) => o.value);
   const { device, unit } = state.unit;
-  const d = await api(`/api/v1/unit/scalars?device=${encodeURIComponent(device)}&unit=${encodeURIComponent(unit)}&columns=${encodeURIComponent(cols.join(","))}`);
-  drawChart($("unit-chart"), d.sequence, d.series, false, state.unitMarkers || []);
+  const q = `device=${encodeURIComponent(device)}&unit=${encodeURIComponent(unit)}&columns=${encodeURIComponent(cols.join(","))}`;
+  const [d, base] = await Promise.all([api(`/api/v1/unit/scalars?${q}`), api(`/api/v1/unit/baseline?${q}`).catch(() => ({ available: false }))]);
+  state.plot = { xs: d.sequence, series: d.series, bands: base.available ? base.stats : {} };
+  redrawUnit();
 }
+
+function redrawUnit() {
+  if (!state.plot) return;
+  const a = state.anno || {};
+  drawChart($("unit-chart"), state.plot.xs, state.plot.series, false, state.unitMarkers || [],
+    { bands: state.plot.bands, spans: a.spans || [], intervals: a.intervals || [], onsets: a.onsets || {}, pending: a.pendingStart });
+}
+
+// ------------------------------------------------------------ annotation
+function eventSpans(events) {
+  // pair recorded starts and ends into shaded spans (voided clicks ignored)
+  const spans = []; let open = null;
+  for (const e of events.filter((x) => !x.voided)) {
+    if (e.kind === "intervention_start") open = e;
+    else if (e.kind === "intervention_end" && open) { spans.push({ start: open.tick, end: e.tick, scenario: open.scenario }); open = null; }
+  }
+  if (open) spans.push({ start: open.tick, end: open.tick, scenario: open.scenario, unclosed: true });
+  return spans;
+}
+
+async function loadAnnotation() {
+  const { device, unit } = state.unit;
+  const q = `device=${encodeURIComponent(device)}&unit=${encodeURIComponent(unit)}`;
+  const [ann, ev] = await Promise.all([api(`/api/v1/annotation?${q}`), api(`/api/v1/unit/events?${q}`).catch(() => ({ events: [], ticks: 0 }))]);
+  const cur = ann.current || {};
+  state.anno = { revision: ann.revision, intervals: (cur.intervals || []).map((x) => ({ ...x })), onsets: { ...(cur.onsets || {}) },
+                 note: cur.note || "", pendingStart: null, events: ev.events, spans: eventSpans(ev.events), ticks: ev.ticks, meta: ann };
+  $("anno-label").replaceChildren(...ann.labels.map((l) => el("option", { value: l }, LABEL_NAMES[l] || l)));
+  $("anno-conf").replaceChildren(...ann.confidence.map((c) => el("option", { value: c }, { high: "높음", medium: "보통", low: "낮음" }[c] || c)));
+  $("anno-modality").replaceChildren(...ann.modalities.map((m) => el("option", { value: m }, m)));
+  $("anno-note").value = state.anno.note;
+  $("anno-rev").textContent = ann.revision ? `revision ${ann.revision} · ${cur.annotator} · ${(cur.saved_utc || "").slice(0, 19)}` : "아직 라벨 없음";
+  const editable = state.role === "operator";
+  for (const id of ["anno-controls", "anno-save-row"]) $(id).hidden = !editable;
+  renderAnnotation();
+}
+
+function renderAnnotation() {
+  const a = state.anno; if (!a) return;
+  const t = $("anno-intervals");
+  t.replaceChildren(el("tr", {}, ...["라벨", "시작 tick", "끝 tick", "길이(s)", "확신도", "메모", ""].map((h) => el("th", {}, h))));
+  a.intervals.sort((x, y) => x.start_tick - y.start_tick).forEach((iv, i) => {
+    const del = el("button", { onclick: () => { a.intervals.splice(i, 1); renderAnnotation(); redrawUnit(); } }, "삭제");
+    del.hidden = state.role !== "operator";
+    t.append(el("tr", {}, el("td", {}, el("span", { class: "swatch" }), LABEL_NAMES[iv.label] || iv.label), el("td", {}, String(iv.start_tick)),
+      el("td", {}, String(iv.end_tick)), el("td", {}, String(iv.end_tick - iv.start_tick + 1)), el("td", {}, iv.confidence),
+      el("td", {}, iv.note || ""), el("td", {}, del)));
+    t.lastChild.querySelector(".swatch").style.background = LABEL_COLORS[iv.label] || "#888";
+  });
+  const spans = a.spans.map((s) => `${s.scenario || "?"} ${s.start}–${s.end}${s.unclosed ? "(종료 없음)" : ""}`).join(", ");
+  $("anno-onsets").textContent = `센서 반응 시작점: ${Object.entries(a.onsets).filter(([, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(", ") || "없음"}`
+    + ` · 기록된 개입: ${spans || "없음"}`;
+  $("anno-pending").textContent = a.pendingStart != null ? `시작 ${a.pendingStart} 선택됨 — 끝을 클릭` : "";
+}
+
+$("unit-chart").addEventListener("click", (event) => {
+  const a = state.anno, g = $("unit-chart")._geom;
+  if (!a || !g || state.role !== "operator") return;
+  const rect = event.target.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * (event.target.width / rect.width);
+  const tick = Math.max(0, Math.min(a.ticks - 1, Math.round(g.x0 + (x - g.L) / (g.W - g.L - g.R) * (g.x1 - g.x0))));
+  if ($("anno-mode").value === "onset") { a.onsets[$("anno-modality").value] = tick; renderAnnotation(); redrawUnit(); return; }
+  if (a.pendingStart == null) a.pendingStart = tick;
+  else { a.pendingEnd = tick; $("anno-pending").textContent = `구간 ${Math.min(a.pendingStart, tick)}–${Math.max(a.pendingStart, tick)} — [구간 추가]`; }
+  if (a.pendingEnd == null) renderAnnotation();
+  redrawUnit();
+});
+
+$("anno-add").addEventListener("click", () => {
+  const a = state.anno; if (!a || a.pendingStart == null || a.pendingEnd == null) { alert("그래프에서 시작과 끝을 먼저 클릭하세요"); return; }
+  const start = Math.min(a.pendingStart, a.pendingEnd), end = Math.max(a.pendingStart, a.pendingEnd);
+  if (a.intervals.some((iv) => start <= iv.end_tick && iv.start_tick <= end)) { alert("기존 구간과 겹칩니다. 먼저 삭제하거나 다른 범위를 고르세요"); return; }
+  a.intervals.push({ start_tick: start, end_tick: end, label: $("anno-label").value, confidence: $("anno-conf").value, note: "" });
+  a.pendingStart = null; a.pendingEnd = null; renderAnnotation(); redrawUnit();
+});
+$("anno-clear").addEventListener("click", () => { if (state.anno) { state.anno.pendingStart = null; state.anno.pendingEnd = null; renderAnnotation(); redrawUnit(); } });
+$("anno-mode").addEventListener("change", () => { if (state.anno) { state.anno.pendingStart = null; state.anno.pendingEnd = null; renderAnnotation(); redrawUnit(); } });
+
+$("anno-save").addEventListener("click", async () => {
+  const a = state.anno; const { device, unit } = state.unit;
+  try {
+    const r = await api("/api/v1/annotation", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" },
+      body: JSON.stringify({ device, unit, base_revision: a.revision, intervals: a.intervals, onsets: a.onsets, note: $("anno-note").value }) });
+    $("anno-status").textContent = `저장됨: revision ${r.revision}`;
+    await loadAnnotation(); redrawUnit();
+  } catch (error) { $("anno-status").textContent = `저장 실패: ${error.message}`; }
+});
 $("unit-plot").addEventListener("click", plotUnit);
 
 async function showFrame() {

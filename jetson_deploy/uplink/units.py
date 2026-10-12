@@ -21,6 +21,12 @@ import time
 NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 FINAL_TRIAL = {"completed", "failed", "aborted", "preflight_failed"}
 FINAL_RUN = {"completed", "stopped", "failed"}
+# A producer that died (reboot, power loss, kill) never writes a final status. Such a unit is
+# shipped as "interrupted" only when its owner is provably gone and nothing has changed for
+# settle_s; files are never touched. Statuses a live producer could still be in:
+UNFINISHED = {None, "created", "ready", "starting", "running", "stopping"}
+INTERRUPTED = "interrupted"
+HARDWARE_LOCK = Path("~/.cache/factory_safety/acquisition/hardware.lock").expanduser()
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,44 @@ def _status(path: Path) -> str | None:
     except (OSError, ValueError, AttributeError):
         return None
     return value if isinstance(value, str) else None
+
+
+def process_alive(identity) -> bool:
+    """pid alive and the same process (start ticks and boot id), read from /proc only."""
+    try:
+        pid = int(identity["pid"])
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        ticks = stat.rsplit(")", 1)[1].split()[19]
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except (OSError, KeyError, ValueError, IndexError, TypeError):
+        return False
+    return ticks == str(identity.get("start_ticks")) and boot == identity.get("boot_id")
+
+
+def _json(path: Path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def run_owner_gone(run_dir: Path) -> bool | None:
+    """Free run: its control.json names the collector process. None when it cannot be proven
+    (no control.json / no identity, e.g. runs from before the control file existed)."""
+    control = _json(run_dir / "control.json")
+    identity = (control or {}).get("identity")
+    if not isinstance(identity, dict):
+        return None
+    return not process_alive(identity)
+
+
+def acquisition_owner_alive(lock_path: Path = HARDWARE_LOCK) -> bool:
+    """Trials record no process identity. Every acquisition holds the hardware lock and writes
+    its identity into the lock file; flock is released when the holder dies, so a dead
+    recorded owner means no acquisition (and no trial) is running. Read-only: never locks."""
+    owner = _json(lock_path) if lock_path.is_file() else None
+    return bool(owner) and process_alive(owner)
 
 
 def list_files(unit_dir: Path) -> list[tuple[str, os.stat_result]]:
@@ -59,9 +103,10 @@ def list_files(unit_dir: Path) -> list[tuple[str, os.stat_result]]:
 
 
 def discover(roots: dict[str, Path], *, include_test: bool = True, settle_s: float = 60.0,
-             now: float | None = None) -> tuple[list[Unit], list[dict]]:
+             now: float | None = None, lock_path: Path = HARDWARE_LOCK) -> tuple[list[Unit], list[dict]]:
     """Return (final units, skipped units with reasons). Never raises for one bad unit."""
     now = time.time() if now is None else now
+    acquisition_alive = None   # looked up once, only if needed
     candidates: list[tuple[str, Path, Path, set]] = []
     dataset = roots.get("dataset")
     if dataset and Path(dataset).is_dir():
@@ -85,8 +130,23 @@ def discover(roots: dict[str, Path], *, include_test: bool = True, settle_s: flo
     for key, path, status_file, final in candidates:
         status = _status(status_file)
         if status not in final:
-            skipped.append({"unit": key, "reason": f"status {status!r} is not final"})
-            continue
+            if status not in UNFINISHED:
+                skipped.append({"unit": key, "reason": f"status {status!r} is not final"})
+                continue
+            if key.startswith("runs/"):
+                gone = run_owner_gone(path)
+                if gone is None:
+                    skipped.append({"unit": key, "reason": f"status {status!r} is not final and no "
+                                    "control.json identity proves the collector is gone"})
+                    continue
+            else:
+                if acquisition_alive is None:
+                    acquisition_alive = acquisition_owner_alive(lock_path)
+                gone = not acquisition_alive
+            if not gone:
+                skipped.append({"unit": key, "reason": f"status {status!r}: producer may still be running"})
+                continue
+            status = INTERRUPTED
         try:
             files = list_files(path)
         except (OSError, ValueError) as error:

@@ -372,6 +372,12 @@ class Store:
             summary = unit_summary(self.raw_dir(device, unit))
         except Exception as error:  # a malformed document must not hide a verified unit
             summary = {"summary_error": repr(error)[:200]}
+        uplink_status = (receipt.get("meta") or {}).get("status")
+        if "status" not in summary and isinstance(uplink_status, str):
+            # e.g. "interrupted": the producer never wrote a final status (reboot, power loss);
+            # the edge agent inferred it. Shown as such, never mistaken for a producer status.
+            summary["status"] = uplink_status[:40]
+            summary["status_source"] = "uplink_inferred"
         with self._db_lock:
             self.db.execute("INSERT OR REPLACE INTO units VALUES(?,?,?,?,?,?,?,?)",
                             (device, unit, unit.split("/")[0], receipt["files"], receipt["bytes"],

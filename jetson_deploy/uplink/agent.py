@@ -40,7 +40,7 @@ from urllib.parse import urlsplit
 from . import AGENT_VERSION, PROTOCOL
 from .client import HubClient, HubRejected, HubUnavailable
 from .ledger import Ledger
-from .units import Unit, discover, list_files, manifest_digest, sha256_file
+from .units import HARDWARE_LOCK, Unit, discover, list_files, manifest_digest, process_alive, sha256_file
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = Path("~/.config/factory_safety/uplink.json").expanduser()
@@ -48,6 +48,7 @@ STATE_DIR = Path("~/.cache/factory_safety/uplink").expanduser()
 DEFAULTS = {"include_test_units": True, "settle_s": 120, "scan_interval_s": 60,
             "heartbeat_interval_s": 10, "thermal_every_s": 30, "chunk_bytes": 4 * 1024 * 1024,
             "max_upload_bytes_per_s": 0, "ca_file": None, "allow_remote_control": False,
+            "hardware_lock": str(HARDWARE_LOCK),
             "roots": {"dataset": str(REPO / "dataset"),
                       "runs": str(REPO / "jetson_deploy" / "results" / "sensor_collection")}}
 
@@ -186,7 +187,8 @@ class Agent:
 
     def scan_once(self) -> dict:
         units, skipped = discover(self.config["roots"], include_test=self.config["include_test_units"],
-                                  settle_s=float(self.config["settle_s"]))
+                                  settle_s=float(self.config["settle_s"]),
+                                  lock_path=Path(self.config["hardware_lock"]).expanduser())
         result = {"final": len(units), "skipped": len(skipped), "committed": 0, "errors": 0}
         for unit in sorted(units, key=lambda u: u.newest_mtime):
             if self.stop.is_set():
@@ -464,16 +466,7 @@ def _collector_state() -> dict | None:
             **{k: control[k] for k in keep if k in control}}
 
 
-def _process_alive(identity: dict) -> bool:
-    """pid alive and the same process (start ticks and boot id), read from /proc only."""
-    try:
-        pid = int(identity["pid"])
-        stat = Path(f"/proc/{pid}/stat").read_text()
-        ticks = stat.rsplit(")", 1)[1].split()[19]
-        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    except (OSError, KeyError, ValueError, IndexError, TypeError):
-        return False
-    return ticks == str(identity.get("start_ticks")) and boot == identity.get("boot_id")
+_process_alive = process_alive   # one implementation, shared with units.py
 
 
 def _latest_preview(max_age_s: float = 5.0) -> dict | None:
@@ -537,7 +530,8 @@ def main(argv=None) -> int:
         return 0
     if args.command == "pending":
         units, skipped = discover(config["roots"], include_test=config["include_test_units"],
-                                  settle_s=float(config["settle_s"]))
+                                  settle_s=float(config["settle_s"]),
+                                  lock_path=Path(config["hardware_lock"]).expanduser())
         rows = [{"unit": u.key, "status": u.status, "ledger": (agent.ledger.unit(u.key) or {}).get("state")}
                 for u in units]
         print(json.dumps({"final": rows, "skipped": skipped}, indent=1))

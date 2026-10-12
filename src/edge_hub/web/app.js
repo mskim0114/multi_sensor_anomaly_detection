@@ -248,7 +248,7 @@ async function refreshUnits() {
   for (const u of data.units) {
     const s = u.summary || {};
     table.append(el("tr", { class: "clickable", onclick: () => openUnit(u.device, u.unit) },
-      el("td", {}, u.device), el("td", {}, u.unit), el("td", {}, `${s.status ?? "—"}${s.test_mode ? " · test" : ""}`),
+      el("td", {}, u.device), el("td", {}, u.unit), el("td", {}, `${s.status === "interrupted" ? "중단됨(재부팅 등)" : (s.status ?? "—")}${s.status_source === "uplink_inferred" ? " *" : ""}${s.test_mode ? " · test" : ""}`),
       el("td", {}, s.scenario_id ?? "—"), el("td", {}, (s.started_utc || "—").slice(0, 19)), el("td", {}, String(u.files)),
       el("td", {}, fmtBytes(u.bytes)), el("td", {}, s.windows_evaluated != null ? `${s.windows_valid}/${s.windows_evaluated}` : "—"),
       el("td", {}, u.committed_utc)));

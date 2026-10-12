@@ -113,7 +113,7 @@ class HubFixture(unittest.TestCase):
                   "ca_file": self.ca, "roots": {"dataset": self.dataset, "runs": self.runs},
                   "include_test_units": True, "settle_s": 60, "scan_interval_s": 1,
                   "heartbeat_interval_s": 10, "thermal_every_s": 0, "chunk_bytes": chunk,
-                  "max_upload_bytes_per_s": 0}
+                  "max_upload_bytes_per_s": 0, "hardware_lock": str(self.edge / "test-hardware.lock")}
         client = HubClient(config["server_urls"], config["token"], device, ca_file=self.ca, timeout=10)
         return Agent(config, state_dir=state or (self.edge / "state"), client=client)
 
@@ -244,14 +244,18 @@ class TransferTests(HubFixture):
         make_trial(self.dataset, "normal", "trial_004", status="aborted")        # aborted is shipped
         run = self.runs / "20261006T000000.000000Z"
         write(run / "metadata.json", json.dumps({"status": "running"}).encode())
-        units, skipped = discover({"dataset": self.dataset, "runs": self.runs}, settle_s=60)
+        lock = self.edge / "busy.lock"   # an acquisition is alive: a "running" trial may be live
+        stat = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+        lock.write_text(json.dumps({"pid": os.getpid(), "start_ticks": stat[19],
+                                    "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}))
+        units, skipped = discover({"dataset": self.dataset, "runs": self.runs}, settle_s=60, lock_path=lock)
         self.assertEqual([u.key for u in units], ["dataset/normal/trial_004"])
         reasons = {s["unit"]: s["reason"] for s in skipped}
-        self.assertIn("not final", reasons["dataset/normal/trial_001"])
+        self.assertIn("may still be running", reasons["dataset/normal/trial_001"])
         self.assertIn("settling", reasons["dataset/normal/trial_002"])
         self.assertIn("regular file", reasons["dataset/normal/trial_003"])
-        self.assertIn("not final", reasons["runs/20261006T000000.000000Z"])
-        units, _ = discover({"dataset": self.dataset}, include_test=False, settle_s=60)
+        self.assertIn("no control.json identity", reasons["runs/20261006T000000.000000Z"])
+        units, _ = discover({"dataset": self.dataset}, include_test=False, settle_s=60, lock_path=lock)
         self.assertNotIn("_smoke", {u.key.split("/")[1] for u in units})
 
     def test_free_runs_are_shipped_under_runs(self):
@@ -698,6 +702,65 @@ class RemoteControlTests(HubFixture):
                                            "--role", "operator"]), 1)
         finally:
             viewers.write_text(saved)
+
+
+
+class InterruptedUnitTests(HubFixture):
+    """Units whose producer died before writing a final status (reboot, power loss)."""
+
+    def identity(self, alive):
+        stat = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if alive:
+            return {"pid": os.getpid(), "start_ticks": stat[19], "boot_id": boot}
+        return {"pid": os.getpid(), "start_ticks": stat[19], "boot_id": "00000000-previous-boot"}
+
+    def free_run(self, name, *, identity, mtime=OLD):
+        run = self.runs / name
+        write(run / "metadata.json", json.dumps({"run_id": name}).encode(), mtime)     # no status
+        write(run / "scalars.csv", b"sequence\n0\n1\n", mtime)
+        if identity is not None:
+            write(run / "control.json", json.dumps({"status": "running", "token": "t", "identity": identity}).encode(), mtime)
+        return run
+
+    def test_free_run_of_a_dead_collector_ships_as_interrupted_unchanged(self):
+        run = self.free_run("20261012T031001.604592Z", identity=self.identity(alive=False))
+        before = {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in run.iterdir()}
+        agent = self.agent()
+        self.assertEqual(agent.scan_once()["committed"], 1)
+        self.assertEqual({p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in run.iterdir()}, before)
+        listed = next(u for u in self.store.units("jetson-test-01") if u["unit"] == "runs/20261012T031001.604592Z")
+        self.assertEqual((listed["summary"]["status"], listed["summary"]["status_source"]), ("interrupted", "uplink_inferred"))
+
+    def test_unprovable_or_live_or_recent_runs_are_not_shipped(self):
+        self.free_run("20260903T041706Z", identity=None)                       # legacy, no control.json
+        self.free_run("20261012T040000.000000Z", identity=self.identity(alive=True))
+        self.free_run("20261012T050000.000000Z", identity=self.identity(alive=False), mtime=time.time())
+        units, skipped = discover({"runs": self.runs}, settle_s=60, lock_path=self.edge / "no.lock")
+        self.assertEqual(units, [])
+        reasons = {s["unit"]: s["reason"] for s in skipped}
+        self.assertIn("no control.json identity", reasons["runs/20260903T041706Z"])
+        self.assertIn("may still be running", reasons["runs/20261012T040000.000000Z"])
+        self.assertIn("settling", reasons["runs/20261012T050000.000000Z"])
+
+    def test_trial_is_interrupted_only_when_no_acquisition_is_alive(self):
+        make_trial(self.dataset, "_smoke", "combustion_20261012T070000Z", status="running")
+        lock = self.edge / "hardware.lock"
+        lock.write_text(json.dumps(self.identity(alive=True)))
+        units, skipped = discover({"dataset": self.dataset}, settle_s=60, lock_path=lock)
+        self.assertEqual(units, [])
+        self.assertIn("may still be running", skipped[0]["reason"])
+        lock.write_text(json.dumps(self.identity(alive=False)))
+        units, _ = discover({"dataset": self.dataset}, settle_s=60, lock_path=lock)
+        self.assertEqual([(u.key, u.status) for u in units], [("dataset/_smoke/combustion_20261012T070000Z", "interrupted")])
+        units, _ = discover({"dataset": self.dataset}, settle_s=60, lock_path=self.edge / "never.lock")
+        self.assertEqual([u.status for u in units], ["interrupted"], "no lock file: nothing has ever held the bus")
+
+    def test_unknown_non_final_statuses_are_still_refused(self):
+        make_trial(self.dataset, "_smoke", "dust_20261012T080000Z", status="mystery")
+        units, skipped = discover({"dataset": self.dataset}, settle_s=60, lock_path=self.edge / "never.lock")
+        self.assertEqual(units, [])
+        self.assertIn("is not final", skipped[0]["reason"])
 
 
 import unittest.mock  # noqa: E402

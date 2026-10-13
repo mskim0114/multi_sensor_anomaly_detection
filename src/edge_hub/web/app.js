@@ -118,6 +118,8 @@ function deviceCard(d) {
     el("dt", {}, t("card.zed")), el("dd", {}, zedText(s.zed)),
     el("dt", {}, t("card.received")), el("dd", {}, `${t("card.trials", { n: d.units.dataset.count })} (${fmtBytes(d.units.dataset.bytes)}) · ${t("card.runs", { n: d.units.runs.count })} (${fmtBytes(d.units.runs.bytes)})`),
     el("dt", {}, t("card.pending")), el("dd", {}, t("card.count", { n: pending }) + (s.current_upload ? ` · ${t("card.uploading")} ${s.current_upload.unit} ${fmtBytes(s.current_upload.sent)}/${fmtBytes(s.current_upload.bytes)}` : "")),
+    el("dt", {}, t("card.local_cleanup")), el("dd", {}, `${s.delete_after_upload ? t("card.cleanup_on", { days: (s.local_retention || {}).keep_days ?? "?", gb: (s.local_retention || {}).min_free_gb ?? "?" }) : t("card.cleanup_off")} · `
+      + t("card.cleanup_done", { n: (by.deleted_local || {}).units || 0, size: fmtBytes((by.deleted_local || {}).bytes || 0) })),
     el("dt", {}, t("card.last_error")), el("dd", {}, up.last_error ? `${up.last_error.unit}: ${up.last_error.error}` : t("card.none")),
     el("dt", {}, t("card.disk")), el("dd", {}, disk ? `${fmtBytes(disk.free)} / ${fmtBytes(disk.total)}` : "—"),
     el("dt", {}, t("card.soc_temp")), el("dd", {}, Object.entries(s.temperatures_c || {}).filter(([, v]) => typeof v === "number").slice(0, 4).map(([k, v]) => `${k} ${v.toFixed(1)}°C`).join(" · ") || "—"),

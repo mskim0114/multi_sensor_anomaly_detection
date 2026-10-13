@@ -244,6 +244,31 @@ systemctl --user restart factory-uplink
   - 화면 문구는 `web/i18n.js` 한 곳에 있다. 시나리오 정의는 `scenarios.json` 의 `*_en` 필드를 쓴다.
   - 서버가 보내는 오류 문구와 장치가 보내는 상태 코드는 원래 영어라 그대로 보인다.
 
+## 3e. 업로드 후 Jetson 로컬 삭제 (2026-10-13)
+
+Jetson 저장 공간이 차지 않도록, 서버에 올라가 검증된 unit 은 Jetson 에서 지운다.
+- 켜는 법: `uplink.json` 의 `"delete_after_upload": true`. 기본값은 꺼짐이다.
+
+**언제 지우나 (보관 규칙)**
+- 기본: hub commit 후 `keep_days`(7일) 가 지나면 지운다. 그동안 Jetson 사본이 두 번째 사본 역할을 한다.
+- 예외: 디스크 여유가 `min_free_gb`(50 GB) 보다 적으면 7일이 안 됐어도 가장 오래된 것부터 지운다. 50 GB 는 234 GB 의 약 20% 로, OS 업데이트·로그·docker·CUDA 캐시가 쓸 공간을 남긴다.
+- 2026-10-13 운영 설정: 켜짐, 7일, 50 GB.
+
+삭제 조건 (모두 만족해야 한다):
+1. uplink 가 final 로 판정한 unit 이다. 수집 중, ZED 기록 중, settle 중인 unit 은 대상이 아니다.
+2. ledger 상태가 `committed` 다.
+3. 로컬 파일 전체를 캐시 없이 다시 해시한 manifest 가 커밋된 manifest·영수증과 같다. 업로드 후 바뀐 unit 은 지우지 않는다.
+4. hub 가 자기 디스크의 사본을 지금 다시 해시해서 ok 이고, manifest·파일 수가 같다(`POST /api/v1/device/units/verify`, 장치 토큰, 자기 장치 unit 만).
+
+지우는 방식:
+- unit 폴더를 `.deleting-<이름>` 으로 바꾼 뒤, 같은 이름의 빈 폴더에 `UPLOADED_TO_HUB.json`(manifest SHA, 파일 수, 크기, hub 경로) 하나만 남기고 원래 내용을 지운다.
+- 폴더를 남기는 이유: trial 러너가 `max(trial_NNN)+1` 로 번호를 정하기 때문이다. 이름이 재사용되면 hub 의 사본과 충돌한다.
+- 남은 폴더에는 `experiment.json`/`metadata.json` 이 없어서 다시 unit 으로 잡히지 않는다.
+- 이름을 바꾼 직후 중단되면, 다음 정리 때 ledger 가 아는 unit 에 한해 마저 처리한다.
+- ledger 상태는 `deleted_local` 이 되고, 웹 장치 카드의 "Jetson 정리" 에 개수와 용량이 보인다.
+
+확인: `./jetson_deploy/run_python.sh jetson_deploy/uplink_agent.py prune --dry-run` 은 지울 목록만 보여 주고 아무것도 지우지 않는다(hub 재해시도 생략).
+
 ## 4. 검증 기록 (2026-10-06)
 
 **자동 테스트** `tests/test_edge_hub.py`: 26개(보안 리뷰 회귀 8개 포함), Jetson `run_python.sh` 에서 통과. 실제 TLS(사설 CA)로 localhost 서버를 띄워 확인한 항목:

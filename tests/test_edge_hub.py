@@ -1032,6 +1032,114 @@ class ZedTests(HubFixture):
                     self.assertIn(f"{field}_en", scenario, f"{scenario['id']}.{field} has no English text")
 
 
+class LocalDeletionTests(HubFixture):
+    """delete_after_upload: local copies go only after both sides re-verified them."""
+
+    def agent(self, **kw):
+        agent = super().agent(**kw)
+        agent.config["keep_days"] = 0          # most tests check verification, not retention
+        return agent
+
+    def test_prune_deletes_only_verified_units_and_leaves_a_tombstone(self):
+        trial = make_trial(self.dataset, "dust", "trial_001")
+        agent = self.agent()
+        agent.scan_once()
+        listing = agent.prune(dry_run=True)
+        self.assertEqual([(r["unit"], r["action"]) for r in listing], [("dataset/dust/trial_001", "would_delete")])
+        self.assertTrue((trial / "experiment.json").exists(), "a dry run deletes nothing")
+        report = agent.prune()
+        self.assertEqual([r["action"] for r in report], ["deleted"])
+        self.assertEqual([p.name for p in trial.iterdir()], ["UPLOADED_TO_HUB.json"])
+        tomb = json.loads((trial / "UPLOADED_TO_HUB.json").read_text())
+        receipt = json.loads((self.data_root / "receipts/jetson-test-01/dataset/dust/trial_001.json").read_text())
+        self.assertEqual(tomb["manifest_sha256"], receipt["manifest_sha256"])
+        self.assertEqual(agent.ledger.unit("dataset/dust/trial_001")["state"], "deleted_local")
+        self.assertFalse(any(p.name.startswith(".deleting") for p in trial.parent.iterdir()))
+        self.assertEqual(agent.scan_once()["final"], 0, "a tombstone is never a unit again")
+        self.assertTrue(self.store.verify_unit("jetson-test-01", "dataset/dust/trial_001")["ok"], "hub copy untouched")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("trial_runner_alloc", ROOT / "jetson_deploy/scripts/12_run_trial.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        self.assertEqual(runner.allocate_trial_dir(self.dataset, "dust", False)[1], "trial_002",
+                         "numbering continues past a deleted trial")
+
+    def test_changed_local_files_or_a_bad_hub_copy_keep_the_local_unit(self):
+        changed = make_trial(self.dataset, "dust", "trial_010")
+        corrupt = make_trial(self.dataset, "dust", "trial_011")
+        pending = make_trial(self.dataset, "dust", "trial_012")
+        agent = self.agent()
+        agent.scan_once()
+        agent.ledger.set_state("dataset/dust/trial_012", "error", error="simulated failed upload")
+        write(changed / "big.bin", b"edited after the upload")
+        hub_file = self.raw("dataset/dust/trial_011") / "big.bin"
+        os.chmod(hub_file, 0o644)
+        hub_file.write_bytes(b"bit rot")
+        os.chmod(hub_file, 0o444)
+        report = {r["unit"]: r for r in agent.prune()}
+        self.assertEqual(report["dataset/dust/trial_010"]["action"], "kept")
+        self.assertIn("differ", report["dataset/dust/trial_010"]["reason"])
+        self.assertEqual(report["dataset/dust/trial_011"]["action"], "kept")
+        self.assertIn("failed verification", report["dataset/dust/trial_011"]["reason"])
+        self.assertEqual(report["dataset/dust/trial_012"]["action"], "kept")
+        for trial in (changed, corrupt, pending):
+            self.assertTrue((trial / "experiment.json").exists())
+
+    def test_verify_api_is_per_device_and_scan_prunes_only_when_enabled(self):
+        make_trial(self.dataset, "dust", "trial_020")
+        agent = self.agent()
+        agent.scan_once()
+        self.assertTrue((self.dataset / "dust/trial_020/experiment.json").exists(), "off by default")
+        other = HubClient([self.url], self.other_token, "jetson-test-02", ca_file=self.ca, timeout=10)
+        with self.assertRaises(HubRejected) as caught:
+            other.request("POST", "/api/v1/device/units/verify", json_body={"unit": "dataset/dust/trial_020"})
+        self.assertEqual(caught.exception.status, 404)
+        status, _, _ = self.https("POST", "/api/v1/device/units/verify", json.dumps({"unit": "dataset/dust/trial_020"}),
+                                  {"Content-Type": "application/json"})
+        self.assertEqual(status, 401)
+        agent.config["delete_after_upload"] = True
+        self.assertEqual(agent.scan_once()["deleted"], 1)
+        self.assertFalse((self.dataset / "dust/trial_020/experiment.json").exists())
+
+    def test_retention_keeps_recent_uploads_until_the_disk_runs_low_then_oldest_first(self):
+        old = make_trial(self.dataset, "dust", "trial_040")
+        agent = self.agent()
+        agent.scan_once()
+        new = make_trial(self.dataset, "dust", "trial_041")
+        agent.scan_once()
+        receipt = agent.ledger.unit("dataset/dust/trial_040")["receipt"]
+        agent.ledger.set_state("dataset/dust/trial_040", "committed",
+                               receipt=dict(receipt, committed_utc="2026-01-01T00:00:00+00:00"))
+        agent.config.update(keep_days=7, min_free_gb=50)
+        plenty = unittest.mock.Mock(free=200 * 1024 ** 3)
+        with unittest.mock.patch("uplink.agent.shutil.disk_usage", return_value=plenty):
+            report = {r["unit"]: r for r in agent.prune()}
+        self.assertEqual(report["dataset/dust/trial_040"]["action"], "deleted")
+        self.assertIn("retention period over", report["dataset/dust/trial_040"]["reason"])
+        self.assertEqual(report["dataset/dust/trial_041"]["action"], "kept")
+        self.assertIn("days left", report["dataset/dust/trial_041"]["reason"])
+        low = unittest.mock.Mock(free=10 * 1024 ** 3)
+        with unittest.mock.patch("uplink.agent.shutil.disk_usage", return_value=low):
+            report = agent.prune()
+        self.assertEqual([(r["unit"], r["action"]) for r in report], [("dataset/dust/trial_041", "deleted")])
+        self.assertIn("free space below 50 GB", report[0]["reason"])
+        self.assertEqual([p.name for p in old.iterdir()], ["UPLOADED_TO_HUB.json"])
+        self.assertEqual([p.name for p in new.iterdir()], ["UPLOADED_TO_HUB.json"])
+
+    def test_an_interrupted_deletion_is_finished_with_a_tombstone(self):
+        trial = make_trial(self.dataset, "dust", "trial_030")
+        agent = self.agent()
+        agent.scan_once()
+        os.rename(trial, trial.with_name(".deleting-trial_030"))      # crash right after the rename
+        self.assertEqual(agent.finish_interrupted_deletions(), 1)
+        self.assertEqual([p.name for p in trial.iterdir()], ["UPLOADED_TO_HUB.json"])
+        self.assertFalse(trial.with_name(".deleting-trial_030").exists())
+        stray = self.dataset / "dust" / ".deleting-not_ours"
+        stray.mkdir()
+        agent.finish_interrupted_deletions()
+        self.assertTrue(stray.exists(), "never removes a directory the ledger does not know")
+
+
 import unittest.mock  # noqa: E402
 
 if __name__ == "__main__":

@@ -234,6 +234,10 @@ zed/                 (선택) ZED 2i 보조 기록기 출력: zed.json, frames.c
 
 `dataset/` 은 실측 raw 이므로 **Git 에 커밋하지 않는다** (`.gitignore` 대상).
 
+uplink 의 `delete_after_upload` 가 켜져 있으면, hub 에 올라가 양쪽에서 검증된 trial 은 Jetson 에서 지워진다.
+- 그 자리에는 `UPLOADED_TO_HUB.json` 만 든 빈 폴더가 남는다. trial 번호가 재사용되지 않게 하기 위해서다.
+- 원본은 hub 의 `raw/<device>/dataset/...` 이다. 자세한 조건은 `EDGE_HUB.md` §3e 에 있다.
+
 ---
 
 ## 7. `experiment.json` 필드

@@ -403,27 +403,41 @@ class Store:
             receipt = _read_json(receipt_path)
             if not receipt or (device and receipt["device"] != device):
                 continue
-            base = self.root / "raw" / receipt["device"]
-            manifest = self.root / "manifests" / receipt["device"] / (receipt["unit"] + ".sha256")
-            bad = []
-            try:
-                text = manifest.read_text()
-            except OSError:
-                results.append({"device": receipt["device"], "unit": receipt["unit"], "ok": False,
-                                "problems": ["manifest file missing"]})
-                continue
-            if hashlib.sha256(text.encode()).hexdigest() != receipt["manifest_sha256"]:
-                bad.append("manifest file does not match receipt")
-            for line in text.splitlines():
-                sha, rel = line.split("  ", 1)
-                path = base / rel
-                if not path.is_file() or sha256_file(path) != sha:
-                    bad.append(rel)
-            listed = {line.split("  ", 1)[1] for line in text.splitlines()}
-            on_disk = {str(p.relative_to(base)) for p in (base / receipt["unit"]).rglob("*") if p.is_file()}
-            bad += sorted(f"unlisted: {p}" for p in on_disk - listed)
-            results.append({"device": receipt["device"], "unit": receipt["unit"], "ok": not bad, "problems": bad})
+            results.append(self._verify_receipt(receipt))
         return results
+
+    def verify_unit(self, device: str, unit: str) -> dict:
+        """Re-hash one committed unit from disk now. The device deletes its local copy only on ok."""
+        check_device(device)
+        unit = "/".join(check_unit(unit))
+        with self._lock(f"{device}:{unit}"):
+            receipt = self._committed(device, unit)
+            if not receipt:
+                raise HubError(404, "unit is not committed on the hub")
+            result = self._verify_receipt(receipt)
+        return dict(result, manifest_sha256=receipt["manifest_sha256"], files=receipt["files"],
+                    bytes=receipt["bytes"], verified_utc=utc_now())
+
+    def _verify_receipt(self, receipt: dict) -> dict:
+        base = self.root / "raw" / receipt["device"]
+        manifest = self.root / "manifests" / receipt["device"] / (receipt["unit"] + ".sha256")
+        bad = []
+        try:
+            text = manifest.read_text()
+        except OSError:
+            return {"device": receipt["device"], "unit": receipt["unit"], "ok": False,
+                    "problems": ["manifest file missing"]}
+        if hashlib.sha256(text.encode()).hexdigest() != receipt["manifest_sha256"]:
+            bad.append("manifest file does not match receipt")
+        for line in text.splitlines():
+            sha, rel = line.split("  ", 1)
+            path = base / rel
+            if not path.is_file() or sha256_file(path) != sha:
+                bad.append(rel)
+        listed = {line.split("  ", 1)[1] for line in text.splitlines()}
+        on_disk = {str(p.relative_to(base)) for p in (base / receipt["unit"]).rglob("*") if p.is_file()}
+        bad += sorted(f"unlisted: {p}" for p in on_disk - listed)
+        return {"device": receipt["device"], "unit": receipt["unit"], "ok": not bad, "problems": bad[:50]}
 
     # -------------------------------------------------------------- telemetry
     def heartbeat(self, device: str, remote_addr: str, body: dict) -> None:

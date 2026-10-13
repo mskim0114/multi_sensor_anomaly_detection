@@ -318,6 +318,13 @@ class Handler(BaseHTTPRequestHandler):
         self.server.log(f"committed {device} {receipt['unit']} files={receipt['files']} bytes={receipt['bytes']}")
         self.send_json(200, receipt)
 
+    def r_verify(self, query):
+        device = self.device()
+        body = self.read_json(4096)
+        result = self.hub.store.verify_unit(device, body.get("unit"))
+        self.server.log(f"verify {device} {result['unit']} ok={result['ok']}")
+        self.send_json(200, result)
+
     def r_heartbeat(self, query):
         device = self.device()
         body = self.read_json(MAX_HEARTBEAT)
@@ -509,6 +516,7 @@ ROUTES = {
     ("POST", "/api/v1/device/units/begin"): Handler.r_begin,
     ("PUT", "/api/v1/device/units/file"): Handler.r_put,
     ("POST", "/api/v1/device/units/commit"): Handler.r_commit,
+    ("POST", "/api/v1/device/units/verify"): Handler.r_verify,
     ("POST", "/api/v1/device/heartbeat"): Handler.r_heartbeat,
     ("POST", "/api/v1/device/command_result"): Handler.r_command_result,
     ("POST", "/api/v1/control"): Handler.r_control,

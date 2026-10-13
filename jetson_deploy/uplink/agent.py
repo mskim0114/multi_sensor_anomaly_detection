@@ -17,12 +17,18 @@ collector (``collect.py start|stop`` only; trials are never started remotely), r
 switch the ZED side recorder on/off (``zed_on``/``zed_off`` only flip ``enabled`` in
 ~/.config/factory_safety/zed.json). It is a device-side opt-in: a hub cannot turn it on.
 
-Nothing local is ever deleted. A unit whose files change after it was committed is reported
-as ``local_changed_after_commit`` and never re-uploaded over the hub copy.
+``delete_after_upload`` (default false) frees the Jetson disk. A committed unit becomes due
+``keep_days`` (7) after the hub committed it, or earlier - oldest first - while the disk has less than
+``min_free_gb`` (50) free. A due unit is deleted locally only after (1) every local file is re-hashed in full and matches the committed manifest
+and (2) the hub re-hashes its own copy of that unit from disk and reports it intact. Without that
+flag nothing local is ever deleted. ``uplink_agent.py prune --dry-run`` lists what would go.
+A unit whose files change after it was committed is reported as ``local_changed_after_commit``,
+never re-uploaded over the hub copy and never deleted.
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import logging
 import logging.handlers
@@ -46,11 +52,13 @@ from zedcap import control as zed_control   # sibling package, standard library 
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = Path("~/.config/factory_safety/uplink.json").expanduser()
+TOMBSTONE = "UPLOADED_TO_HUB.json"
 STATE_DIR = Path("~/.cache/factory_safety/uplink").expanduser()
 DEFAULTS = {"include_test_units": True, "settle_s": 120, "scan_interval_s": 60,
             "heartbeat_interval_s": 10, "thermal_every_s": 30, "chunk_bytes": 4 * 1024 * 1024,
             "max_upload_bytes_per_s": 0, "ca_file": None, "allow_remote_control": False,
             "hardware_lock": str(HARDWARE_LOCK), "zed_config": str(zed_control.CONFIG_PATH),
+            "delete_after_upload": False, "keep_days": 7, "min_free_gb": 50,
             "roots": {"dataset": str(REPO / "dataset"),
                       "runs": str(REPO / "jetson_deploy" / "results" / "sensor_collection")}}
 
@@ -214,9 +222,141 @@ class Agent:
                 log.error("upload of %s failed: %s", unit.key, error)
             finally:
                 self.current = None
+        if self.config.get("delete_after_upload") and not self.stop.is_set() and self.connected is not False:
+            result["deleted"] = sum(1 for r in self.prune(units) if r["action"] == "deleted")
         result["skipped_detail"] = skipped[:50]
         self.last_scan = dict(result, utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         return result
+
+    # ------------------------------------------------------- local deletion
+    def prune(self, units: list[Unit] | None = None, *, dry_run: bool = False) -> list[dict]:
+        """Delete local copies of committed units that both sides have just re-verified."""
+        if units is None:
+            units, _ = discover(self.config["roots"], include_test=self.config["include_test_units"],
+                                settle_s=float(self.config["settle_s"]),
+                                lock_path=Path(self.config["hardware_lock"]).expanduser())
+        report = []
+        if not dry_run:
+            self.finish_interrupted_deletions()
+        keep_s = float(self.config.get("keep_days", 7)) * 86400
+        min_free = float(self.config.get("min_free_gb", 50)) * 1024 ** 3
+        records = {u.key: self.ledger.unit(u.key) or {} for u in units}
+        # oldest upload first, so a disk-space emergency frees the oldest data first
+        for unit in sorted(units, key=lambda u: _committed_epoch(records[u.key]) or float("inf")):
+            if self.stop.is_set():
+                break
+            record = records[unit.key]
+            entry = {"unit": unit.key, "bytes": record.get("bytes")}
+            if record.get("state") != "committed":
+                report.append(dict(entry, action="kept", reason=f"not committed ({record.get('state')})"))
+                continue
+            committed = _committed_epoch(record)
+            age = time.time() - committed if committed else 0.0
+            free = _free_bytes(unit.path)
+            if age < keep_s and (free is None or free >= min_free):
+                report.append(dict(entry, action="kept", reason=f"kept {keep_s / 86400:g} days after upload "
+                                   f"({(keep_s - age) / 86400:.1f} days left); disk has enough free space"))
+                continue
+            why = "retention period over" if age >= keep_s else f"free space below {min_free / 1024 ** 3:g} GB"
+            try:
+                reason = self._deletion_blocker(unit, record, dry_run)
+            except HubUnavailable as error:
+                report.append(dict(entry, action="kept", reason=f"hub unreachable: {error}"))
+                break
+            except (HubRejected, OSError, ValueError, RuntimeError) as error:
+                reason = f"check failed: {error}"
+            if reason:
+                report.append(dict(entry, action="kept", reason=reason))
+                continue
+            if dry_run:
+                report.append(dict(entry, action="would_delete", reason=f"{why}; local copy verified"))
+                continue
+            try:
+                self._delete_unit(unit)
+            except OSError as error:
+                log.error("deleting local %s failed: %s", unit.key, error)
+                report.append(dict(entry, action="kept", reason=f"delete failed: {error}"))
+                continue
+            self.ledger.set_state(unit.key, "deleted_local", error=None)
+            self.ledger.forget_hashes(unit.key)
+            log.info("deleted local copy of %s (%s bytes; %s) after hub verification", unit.key,
+                     record.get("bytes"), why)
+            report.append(dict(entry, action="deleted", reason=f"{why}; local and hub copies verified"))
+        return report
+
+    def _deletion_blocker(self, unit: Unit, record: dict, dry_run: bool) -> str | None:
+        """None when the unit may be deleted, else why not. Re-hashes everything (no cache)."""
+        files = []
+        for rel, info in list_files(unit.path):
+            sha = sha256_file(unit.path / rel)
+            after = (unit.path / rel).stat()
+            if (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
+                return f"{rel} changed while hashing"
+            files.append({"path": rel, "sha256": sha})
+        digest = manifest_digest(files, unit.key)
+        receipt = record.get("receipt") or {}
+        if digest != record.get("manifest_sha256") or digest != receipt.get("manifest_sha256"):
+            return "local files differ from what was committed"
+        if dry_run:
+            return None                          # the hub re-hash is the slow part; skip it when listing
+        verified = self.client.request("POST", "/api/v1/device/units/verify", json_body={"unit": unit.key})
+        if not verified.get("ok"):
+            return f"hub copy failed verification: {verified.get('problems')}"
+        if verified.get("manifest_sha256") != digest or verified.get("files") != len(files):
+            return "hub copy is a different manifest"
+        return None
+
+    def _delete_unit(self, unit: Unit) -> None:
+        """Replace one unit directory by a tombstone holding only UPLOADED_TO_HUB.json.
+
+        The empty-but-present directory keeps the trial runner's numbering (it allocates
+        max(existing trial_NNN) + 1, so a reused name would collide with the hub copy), and it is
+        never a unit again: it has no experiment.json / metadata.json."""
+        roots = {k: Path(v).expanduser().resolve() for k, v in self.config["roots"].items()}
+        kind, *parts = unit.key.split("/")
+        expected = roots[kind].joinpath(*parts)
+        path = Path(unit.path)
+        if path.is_symlink() or path.resolve() != expected or len(parts) != {"dataset": 2, "runs": 1}[kind]:
+            raise OSError(f"refusing to delete {path}: not the unit directory {expected}")
+        record = self.ledger.unit(unit.key) or {}
+        receipt = record.get("receipt") or {}
+        trash = path.with_name(f".deleting-{path.name}")   # hidden: never discovered as a unit
+        os.rename(path, trash)
+        path.mkdir()
+        tombstone = {"unit": unit.key, "deleted_utc": _utc(), "hub": self.client.active_url,
+                     "device": self.config["device_id"], "manifest_sha256": record.get("manifest_sha256"),
+                     "files": record.get("files"), "bytes": record.get("bytes"),
+                     "hub_raw_path": receipt.get("raw_path"), "committed_utc": receipt.get("committed_utc"),
+                     "note": "Raw data was uploaded, verified on both sides and deleted here to free the disk. "
+                             "The hub copy is the original."}
+        (path / TOMBSTONE).write_text(json.dumps(tombstone, indent=1) + "\n")
+        shutil.rmtree(trash)
+
+    def finish_interrupted_deletions(self) -> int:
+        """A crash between rename and rmtree leaves .deleting-<name>; finish it (tombstone first)."""
+        count = 0
+        for kind, root in self.config["roots"].items():
+            root = Path(root).expanduser()
+            if not root.is_dir():
+                continue
+            parents = [root] if kind == "runs" else [g for g in root.iterdir() if g.is_dir() and not g.is_symlink()]
+            for parent in parents:
+                for trash in parent.glob(".deleting-*"):
+                    if trash.is_symlink() or not trash.is_dir():
+                        continue
+                    name = trash.name[len(".deleting-"):]
+                    key = f"runs/{name}" if kind == "runs" else f"dataset/{parent.name}/{name}"
+                    if (self.ledger.unit(key) or {}).get("state") not in ("committed", "deleted_local"):
+                        continue                 # not ours to finish
+                    target = parent / name
+                    if not target.exists():
+                        target.mkdir()
+                        (target / TOMBSTONE).write_text(json.dumps({"unit": key, "deleted_utc": _utc(),
+                                                                    "note": "deletion finished after a restart"}) + "\n")
+                    shutil.rmtree(trash)
+                    self.ledger.set_state(key, "deleted_local", error=None)
+                    count += 1
+        return count
 
     def _unchanged(self, unit: Unit, record: dict) -> bool:
         """Cheap check: every file still matches its cached (size, mtime) hash entry."""
@@ -238,7 +378,9 @@ class Agent:
                 "current_upload": self.current, "last_scan": {k: v for k, v in self.last_scan.items()
                                                               if k != "skipped_detail"},
                 "git": self._git, "remote_control": bool(self.config.get("allow_remote_control")),
-                "zed": self.zed_state()}
+                "zed": self.zed_state(), "delete_after_upload": bool(self.config.get("delete_after_upload")),
+                "local_retention": {"keep_days": self.config.get("keep_days", 7),
+                                    "min_free_gb": self.config.get("min_free_gb", 50)}}
         preview = self.zed_preview()
         if preview is not None:
             body["zed_preview"] = preview
@@ -478,6 +620,22 @@ def _disk(path: Path) -> dict | None:
     return {"total": usage.total, "free": usage.free}
 
 
+def _committed_epoch(record: dict) -> float | None:
+    """When the hub committed this unit (from its receipt), as epoch seconds."""
+    value = (record.get("receipt") or {}).get("committed_utc")
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _free_bytes(path: Path) -> int | None:
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
 def _git_state() -> dict:
     def git(*args):
         try:
@@ -557,7 +715,8 @@ def _setup_logging(state_dir: Path, verbose: bool) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="uplink_agent.py",
                                      description="Ship completed raw units to the edge hub.")
-    parser.add_argument("command", choices=["run", "once", "check", "status", "pending"])
+    parser.add_argument("command", choices=["run", "once", "check", "status", "pending", "prune"])
+    parser.add_argument("--dry-run", action="store_true", help="prune: list only, delete nothing")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state-dir", type=Path, default=STATE_DIR)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -579,6 +738,11 @@ def main(argv=None) -> int:
         rows = [{"unit": u.key, "status": u.status, "ledger": (agent.ledger.unit(u.key) or {}).get("state")}
                 for u in units]
         print(json.dumps({"final": rows, "skipped": skipped}, indent=1))
+        return 0
+    if args.command == "prune":
+        report = agent.prune(dry_run=args.dry_run)
+        total = sum(r["bytes"] or 0 for r in report if r["action"] in ("deleted", "would_delete"))
+        print(json.dumps({"dry_run": args.dry_run, "bytes": total, "units": report}, indent=1))
         return 0
     if args.command == "once":
         result = agent.scan_once()

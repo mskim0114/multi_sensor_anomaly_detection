@@ -269,6 +269,19 @@ Jetson 저장 공간이 차지 않도록, 서버에 올라가 검증된 unit 은
 
 확인: `./jetson_deploy/run_python.sh jetson_deploy/uplink_agent.py prune --dry-run` 은 지울 목록만 보여 주고 아무것도 지우지 않는다(hub 재해시도 생략).
 
+## 3f. 서버 백업 (2026-10-13)
+
+- **무엇을**: hub data root 전체를 매일 03:30 에 `/mnt/data-ssd/keti_data/factory_safety/edge_hub_backup/current/` 로 rsync 한다.
+  - 포함: raw, manifests, receipts, annotations, config, tls.
+  - 제외: `staging/`(미완료 업로드).
+  - `hub.sqlite`(개입 기록·명령·장치 상태)는 SQLite online backup 으로 일관된 스냅샷을 만든다. 파일을 그대로 복사하지 않는다.
+- **지운 것·바뀐 것**: 미러에서 지우거나 덮어써야 하는 파일은 `replaced/<UTC>/` 로 옮긴다. 이 폴더는 비우지 않는다.
+- **검증**: 복사 후, 사본의 모든 receipt 에 대해 manifest↔receipt 를 확인하고 raw 파일 전부를 다시 해시한다. 문제가 하나라도 있으면 실패로 기록한다.
+- **결과 확인**: `status.json` 과 `<data_root>/backup_status.json` 에 남고, 웹 [장치 현황] 맨 위에 "서버 백업: 마지막 성공 …" 으로 보인다. 실패했거나 36시간 넘게 새 백업이 없으면 빨간색이다.
+- **안전장치**: 대상이 data root 안이거나 같은 파일시스템이면 실행하지 않는다. 두 디스크 중 하나라도 마운트되어 있지 않으면 systemd 가 건너뛴다.
+- **설치**: `src/edge_hub/edge-hub-backup.{service,timer}` (user unit, sudo 불필요)
+- **수동 실행**: `python3 -m src.edge_hub backup --data-root <DATA_ROOT> --dest <BACKUP_DEST>`
+
 ## 4. 검증 기록 (2026-10-06)
 
 **자동 테스트** `tests/test_edge_hub.py`: 26개(보안 리뷰 회귀 8개 포함), Jetson `run_python.sh` 에서 통과. 실제 TLS(사설 CA)로 localhost 서버를 띄워 확인한 항목:
@@ -362,15 +375,25 @@ cp jetson_deploy/uplink/factory-uplink.service ~/.config/systemd/user/ && system
 
 ## 6. 하지 않은 것 / 다음 단계
 
-- **Jetson 로컬 데이터 자동 삭제(보존 정책)**
-  - 하지 않았다. 지금은 사람이 지운다.
-  - 넣는다면 "서버 영수증 + N일 경과 + 서버 verify 통과" 를 조건으로 한다.
+- **독일 testbed 이전 (반드시 고려, 2026-10-13 사용자 지시)**
+  - Jetson 을 독일 testbed 로 옮기면 **우리 서버(이 hub)로 데이터를 보낼 수 없다.**
+  - 그때의 경로: Jetson → **독일 측 DB 서버**(그쪽 API·프로토콜·웹 드라이브) → 우리가 거기서 가져온다.
+  - 지금 구조 중 바꿔야 하는 것:
+    - 업로드 대상: uplink 는 이 hub 의 프로토콜(`factory-edge-hub-v1`)만 안다. 대상이 바뀌어도 unit·manifest·영수증 개념은 유지하고, 전송부만 갈아 끼울 수 있게 한다.
+    - 로컬 삭제(§3e): 이 hub 의 재검증 API 에 기대고 있다. 독일 측 저장소가 같은 검증(해시 확인·영수증)을 해 주지 않으면 **이전 전에 끈다**(`delete_after_upload: false`).
+    - 원격 제어·실시간 화면·개입 기록: 이 hub 에 heartbeat 가 닿아야 동작하므로 독일에서는 쓸 수 없다. 그쪽에서 무엇을 쓸지 정해야 한다.
+    - ZED 컬러 영상: EU 에서는 사람이 찍히는 영상이 GDPR 대상이다. 저장 여부·범위를 독일 측과 정해야 한다.
+  - 이전 일정·독일 측 시스템 사양은 미정이다.
 - **서버 측 추론·자동 처리**
   - 하지 않았다.
   - commit 직후 hook 으로 window 빌드나 서버 추론을 붙일 수 있다. 다만 라벨은 자동 생성하지 않는다.
 - **실시간 스트리밍**
   - 하지 않았다. heartbeat 는 10 s 주기이고, 열화상은 30 s 주기 미리보기다. 원본은 commit 된 raw 다.
+- **서버 저장소 (2026-10-13 확인)**
+  - `/mnt/data-hdd` 는 fstab 에 UUID·`nofail` 로 등록되어 있다. 다만 9/17 등록 후 재부팅한 적이 없어 부팅 시 자동 마운트는 아직 실증되지 않았다.
+  - 마운트가 안 되면 hub 는 `ConditionPathIsMountPoint` 때문에 시작하지 않는다. 그러면 업로드는 대기하고, Jetson 삭제는 일어나지 않는다.
+  - 디스크: Seagate Exos 8 TB 1개, RAID 없음. SMART 정상(불량 섹터 0, 약 37,600시간).
+  - 백업: §3f 의 야간 HDD → SSD 백업을 2026-10-13 에 도입했다. 같은 서버 안의 다른 디스크라서 서버 전체 손실(화재·도난)은 막지 못한다. 외부 백업(회사 NAS 등)은 미정이다.
 - **정식 배포 전 확인할 것**
-  - `/mnt/data-hdd` 부팅 마운트(handoff 상 미검증).
   - 외부 접속 방식(§3).
   - 열람 계정 운영.

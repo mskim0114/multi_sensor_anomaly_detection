@@ -140,7 +140,7 @@ def main(argv=None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("init", "add-device", "revoke-device", "add-viewer", "set-role", "gen-cert", "serve", "verify",
-                 "reindex"):
+                 "reindex", "backup"):
         p = sub.add_parser(name)
         p.add_argument("--data-root", required=True, type=Path)
         if name == "revoke-device":
@@ -165,6 +165,9 @@ def main(argv=None) -> int:
                            help="take the client address from X-Forwarded-For (only behind your own proxy)")
         if name == "verify":
             p.add_argument("--device")
+        if name == "backup":
+            p.add_argument("--dest", required=True, type=Path,
+                           help="directory on another disk, e.g. /mnt/data-ssd/keti_data/factory_safety/edge_hub_backup")
     args = parser.parse_args(argv)
     if args.command == "init":
         print(f"initialised {Store(args.data_root).root}")
@@ -183,6 +186,11 @@ def main(argv=None) -> int:
         return cmd_gen_cert(args)
     if args.command == "serve":
         return cmd_serve(args)
+    if args.command == "backup":
+        from .backup import run_backup
+        status = run_backup(args.data_root, args.dest)
+        print(json.dumps(status, indent=1))
+        return 0 if status["ok"] else 1
     if args.command == "reindex":
         print(f"indexed {Store(args.data_root).reindex()} units")
         return 0

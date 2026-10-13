@@ -88,6 +88,11 @@ async function refreshOverview() {
     state.commands[d.device] = (await api(`/api/v1/commands?device=${encodeURIComponent(d.device)}`).catch(() => ({ commands: [] }))).commands;
   }));
   $("server-time").textContent = t("overview.server_time", { utc: data.server_utc });
+  const b = data.backup;
+  const age = b && b.finished_utc ? (Date.parse(data.server_utc) - Date.parse(b.finished_utc)) / 3600e3 : null;
+  $("backup-status").textContent = !b ? t("backup.none") : !b.ok ? t("backup.failed", { utc: (b.finished_utc || "").slice(0, 16), error: b.error || "" })
+    : t("backup.ok", { utc: (b.finished_utc || "").slice(0, 16), n: b.units ?? 0, size: fmtBytes(b.bytes) }) + (age > 36 ? t("backup.stale") : "");
+  $("backup-status").classList.toggle("error", !b || !b.ok || age > 36);
   const cards = $("device-cards"); cards.replaceChildren();
   if (!data.devices.length) cards.append(el("p", { class: "muted" }, t("overview.no_devices")));
   for (const d of data.devices) cards.append(deviceCard(d));

@@ -1,0 +1,19 @@
+# Nightly verified copy of the hub data to a second disk (user unit, no sudo). Install with the timer:
+#   cp src/edge_hub/edge-hub-backup.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now edge-hub-backup.timer
+#   systemctl --user start edge-hub-backup.service      # run once now
+#   journalctl --user -u edge-hub-backup
+[Unit]
+Description=factory_safety edge hub backup (HDD -> SSD, verified)
+ConditionPathIsMountPoint=/mnt/data-hdd
+ConditionPathIsMountPoint=/mnt/data-ssd
+
+[Service]
+Type=oneshot
+Environment=DATA_ROOT=/mnt/data-hdd/keti_data/factory_safety/edge_hub
+Environment=BACKUP_DEST=/mnt/data-ssd/keti_data/factory_safety/edge_hub_backup
+WorkingDirectory=%h/services/factory_edge_hub/current
+ExecStart=/usr/bin/python3 -E -s -B -m src.edge_hub backup --data-root ${DATA_ROOT} --dest ${BACKUP_DEST}
+Nice=10
+IOSchedulingClass=idle
+UMask=0027

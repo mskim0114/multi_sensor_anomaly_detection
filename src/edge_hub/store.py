@@ -507,7 +507,11 @@ class Store:
                         "units": {k: {"count": counts.get((device, k), (0, 0))[0],
                                       "bytes": counts.get((device, k), (0, 0))[1] or 0}
                                   for k in UNIT_ROOTS}})
-        return {"server_utc": utc_now(), "devices": out}
+        backup = _read_json(self.root / "backup_status.json") if (self.root / "backup_status.json").is_file() else None
+        if isinstance(backup, dict):
+            backup = {k: backup.get(k) for k in ("ok", "started_utc", "finished_utc", "error", "seconds")} | {
+                k: (backup.get("verify") or {}).get(k) for k in ("units", "files", "bytes", "problem_count")}
+        return {"server_utc": utc_now(), "devices": out, "backup": backup}
 
     def live_view(self, device: str) -> dict:
         check_device(device)

@@ -1140,6 +1140,57 @@ class LocalDeletionTests(HubFixture):
         self.assertTrue(stray.exists(), "never removes a directory the ledger does not know")
 
 
+class BackupTests(HubFixture):
+    """Nightly copy to a second disk: mirror, consistent DB snapshot, re-hash of the copy."""
+
+    def test_backup_copies_verifies_and_reports_to_the_web(self):
+        from src.edge_hub.backup import run_backup
+        make_trial(self.dataset, "dust", "trial_050")
+        self.agent().scan_once()
+        with self.store._db_lock:
+            self.store.db.execute("CREATE TABLE IF NOT EXISTS backup_probe(x TEXT)")
+            self.store.db.execute("INSERT INTO backup_probe VALUES('kept')")
+            self.store.db.commit()
+        dest = self.tmp / f"backup_{time.time_ns()}"
+        status = run_backup(self.data_root, dest, allow_same_filesystem=True)
+        self.assertTrue(status["ok"], status)
+        self.assertGreaterEqual(status["verify"]["units"], 1)
+        copy = dest / "current"
+        self.assertTrue((copy / "raw/jetson-test-01/dataset/dust/trial_050/big.bin").is_file())
+        self.assertFalse((copy / "staging").exists(), "unfinished uploads are not copied")
+        import sqlite3
+        snap = sqlite3.connect(copy / "hub.sqlite")
+        self.assertEqual(snap.execute("SELECT x FROM backup_probe").fetchall(), [("kept",)])
+        snap.close()
+        cookie = self.login()
+        _, _, overview = self.https("GET", "/api/v1/overview", headers={"Cookie": cookie})
+        self.assertTrue(overview["backup"]["ok"])
+        self.assertGreaterEqual(overview["backup"]["units"], 1)
+        # a damaged copy is detected by the next run's verification only if rsync does not repair it:
+        # rsync -a repairs size/mtime changes, so damage the copy without touching size and mtime
+        target = copy / "raw/jetson-test-01/dataset/dust/trial_050/big.bin"
+        info = target.stat()
+        os.chmod(target, 0o644)
+        data = bytearray(target.read_bytes()); data[0] ^= 0xFF
+        target.write_bytes(bytes(data))
+        os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
+        from src.edge_hub.backup import verify_copy
+        self.assertEqual(verify_copy(copy)["problem_count"], 1)
+
+    def test_backup_refuses_the_data_disk_itself_and_reports_failures(self):
+        from src.edge_hub.backup import run_backup
+        status = run_backup(self.data_root, self.data_root / "inside")
+        self.assertFalse(status["ok"])
+        self.assertIn("outside the data root", status["error"])
+        status = run_backup(self.data_root, self.tmp / "same_fs")
+        self.assertFalse(status["ok"])
+        self.assertIn("same filesystem", status["error"])
+        status = run_backup(self.data_root, self.tmp / "no_rsync", rsync="/nonexistent/rsync", allow_same_filesystem=True)
+        self.assertFalse(status["ok"])
+        self.assertEqual(json.loads((self.data_root / "backup_status.json").read_text())["ok"], False)
+        (self.data_root / "backup_status.json").unlink()
+
+
 import unittest.mock  # noqa: E402
 
 if __name__ == "__main__":

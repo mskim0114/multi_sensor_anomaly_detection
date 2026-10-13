@@ -226,7 +226,11 @@ scalars.csv          tick 당 1행 평면 뷰
 snapshots.jsonl      tick 당 1줄 전체 스냅샷
 thermal_*.npz        30프레임 단위 열화상
 timing_report.json   타이밍/품질 통계
+zed/                 (선택) ZED 2i 보조 기록기 출력: zed.json, frames.csv, seg_*_left.npz, seg_*_depth.npz
 ```
+
+`zed/` 는 수집기가 아니라 별도 프로세스(`factory-zed`)가 같은 tick 기준으로 쓴다. 스위치가 꺼져 있었으면 없다.
+형식과 정렬 규칙은 [`ZED_RECORDER.md`](ZED_RECORDER.md) 에 있다. ZED 는 모델 입력이 아니며, 수집기의 acceptance(통과 여부)에도 영향을 주지 않는다.
 
 `dataset/` 은 실측 raw 이므로 **Git 에 커밋하지 않는다** (`.gitignore` 대상).
 

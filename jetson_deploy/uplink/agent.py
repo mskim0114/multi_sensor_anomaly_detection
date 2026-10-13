@@ -13,8 +13,9 @@ Config (JSON, default ~/.config/factory_safety/uplink.json)::
      "max_upload_bytes_per_s": 0, "allow_remote_control": false}
 
 ``allow_remote_control`` (default false) lets an operator on the hub start/stop the free-run
-collector (``collect.py start|stop`` only; trials are never started remotely). It is a
-device-side opt-in: a hub cannot turn it on.
+collector (``collect.py start|stop`` only; trials are never started remotely), reset the SPS30 and
+switch the ZED side recorder on/off (``zed_on``/``zed_off`` only flip ``enabled`` in
+~/.config/factory_safety/zed.json). It is a device-side opt-in: a hub cannot turn it on.
 
 Nothing local is ever deleted. A unit whose files change after it was committed is reported
 as ``local_changed_after_commit`` and never re-uploaded over the hub copy.
@@ -41,6 +42,7 @@ from . import AGENT_VERSION, PROTOCOL
 from .client import HubClient, HubRejected, HubUnavailable
 from .ledger import Ledger
 from .units import HARDWARE_LOCK, Unit, discover, list_files, manifest_digest, process_alive, sha256_file
+from zedcap import control as zed_control   # sibling package, standard library only
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = Path("~/.config/factory_safety/uplink.json").expanduser()
@@ -48,7 +50,7 @@ STATE_DIR = Path("~/.cache/factory_safety/uplink").expanduser()
 DEFAULTS = {"include_test_units": True, "settle_s": 120, "scan_interval_s": 60,
             "heartbeat_interval_s": 10, "thermal_every_s": 30, "chunk_bytes": 4 * 1024 * 1024,
             "max_upload_bytes_per_s": 0, "ca_file": None, "allow_remote_control": False,
-            "hardware_lock": str(HARDWARE_LOCK),
+            "hardware_lock": str(HARDWARE_LOCK), "zed_config": str(zed_control.CONFIG_PATH),
             "roots": {"dataset": str(REPO / "dataset"),
                       "runs": str(REPO / "jetson_deploy" / "results" / "sensor_collection")}}
 
@@ -96,6 +98,7 @@ class Agent:
         self.connected = None
         self.current = None
         self._last_thermal = 0.0
+        self._last_zed_preview = None
         self._command_lock = threading.Lock()
         self._report_lock = threading.Lock()
         self._git = _git_state()
@@ -234,7 +237,11 @@ class Agent:
                 "collector": _collector_state(), "uploads": self.ledger.summary(),
                 "current_upload": self.current, "last_scan": {k: v for k, v in self.last_scan.items()
                                                               if k != "skipped_detail"},
-                "git": self._git, "remote_control": bool(self.config.get("allow_remote_control"))}
+                "git": self._git, "remote_control": bool(self.config.get("allow_remote_control")),
+                "zed": self.zed_state()}
+        preview = self.zed_preview()
+        if preview is not None:
+            body["zed_preview"] = preview
         live = _latest_preview()
         if live is not None:
             due = time.time() - self._last_thermal >= float(self.config["thermal_every_s"])
@@ -244,6 +251,31 @@ class Agent:
                 live["thermal"] = None
             body["live"] = live
         return body
+
+    def _zed_config_path(self) -> Path:
+        return Path(self.config.get("zed_config") or DEFAULTS["zed_config"]).expanduser()
+
+    def zed_state(self) -> dict:
+        """Switch position and the recorder's own status (without its thumbnail)."""
+        config = zed_control.load_config(self._zed_config_path())
+        status = zed_control.read_status() or {}
+        keep = ("state", "reason", "error", "run_id", "session", "frames", "missed_ticks", "last_tick",
+                "bytes_written", "grab_fps", "camera")
+        return {"enabled": config["enabled"], "config_error": config.get("config_error"),
+                "changed_utc": config.get("changed_utc"), "changed_by": config.get("changed_by"),
+                "recorder_running": bool(status), **{k: status.get(k) for k in keep if k in status}}
+
+    def zed_preview(self) -> dict | None:
+        """A new ZED thumbnail at most every thermal_every_s (it is ~15 kB of base64)."""
+        status = zed_control.read_status() or {}
+        preview = status.get("preview")
+        if not isinstance(preview, dict) or status.get("state") != "recording":
+            return None
+        key = (preview.get("run_id"), preview.get("tick"))
+        if key == self._last_zed_preview:
+            return None
+        self._last_zed_preview = key
+        return {k: preview.get(k) for k in ("run_id", "tick", "utc", "jpeg_b64")}
 
     def _local_ip(self) -> str | None:
         host = urlsplit(self.client.active_url).hostname
@@ -266,19 +298,22 @@ class Agent:
             log.info("hub command %s %s requested by %s", command_id, action, command.get("requested_by"))
             if not self.config.get("allow_remote_control"):
                 result = {"ok": False, "error": "remote control is disabled on this device (allow_remote_control)"}
-            elif action not in ("start", "stop", "reset_sps30"):
+            elif action not in ("start", "stop", "reset_sps30", "zed_on", "zed_off"):
                 result = {"ok": False, "error": f"unsupported action {action!r}"}
             elif not self._command_lock.acquire(blocking=False):
                 result = {"ok": False, "error": "another command is still running on the device"}
             else:
-                threading.Thread(target=self._execute, args=(command_id, action), name="command",
-                                 daemon=True).start()
+                threading.Thread(target=self._execute, args=(command_id, action, command.get("requested_by")),
+                                 name="command", daemon=True).start()
                 continue
             self.ledger.command_done(command_id, result)
 
-    def _execute(self, command_id: str, action: str) -> None:
+    def _execute(self, command_id: str, action: str, requested_by=None) -> None:
         try:
-            result = self.collector_command(action, command_id)
+            if action in ("zed_on", "zed_off"):
+                result = self.zed_command(action, requested_by)
+            else:
+                result = self.collector_command(action, command_id)
         except Exception as error:   # report, never crash the agent
             result = {"ok": False, "error": repr(error)[:300]}
         finally:
@@ -316,6 +351,15 @@ class Agent:
         ok = done.returncode == 0 and state.get("status") in expected
         return {"ok": bool(ok), "returncode": done.returncode, "collector": state,
                 "stderr_tail": done.stderr[-300:] if done.returncode else ""}
+
+    def zed_command(self, action: str, requested_by=None) -> dict:
+        """Flip the ZED switch. The recorder picks it up within about a second; the collector is
+        not touched, so this is allowed during a run (a new ZED session starts or the current one ends)."""
+        config = zed_control.set_enabled(action == "zed_on", by=f"hub:{str(requested_by or '?')[:60]}",
+                                         path=self._zed_config_path())
+        ok = not config.get("config_error") and config["enabled"] == (action == "zed_on")
+        return {"ok": ok, "zed": {"enabled": config["enabled"], "config_error": config.get("config_error"),
+                                  "recorder_running": zed_control.read_status() is not None}}
 
     def reset_sps30(self, launcher: str) -> dict:
         """Operator-requested SPS30 soft reset, only while no acquisition runs (the tool also

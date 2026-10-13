@@ -910,6 +910,128 @@ class LabelingTests(HubFixture):
         self.assertEqual(self.store.verify("jetson-test-01")[-1]["ok"], True, "raw untouched by labeling")
 
 
+def add_zed(unit_dir: Path, ticks=(3, 4, 5, 7), mtime: float = OLD) -> list[bytes]:
+    """A zed-v1 directory as the side recorder writes it: one segment, JPEGs stored back to back."""
+    jpegs = [b"\xff\xd8\xff\xe0" + bytes([t]) * (50 + t) for t in ticks]
+    offsets, total = [0], 0
+    for j in jpegs:
+        total += len(j)
+        offsets.append(total)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("left_jpeg.npy", npy(b"".join(jpegs), "|u1", (total,)))
+        archive.writestr("left_offsets.npy", npy(b"".join(o.to_bytes(8, "little") for o in offsets), "<i8", (len(offsets),)))
+    write(unit_dir / "zed" / "seg_01_00000_left.npz", buffer.getvalue(), mtime)
+    write(unit_dir / "zed" / "seg_01_00000_depth.npz", b"PK-not-read-by-the-hub", mtime)
+    rows = ["session,segment,index,tick,frame_monotonic_ns,image_timestamp_ns,offset_ms"]
+    rows += [f"1,0,{i},{t},{t * 10**9},{t * 10**9},-4.5" for i, t in enumerate(ticks)]
+    write(unit_dir / "zed" / "frames.csv", ("\n".join(rows) + "\n").encode(), mtime)
+    meta = {"schema": "zed-v1", "status": "complete", "camera": {"model": "ZED 2i", "serial_number": 1},
+            "sessions": [{"session": 1, "frames": len(ticks), "missed_ticks": 1, "first_tick": ticks[0],
+                          "last_tick": ticks[-1], "stop_reason": "collection_ended"}],
+            "recorder": {"pid": 1, "start_ticks": "1", "boot_id": "gone"}}
+    write(unit_dir / "zed" / "zed.json", json.dumps(meta).encode(), mtime)
+    return jpegs
+
+
+class ZedTests(HubFixture):
+    """ZED side recorder on the hub: on/off commands, live thumbnail, frames of received units."""
+
+    def test_zed_commands_are_queued_and_only_flip_the_device_switch(self):
+        self.store.heartbeat("jetson-test-01", "127.0.0.1", {"remote_control": True, "interval_s": 10})
+        for command in self.store.take_commands("jetson-test-01"):
+            self.store.command_result("jetson-test-01", command["id"], True, {})
+        record = self.store.request_command("jetson-test-01", "zed_on", "boss")
+        self.assertEqual(record["action"], "zed_on")
+        for command in self.store.take_commands("jetson-test-01"):
+            self.store.command_result("jetson-test-01", command["id"], True, {})
+        agent = self.agent()
+        switch = self.edge / "zed.json"
+        switch.write_text(json.dumps({"enabled": False, "jpeg_quality": 70}))
+        agent.config.update(allow_remote_control=True, zed_config=str(switch))
+        agent.collector_command = lambda *a, **k: self.fail("ZED commands never touch the collector")
+        agent.handle_commands([{"id": "f" * 24, "action": "zed_on", "requested_by": "boss"}])
+        for _ in range(100):
+            if agent.ledger.unreported_commands():
+                break
+            time.sleep(0.02)
+        result = dict(agent.ledger.unreported_commands())["f" * 24]
+        saved = json.loads(switch.read_text())
+        self.assertEqual((result["ok"], result["zed"]["enabled"]), (True, True))
+        self.assertEqual((saved["enabled"], saved["jpeg_quality"], saved["changed_by"]), (True, 70, "hub:boss"))
+        self.assertTrue(agent.zed_command("zed_off")["ok"])
+        self.assertFalse(json.loads(switch.read_text())["enabled"])
+
+    def test_heartbeat_carries_zed_status_and_a_checked_thumbnail(self):
+        import base64
+        agent = self.agent()
+        switch = self.edge / "zed.json"
+        switch.write_text(json.dumps({"enabled": True}))
+        agent.config["zed_config"] = str(switch)
+        thumb = base64.b64encode(b"\xff\xd8\xff\xe0" + b"x" * 400).decode()
+        status = {"state": "recording", "run_id": "r1", "frames": 12, "missed_ticks": 0, "pid": 9,
+                  "preview": {"run_id": "r1", "tick": 11, "utc": "2026-10-13T00:00:11Z", "jpeg_b64": thumb}}
+        with unittest.mock.patch("zedcap.control.read_status", return_value=status):
+            body = agent.heartbeat_body()
+            again = agent.heartbeat_body()
+        self.assertEqual((body["zed"]["enabled"], body["zed"]["state"], body["zed"]["frames"]), (True, "recording", 12))
+        self.assertNotIn("preview", body["zed"])
+        self.assertEqual(body["zed_preview"]["tick"], 11)
+        self.assertNotIn("zed_preview", again, "the same thumbnail is sent once")
+        agent.client.request("POST", "/api/v1/device/heartbeat", json_body=body)
+        cookie = self.login()
+        _, _, live = self.https("GET", "/api/v1/live?device=jetson-test-01", headers={"Cookie": cookie})
+        self.assertEqual((live["zed_preview"]["tick"], live["zed_preview"]["stale"]), (11, False))
+        self.assertNotIn("zed_preview", live["status"])
+        self.assertEqual(live["status"]["zed"]["state"], "recording")
+        for bad in ({"jpeg_b64": base64.b64encode(b"GIF89a" + b"x" * 400).decode()}, {"jpeg_b64": "A" * 200_000},
+                    {"jpeg_b64": "not base64!!" * 20}, "junk"):
+            self.store.heartbeat("jetson-test-02", "127.0.0.1", {"zed_preview": bad, "zed": {"state": "idle"}})
+            self.assertNotIn("zed_preview", self.store.live_view("jetson-test-02"))
+        self.store.heartbeat("jetson-test-01", "127.0.0.1", {"zed": {"state": "idle"}})
+        self.assertTrue(self.store.live_view("jetson-test-01")["zed_preview"]["stale"])
+
+    def test_received_unit_serves_the_saved_frame_nearest_a_tick(self):
+        trial = make_trial(self.dataset, "_smoke", "dust_Z", frames=8)
+        jpegs = add_zed(trial)
+        agent = self.agent()
+        agent.scan_once()
+        unit = "dataset/_smoke/dust_Z"
+        self.assertTrue((self.raw(unit) / "zed" / "frames.csv").is_file())
+        cookie = self.login()
+        _, _, detail = self.https("GET", f"/api/v1/unit?device=jetson-test-01&unit={unit}", headers={"Cookie": cookie})
+        self.assertEqual((detail["zed"]["frames"], detail["zed"]["status"], detail["summary"]["zed_frames"]), (4, "complete", 4))
+        import base64
+        for tick, expect in ((4, 4), (6, 5), (0, 3), (99, 7)):
+            status, _, frame = self.https("GET", f"/api/v1/unit/zed?device=jetson-test-01&unit={unit}&tick={tick}",
+                                          headers={"Cookie": cookie})
+            with self.subTest(tick=tick):
+                self.assertEqual((status, frame["frame_tick"], frame["saved_ticks"]), (200, expect, [3, 7]))
+                self.assertEqual(base64.b64decode(frame["jpeg_b64"]), jpegs[(3, 4, 5, 7).index(expect)])
+        self.assertEqual(self.https("GET", f"/api/v1/unit/zed?device=jetson-test-01&unit={unit}&tick=x",
+                                    headers={"Cookie": cookie})[0], 400)
+        self.assertEqual(self.https("GET", f"/api/v1/unit/zed?device=jetson-test-01&unit={unit}&tick=1")[0], 401)
+        make_trial(self.dataset, "_smoke", "dust_noZ", frames=3)
+        agent.scan_once()
+        self.assertEqual(self.https("GET", "/api/v1/unit/zed?device=jetson-test-01&unit=dataset/_smoke/dust_noZ&tick=1",
+                                    headers={"Cookie": cookie})[0], 404)
+        self.assertTrue(all(r["ok"] for r in self.store.verify("jetson-test-01")))
+
+    def test_language_strings_are_served_and_cover_both_languages(self):
+        status, headers, body = self.https("GET", "/i18n.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", headers["Content-Type"])
+        self.assertIn(b"en:", body)
+        status, _, page = self.https("GET", "/")
+        self.assertIn(b'src="i18n.js"', page)
+        self.assertIn(b'data-lang="en"', page)
+        spec = json.loads((ROOT / "src/edge_hub/scenarios.json").read_text())
+        for scenario in spec["scenarios"]:
+            for field in ("factory_situation", "bench_intervention", "remark", "safety", "must_not_change"):
+                if scenario.get(field):
+                    self.assertIn(f"{field}_en", scenario, f"{scenario['id']}.{field} has no English text")
+
+
 import unittest.mock  # noqa: E402
 
 if __name__ == "__main__":

@@ -4,7 +4,9 @@ A unit is final only when its producer says so and nothing in it has changed for
 ``settle_s`` seconds:
 * trial (``dataset/<group>/<trial>/experiment.json``): status completed / failed / aborted /
   preflight_failed (all are uploaded; ``status`` tells them apart);
-* free run (``<runs>/<run>/metadata.json``): status completed / stopped / failed.
+* free run (``<runs>/<run>/metadata.json``): status completed / stopped / failed;
+* and, when the ZED side recorder wrote into it (``<unit>/zed/zed.json``), that recorder has
+  marked it complete or is provably gone.
 Files are read only. Symlinks and special files make a unit unshippable (reported, skipped).
 """
 from __future__ import annotations
@@ -83,6 +85,15 @@ def acquisition_owner_alive(lock_path: Path = HARDWARE_LOCK) -> bool:
     return bool(owner) and process_alive(owner)
 
 
+def zed_still_writing(unit_dir: Path) -> bool:
+    """True while the ZED recorder named in zed/zed.json is alive and has not marked it complete."""
+    meta = _json(unit_dir / "zed" / "zed.json")
+    if meta is None or meta.get("status") == "complete":
+        return False
+    recorder = meta.get("recorder")
+    return isinstance(recorder, dict) and process_alive(recorder)
+
+
 def list_files(unit_dir: Path) -> list[tuple[str, os.stat_result]]:
     """All regular files under the unit, relative POSIX paths. Raises on anything unusual."""
     out = []
@@ -147,6 +158,9 @@ def discover(roots: dict[str, Path], *, include_test: bool = True, settle_s: flo
                 skipped.append({"unit": key, "reason": f"status {status!r}: producer may still be running"})
                 continue
             status = INTERRUPTED
+        if zed_still_writing(path):
+            skipped.append({"unit": key, "reason": "ZED recorder is still writing zed/"})
+            continue
         try:
             files = list_files(path)
         except (OSError, ValueError) as error:

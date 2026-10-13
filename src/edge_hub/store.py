@@ -37,7 +37,7 @@ UNIT_ROOTS = {"dataset": 3, "runs": 2}           # first component -> number of 
 MAX_OPEN_UNITS = 64                              # unfinished uploads per device
 MIN_FREE_BYTES = 20 * 1024 ** 3                  # keep this much free on the data disk
 MAX_FRAMES_PER_CHUNK = 1000
-COMMAND_ACTIONS = ("start", "stop", "reset_sps30")
+COMMAND_ACTIONS = ("start", "stop", "reset_sps30", "zed_on", "zed_off")
 SCENARIOS_FILE = Path(__file__).with_name("scenarios.json")
 COMMAND_DELIVERY_S = 120          # not picked up by the device in time -> expired, never run later
 COMMAND_RESULT_S = 180            # delivered but no result reported -> no_result
@@ -195,6 +195,7 @@ class Store:
         self.db.commit()
         self.live: dict[str, dict] = {}
         self._last_telemetry: dict[str, float] = {}
+        self._zed_cache: dict[str, list] = {}       # unit raw path -> parsed zed/frames.csv
         self.command_events: list[str] = []      # drained into the server log
 
     # ---------------------------------------------------------------- helpers
@@ -429,6 +430,7 @@ class Store:
         check_device(device)
         now = time.time()
         live = _clean_live(body.get("live"))
+        zed_preview = _clean_zed_preview(body.get("zed_preview"))
         status = _clean_status(body)
         status["received_utc"] = utc_now()
         sent = body.get("sent_epoch")
@@ -437,6 +439,10 @@ class Store:
             status["clock_offset_s"] = round(now - float(sent), 3)
         record = self.live.setdefault(device, {})
         record["status"] = status
+        if zed_preview is not None:
+            record["zed_preview"] = dict(zed_preview, received_utc=status["received_utc"])
+        if record.get("zed_preview"):
+            record["zed_preview"]["stale"] = (status.get("zed") or {}).get("state") != "recording"
         previous = record.get("live") or {}
         key = lambda value: (value.get("run_id"), (value.get("snapshot") or {}).get("sequence"))  # noqa: E731
         values = {}
@@ -526,7 +532,8 @@ class Store:
         docs = {name: _read_json(base / name) for name in ("experiment.json", "timing_report.json")
                 if (base / name).is_file()}
         return {"receipt": receipt, "summary": unit_summary(base), "files": files,
-                "thermal_chunks": thermal, "scalar_columns": columns, "documents": docs}
+                "thermal_chunks": thermal, "scalar_columns": columns, "documents": docs,
+                "zed": zed_summary(base)}
 
     def unit_scalars(self, device: str, unit: str, columns: list[str], max_points: int = 2000) -> dict:
         base = self.raw_dir(device, unit)
@@ -583,6 +590,58 @@ class Store:
                 "shape": [120, 160], "dtype": "<u2", "conversion": "raw / 100 - 273.15",
                 "data": base64.b64encode(frame).decode()}
 
+    def unit_zed(self, device: str, unit: str, tick: int) -> dict:
+        """The saved ZED left image nearest to ``tick`` (JPEG, base64) and where it came from."""
+        base = self.raw_dir(device, unit)
+        if not self._committed(device, unit) or not (base / "zed" / "frames.csv").is_file():
+            raise HubError(404, "no ZED frames for this unit")
+        index = self._zed_index(base)
+        if not index:
+            raise HubError(404, "no ZED frames for this unit")
+        import bisect
+        ticks = [row[0] for row in index]
+        at = bisect.bisect_left(ticks, tick)
+        candidates = [i for i in (at - 1, at) if 0 <= i < len(index)]
+        best = min(candidates, key=lambda i: abs(index[i][0] - tick))
+        frame_tick, session, segment, position, offset_ms = index[best]
+        path = base / "zed" / f"seg_{session:02d}_{segment:05d}_left.npz"
+        try:
+            with zipfile.ZipFile(path) as archive:
+                _, low = _npz_slice(archive, "left_offsets", "<i8", (), position)
+                _, high = _npz_slice(archive, "left_offsets", "<i8", (), position + 1)
+                start, end = (int.from_bytes(v, "little", signed=True) for v in (low, high))
+                jpeg = _npy_bytes(archive, "left_jpeg", start, end - start)
+        except (zipfile.BadZipFile, KeyError, ValueError, OSError) as error:
+            raise HubError(422, f"unreadable ZED segment: {error}")
+        if jpeg[:2] != b"\xff\xd8":
+            raise HubError(422, "ZED frame is not a JPEG")
+        import base64
+        return {"tick": tick, "frame_tick": frame_tick, "session": session, "offset_ms": offset_ms,
+                "saved_ticks": [ticks[0], ticks[-1]], "frames": len(ticks),
+                "jpeg_b64": base64.b64encode(jpeg).decode("ascii")}
+
+    def _zed_index(self, base: Path) -> list[tuple]:
+        """(tick, session, segment, index, offset_ms) sorted by tick; raw is immutable, so cached."""
+        key = str(base)
+        cached = self._zed_cache.get(key)
+        if cached is not None:
+            return cached
+        rows = []
+        with open(base / "zed" / "frames.csv", newline="", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                try:
+                    rows.append((int(row["tick"]), int(row["session"]), int(row["segment"]), int(row["index"]),
+                                 _number(float(row["offset_ms"])) if row.get("offset_ms") else None))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if len(rows) > 1_000_000:
+                    break
+        rows.sort()
+        if len(self._zed_cache) >= 16:
+            self._zed_cache.pop(next(iter(self._zed_cache)))
+        self._zed_cache[key] = rows
+        return rows
+
     # -------------------------------------------------------------- scenarios
     def scenarios(self) -> dict:
         """Scenario definitions (scenarios.json, versioned with the code) plus the received
@@ -607,10 +666,10 @@ class Store:
 
     # --------------------------------------------------------- remote control
     def request_command(self, device: str, action: str, user: str) -> dict:
-        """Queue start/stop for a device. Only these two actions exist; nothing is executed here."""
+        """Queue one of COMMAND_ACTIONS for a device; nothing is executed here."""
         check_device(device)
         if action not in COMMAND_ACTIONS:
-            raise HubError(400, "action must be start, stop or reset_sps30")
+            raise HubError(400, "action must be one of " + ", ".join(COMMAND_ACTIONS))
         entry = self.devices().get(device)
         if not entry or entry.get("revoked"):
             raise HubError(404, "no such device")
@@ -772,6 +831,49 @@ def _npz_slice(archive: zipfile.ZipFile, name: str, descr: str, tail: tuple, ind
     return shape, data
 
 
+def _npy_bytes(archive: zipfile.ZipFile, name: str, start: int, length: int) -> bytes:
+    """``length`` bytes from offset ``start`` of a 1-D uint8 .npy member (stored members seek fast)."""
+    import ast
+    if not 0 < length <= 16 * 1024 * 1024 or start < 0:
+        raise ValueError("frame size out of range")
+    info = archive.getinfo(name + ".npy")
+    with archive.open(info) as stream:
+        head = stream.read(12)
+        if head[:6] != b"\x93NUMPY" or head[6] not in (1, 2):
+            raise ValueError("not an npy array")
+        header_len = int.from_bytes(head[8:10], "little") if head[6] == 1 else int.from_bytes(head[8:12], "little")
+        if header_len > 4096:
+            raise ValueError("npy header too long")
+        begin = 10 if head[6] == 1 else 12
+        header = ast.literal_eval((head[begin:] + stream.read(header_len - (12 - begin))).decode("latin1"))
+        if not isinstance(header, dict) or header.get("descr") != "|u1" or len(header.get("shape", ())) != 1:
+            raise ValueError(f"unsupported array header {header!r}"[:200])
+        if start + length > header["shape"][0]:
+            raise ValueError("frame outside the array")
+        stream.seek(begin + header_len + start)
+        data = stream.read(length)
+    if len(data) != length:
+        raise ValueError("truncated array")
+    return data
+
+
+def zed_summary(base: Path) -> dict | None:
+    """What the ZED side recorder stored in this unit (zed/zed.json), or None."""
+    meta = _read_json(base / "zed" / "zed.json") if (base / "zed" / "zed.json").is_file() else None
+    if not isinstance(meta, dict):
+        return None
+    sessions = [s for s in meta.get("sessions") or [] if isinstance(s, dict)][:100]
+    camera = meta.get("camera") if isinstance(meta.get("camera"), dict) else {}
+    return {"schema": _short(meta.get("schema"), 40), "status": _short(meta.get("status"), 40),
+            "frames": sum(_number(s.get("frames")) or 0 for s in sessions),
+            "missed_ticks": sum(_number(s.get("missed_ticks")) or 0 for s in sessions),
+            "sessions": [{k: s.get(k) for k in ("session", "first_tick", "last_tick", "frames", "missed_ticks",
+                                               "stop_reason", "error", "started_utc", "stopped_utc")}
+                         for s in sessions],
+            "camera": {k: camera.get(k) for k in ("model", "serial_number", "resolution", "fps", "depth_mode")},
+            "depth_encoding": meta.get("depth_encoding"), "tick_clock": meta.get("tick_clock")}
+
+
 def unit_summary(base: Path) -> dict:
     """Small descriptive fields for the index. Copies values; never interprets them as labels."""
     experiment = _read_json(base / "experiment.json") or {}
@@ -797,6 +899,7 @@ def unit_summary(base: Path) -> dict:
         "windows_evaluated": quality.get("windows_evaluated"),
         "host": first(experiment.get("host"), metadata.get("host")),
         "git_commit": first(experiment.get("git_commit"), metadata.get("git_commit")),
+        "zed_frames": (zed_summary(base) or {}).get("frames"),
     }
     return {k: v for k, v in out.items() if v is not None}
 
@@ -828,10 +931,32 @@ def _clean_tree(value, depth=0, budget=None):
 
 
 def _clean_status(body: dict) -> dict:
-    status = _clean_tree({k: v for k, v in body.items() if k != "live"})
+    status = _clean_tree({k: v for k, v in body.items() if k not in ("live", "zed_preview")})
     interval = _number(status.get("interval_s"))
     status["interval_s"] = interval if interval and 1 <= interval <= 3600 else 10
     return status
+
+
+MAX_ZED_PREVIEW_B64 = 96 * 1024
+
+
+def _clean_zed_preview(preview) -> dict | None:
+    """A small JPEG thumbnail of the ZED left camera; anything else is dropped."""
+    if not isinstance(preview, dict):
+        return None
+    data = preview.get("jpeg_b64")
+    if not isinstance(data, str) or not 100 <= len(data) <= MAX_ZED_PREVIEW_B64:
+        return None
+    import base64
+    import binascii
+    try:
+        head = base64.b64decode(data[:8], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if head[:2] != b"\xff\xd8":
+        return None
+    return {"jpeg_b64": data, "tick": _number(preview.get("tick")), "utc": _short(preview.get("utc"), 40),
+            "run_id": _short(preview.get("run_id"), 120)}
 
 
 def _clean_live(live) -> dict | None:

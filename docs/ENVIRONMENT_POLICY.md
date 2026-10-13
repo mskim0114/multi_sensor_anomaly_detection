@@ -21,6 +21,16 @@
 **교차 오염 금지**: Jetson 센서 패키지를 SERVER 환경에 강제로 설치하지 않고, PyTorch 학습 스택을
 JETSON 런타임에 설치하지 않는다. 두 환경은 서로의 requirements를 참조하지 않는다.
 
+### JETSON-ZED (ZED 2i 보조 기록기 전용)
+
+`$HOME/venvs/zed_runtime` 은 ZED SDK 5.5 의 pyzed 전용이다(2026-10-13 생성).
+
+- pyzed 가 numpy ≥ 2 를 요구한다. 그래서 numpy 1.26.4 로 고정된 `factory_runtime` 에 넣지 않고 따로 만들었다.
+- 포함: pyzed 5.5, numpy 2.2.6, Cython, requests, Pillow(+ 의존성). system site-packages 를 상속하지 않는다(`include-system-site-packages = false`). cv2·onnxruntime·센서 패키지는 넣지 않는다.
+- 이 venv 로 실행하는 것은 `jetson_deploy/scripts/14_zed_recorder.py run`(서비스 `factory-zed`) 하나다. 수집기와 추론은 계속 `factory_runtime` 을 쓴다.
+- 실행: `env PYTHONNOUSERSITE=1 ~/venvs/zed_runtime/bin/python -I ...`
+- 두 환경 사이의 데이터는 파일(npz, csv, json)로만 오간다. numpy 2 로 쓴 npz 를 numpy 1.26 에서 읽을 수 있음을 확인했다.
+
 ### JETSON-LAB (참조용 보존 환경)
 
 `$HOME/venvs/factory_sensors` 는 2026-08-31에 SPS30/SCD30 최초 검증을 통과한 **lab/reference 환경**이다.

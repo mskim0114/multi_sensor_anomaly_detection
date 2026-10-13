@@ -6,26 +6,32 @@
 <title>Factory Edge Hub</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
+<script src="i18n.js" defer></script>
 <script src="app.js" defer></script>
 </head>
 <body>
 <header>
   <h1>Factory Edge Hub</h1>
   <nav id="nav" hidden>
-    <button data-view="overview" class="active">장치 현황</button>
-    <button data-view="live">실시간</button>
-    <button data-view="scenarios">시나리오</button>
-    <button data-view="units">수신 데이터</button>
+    <button data-view="overview" class="active" data-i18n="nav.overview">장치 현황</button>
+    <button data-view="live" data-i18n="nav.live">실시간</button>
+    <button data-view="scenarios" data-i18n="nav.scenarios">시나리오</button>
+    <button data-view="units" data-i18n="nav.units">수신 데이터</button>
   </nav>
-  <div id="who" hidden><span id="user"></span> <button id="logout">로그아웃</button></div>
+  <div class="header-right">
+    <div id="who" hidden><span id="user"></span> <button id="logout" data-i18n="logout">로그아웃</button></div>
+    <div class="lang" role="group" aria-label="Language">
+      <button id="lang-ko" data-lang="ko" class="active">한국어</button><button id="lang-en" data-lang="en">English</button>
+    </div>
+  </div>
 </header>
 <main>
   <section id="login" hidden>
     <form id="login-form" class="card narrow">
-      <h2>로그인</h2>
-      <label>사용자 <input name="user" autocomplete="username" required></label>
-      <label>비밀번호 <input name="password" type="password" autocomplete="current-password" required></label>
-      <button type="submit">로그인</button>
+      <h2 data-i18n="login.title">로그인</h2>
+      <label><span data-i18n="login.user">사용자</span> <input name="user" autocomplete="username" required></label>
+      <label><span data-i18n="login.password">비밀번호</span> <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit" data-i18n="login.submit">로그인</button>
       <p id="login-error" class="error"></p>
     </form>
   </section>
@@ -37,37 +43,42 @@
 
   <section id="live" hidden>
     <div class="toolbar">
-      <label>장치 <select id="live-device"></select></label>
-      <label>추세 범위 <select id="live-range">
-        <option value="900">15분</option><option value="3600" selected>1시간</option>
-        <option value="21600">6시간</option><option value="86400">24시간</option>
+      <label><span data-i18n="live.device">장치</span> <select id="live-device"></select></label>
+      <label><span data-i18n="live.range">추세 범위</span> <select id="live-range">
+        <option value="900" data-i18n="range.15m">15분</option><option value="3600" selected data-i18n="range.1h">1시간</option>
+        <option value="21600" data-i18n="range.6h">6시간</option><option value="86400" data-i18n="range.24h">24시간</option>
       </select></label>
       <span id="live-age" class="muted"></span>
     </div>
     <div class="card" id="event-panel">
-      <h3>개입 기록 <span id="event-open" class="badge"></span></h3>
-      <p class="muted">실험 중 <b>실제로 개입한 순간</b>에 누릅니다(예: 라이터를 켤 때 [개입 시작], 끌 때 [개입 종료]). 한 trial 에서 여러 번 눌러도 됩니다. 라벨이 아니라 "언제 무엇을 했는가"의 기록입니다.</p>
+      <h3><span data-i18n="event.title">개입 기록</span> <span id="event-open" class="badge"></span></h3>
+      <p class="muted" data-i18n="event.help">실험 중 실제로 개입한 순간에 누릅니다(예: 라이터를 켤 때 [개입 시작], 끌 때 [개입 종료]). 한 trial 에서 여러 번 눌러도 됩니다. 라벨이 아니라 "언제 무엇을 했는가"의 기록입니다.</p>
       <div class="toolbar" id="event-controls">
-        <label>시나리오 <select id="event-scenario">
-          <option value="combustion">연소 이상</option><option value="vapor_release">유해 증기 누출</option>
-          <option value="dust">분진 발생</option><option value="other">기타</option></select></label>
-        <label>메모 <input id="event-note" size="28" placeholder="예: 30cm, 5초"></label>
-        <button id="event-start" class="big">개입 시작</button>
-        <button id="event-end" class="big">개입 종료</button>
-        <button id="event-memo">메모만 기록</button>
+        <label><span data-i18n="event.scenario">시나리오</span> <select id="event-scenario">
+          <option value="combustion" data-i18n="scenario.combustion">연소 이상</option><option value="vapor_release" data-i18n="scenario.vapor_release">유해 증기 누출</option>
+          <option value="dust" data-i18n="scenario.dust">분진 발생</option><option value="other" data-i18n="scenario.other">기타</option></select></label>
+        <label><span data-i18n="event.note">메모</span> <input id="event-note" size="28" data-i18n-placeholder="event.note_placeholder" placeholder="예: 30cm, 5초"></label>
+        <button id="event-start" class="big" data-i18n="event.start">개입 시작</button>
+        <button id="event-end" class="big" data-i18n="event.end">개입 종료</button>
+        <button id="event-memo" data-i18n="event.memo">메모만 기록</button>
       </div>
       <div class="scroll"><table id="event-table"></table></div>
     </div>
     <div class="grid two">
       <div class="card">
-        <h3>열화상 <span class="muted" id="thermal-info"></span></h3>
+        <h3><span data-i18n="live.thermal">열화상</span> <span class="muted" id="thermal-info"></span></h3>
         <canvas id="thermal" width="160" height="120" class="thermal"></canvas>
         <div class="legend"><span id="t-min"></span><span class="ramp"></span><span id="t-max"></span></div>
       </div>
-      <div class="card"><h3>센서 최신값</h3><table id="sensor-table"></table></div>
+      <div class="card">
+        <h3><span data-i18n="live.zed">ZED 카메라</span> <span class="muted" id="zed-info"></span></h3>
+        <img id="zed-live" class="zed" alt="" hidden>
+        <p class="muted" id="zed-live-note"></p>
+      </div>
+      <div class="card"><h3 data-i18n="live.sensors">센서 최신값</h3><table id="sensor-table"></table></div>
     </div>
-    <div class="card"><h3>추세 (heartbeat 기준)</h3>
-      <label>항목 <select id="trend-keys" multiple size="6"></select></label>
+    <div class="card"><h3 data-i18n="live.trend">추세 (heartbeat 기준)</h3>
+      <label><span data-i18n="live.items">항목</span> <select id="trend-keys" multiple size="6"></select></label>
       <canvas id="trend" width="1100" height="320" class="chart"></canvas>
     </div>
   </section>
@@ -79,7 +90,7 @@
 
   <section id="units" hidden>
     <div class="toolbar">
-      <label>장치 <select id="units-device"><option value="">전체</option></select></label>
+      <label><span data-i18n="live.device">장치</span> <select id="units-device"><option value="" data-i18n="units.all">전체</option></select></label>
       <span id="units-count" class="muted"></span>
     </div>
     <div class="card scroll"><table id="units-table"></table></div>
@@ -87,38 +98,51 @@
       <h3 id="unit-title"></h3>
       <div id="unit-meta" class="meta"></div>
       <div class="toolbar">
-        <label>열 <select id="unit-cols" multiple size="6"></select></label>
-        <button id="unit-plot">그리기</button>
+        <label><span data-i18n="unit.columns">열</span> <select id="unit-cols" multiple size="6"></select></label>
+        <button id="unit-plot" data-i18n="unit.plot">그리기</button>
       </div>
       <canvas id="unit-chart" width="1100" height="320" class="chart clickable-chart"></canvas>
-      <p class="muted" id="chart-legend">띠: 기준선 평균±3σ(참고) · 회색 음영: 실제 개입 기록 · 점선: 계획상 신호음 · 상단 색 막대: 라벨 구간</p>
+      <p class="muted" id="chart-legend" data-i18n="unit.legend">띠: 기준선 평균±3σ(참고) · 회색 음영: 실제 개입 기록 · 점선: 계획상 신호음 · 상단 색 막대: 라벨 구간</p>
       <div id="anno">
-        <h3>라벨링 <span id="anno-rev" class="muted"></span></h3>
-        <p class="muted">그래프를 두 번 클릭해 구간의 시작과 끝을 찍고, 라벨과 확신도를 고른 뒤 [구간 추가]. 센서 반응 시작점은 모드를 바꿔 한 번 클릭합니다. 라벨을 붙이지 않은 tick 은 학습에서 제외됩니다. 기준: docs/LABELING_GUIDE.md</p>
+        <h3><span data-i18n="anno.title">라벨링</span> <span id="anno-rev" class="muted"></span></h3>
+        <p class="muted" data-i18n="anno.help">그래프를 두 번 클릭해 구간의 시작과 끝을 찍고, 라벨과 확신도를 고른 뒤 [구간 추가]. 센서 반응 시작점은 모드를 바꿔 한 번 클릭합니다. 라벨을 붙이지 않은 tick 은 학습에서 제외됩니다. 기준: docs/LABELING_GUIDE.md</p>
         <div class="toolbar" id="anno-controls">
-          <label>모드 <select id="anno-mode"><option value="interval">구간</option><option value="onset">센서 반응 시작점</option></select></label>
-          <label>라벨 <select id="anno-label"></select></label>
-          <label>확신도 <select id="anno-conf"></select></label>
-          <label>센서 <select id="anno-modality"></select></label>
+          <label><span data-i18n="anno.mode">모드</span> <select id="anno-mode"><option value="interval" data-i18n="anno.mode_interval">구간</option><option value="onset" data-i18n="anno.mode_onset">센서 반응 시작점</option></select></label>
+          <label><span data-i18n="anno.label">라벨</span> <select id="anno-label"></select></label>
+          <label><span data-i18n="anno.confidence">확신도</span> <select id="anno-conf"></select></label>
+          <label><span data-i18n="anno.sensor">센서</span> <select id="anno-modality"></select></label>
           <span id="anno-pending" class="muted"></span>
-          <button id="anno-add">구간 추가</button>
-          <button id="anno-clear">선택 취소</button>
+          <button id="anno-add" data-i18n="anno.add">구간 추가</button>
+          <button id="anno-clear" data-i18n="anno.clear">선택 취소</button>
         </div>
         <div class="scroll"><table id="anno-intervals"></table></div>
         <p id="anno-onsets" class="muted"></p>
         <div class="toolbar" id="anno-save-row">
-          <label>메모 <input id="anno-note" size="60"></label>
-          <button id="anno-save">저장 (새 revision)</button>
+          <label><span data-i18n="anno.note">메모</span> <input id="anno-note" size="60"></label>
+          <button id="anno-save" data-i18n="anno.save">저장 (새 revision)</button>
           <span id="anno-status" class="muted"></span>
         </div>
       </div>
-      <div class="toolbar">
-        <label>열화상 chunk <select id="unit-chunk"></select></label>
-        <label>frame <input id="unit-frame" type="range" min="0" max="29" value="0"></label>
-        <span id="unit-frame-info" class="muted"></span>
+      <div class="grid two">
+        <div>
+          <div class="toolbar">
+            <label><span data-i18n="unit.thermal_chunk">열화상 chunk</span> <select id="unit-chunk"></select></label>
+            <label>frame <input id="unit-frame" type="range" min="0" max="29" value="0"></label>
+            <span id="unit-frame-info" class="muted"></span>
+          </div>
+          <canvas id="unit-thermal" width="160" height="120" class="thermal"></canvas>
+          <div class="legend"><span id="u-min"></span><span class="ramp"></span><span id="u-max"></span></div>
+        </div>
+        <div id="unit-zed-box">
+          <div class="toolbar">
+            <label><span data-i18n="unit.zed_tick">ZED tick</span> <input id="unit-zed-tick" type="number" min="0" value="0"></label>
+            <input id="unit-zed-range" type="range" min="0" max="0" value="0">
+            <span id="unit-zed-info" class="muted"></span>
+          </div>
+          <img id="unit-zed" class="zed" alt="" hidden>
+          <p class="muted" data-i18n="unit.zed_help">그래프를 클릭하면 그 tick 의 ZED 영상이 표시됩니다.</p>
+        </div>
       </div>
-      <canvas id="unit-thermal" width="160" height="120" class="thermal"></canvas>
-      <div class="legend"><span id="u-min"></span><span class="ramp"></span><span id="u-max"></span></div>
     </div>
   </section>
 </main>

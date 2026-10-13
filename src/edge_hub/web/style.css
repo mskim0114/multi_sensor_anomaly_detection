@@ -15,7 +15,13 @@ h2, h3 { margin: 0 0 10px; font-size: 15px; }
 nav { display: flex; gap: 4px; flex-wrap: wrap; }
 nav button { background: none; border: 1px solid transparent; }
 nav button.active { border-color: var(--accent); color: var(--accent); }
-#who { margin-left: auto; color: var(--muted); }
+#who { color: var(--muted); }
+.header-right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+.lang { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.lang button { border: 0; border-radius: 0; padding: 4px 10px; font-size: 13px; }
+.lang button.active { background: var(--accent); color: #fff; }
+img.zed { width: 100%; max-width: 640px; border-radius: 6px; background: #000; display: block; }
+img.zed[hidden] { display: none; }
 button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line);
          background: var(--card); color: var(--text); cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--accent); }

@@ -1,0 +1,24 @@
+# systemd --user unit for the ZED side recorder (no sudo needed to install a user unit).
+#   cp jetson_deploy/zedcap/factory-zed.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now factory-zed
+#   journalctl --user -u factory-zed -f
+# On/off without restarting it: jetson_deploy/scripts/14_zed_recorder.py on|off|status (or the hub).
+# The camera is opened only while the switch is on AND a sensor collection is running.
+[Unit]
+Description=factory_safety ZED 2i side recorder (follows the sensor collection, writes <run>/zed/)
+
+[Service]
+Type=simple
+ExecStart=%h/venvs/zed_runtime/bin/python -I %h/projects/factory_safety/jetson_deploy/scripts/14_zed_recorder.py run
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONNOUSERSITE=1
+# the 1 Hz collector keeps priority; a runaway SDK is killed instead of freezing the desktop
+Nice=5
+CPUWeight=50
+MemoryMax=2500M
+MemorySwapMax=0
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

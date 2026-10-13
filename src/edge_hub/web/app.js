@@ -1,8 +1,8 @@
 "use strict";
-// Edge hub monitoring page. All server data is inserted as text (never as HTML).
+// Edge hub monitoring page. All server data is inserted as text (never as HTML). Strings: i18n.js.
 
 const $ = (id) => document.getElementById(id);
-const state = { view: "overview", overview: null, timer: null, unit: null, role: "viewer", commands: {} };
+const state = { view: "overview", overview: null, timer: null, unit: null, role: "viewer", commands: {}, user: null };
 
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: "same-origin", ...options });
@@ -24,13 +24,22 @@ function el(tag, attrs = {}, ...children) {
 
 const fmtBytes = (n) => { if (n == null) return "—"; const u = ["B","KB","MB","GB","TB"]; let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return `${n.toFixed(i ? 1 : 0)} ${u[i]}`; };
-const fmtAge = (s) => s == null ? "기록 없음" : s < 90 ? `${Math.round(s)}초 전` : s < 5400 ? `${Math.round(s/60)}분 전`
-  : s < 172800 ? `${Math.round(s/3600)}시간 전` : `${Math.round(s/86400)}일 전`;
+const fmtAge = (s) => s == null ? t("age.none") : s < 90 ? t("age.s", { n: Math.round(s) }) : s < 5400 ? t("age.m", { n: Math.round(s / 60) })
+  : s < 172800 ? t("age.h", { n: Math.round(s / 3600) }) : t("age.d", { n: Math.round(s / 86400) });
 const fmtNum = (v) => typeof v === "number" ? (Math.abs(v) >= 1000 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(2) : v.toPrecision(4)) : String(v ?? "—");
+const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" }, body: JSON.stringify(body) });
+
+// ------------------------------------------------------------- language
+for (const button of document.querySelectorAll(".lang button")) button.addEventListener("click", () => setLang(button.dataset.lang));
+document.addEventListener("langchange", () => {
+  if (state.user) { renderUser(); show(state.view); }
+  if (state.unit && state.unitDetail) { renderUnitMeta(); renderAnnotation(); redrawUnit(); showZed(); }
+});
+applyStatic();
 
 // ------------------------------------------------------------------ login
 function showLogin() {
-  clearInterval(state.timer);
+  clearInterval(state.timer); state.user = null;
   for (const id of ["overview", "live", "scenarios", "units"]) $(id).hidden = true;
   $("nav").hidden = true; $("who").hidden = true; $("login").hidden = false;
 }
@@ -53,10 +62,12 @@ for (const button of document.querySelectorAll("nav button")) {
   button.addEventListener("click", () => show(button.dataset.view));
 }
 
+function renderUser() { $("user").textContent = `${state.user}${state.role === "operator" ? ` (${t("operator")})` : ""}`; }
+
 function start(me) {
-  state.role = me.role || "viewer";
+  state.role = me.role || "viewer"; state.user = me.user;
   $("login").hidden = true; $("nav").hidden = false; $("who").hidden = false;
-  $("user").textContent = `${me.user}${state.role === "operator" ? " (운영자)" : ""}`;
+  renderUser();
   show(state.view);
 }
 
@@ -65,9 +76,9 @@ function show(view) {
   for (const b of document.querySelectorAll("nav button")) b.classList.toggle("active", b.dataset.view === view);
   for (const id of ["overview", "live", "scenarios", "units"]) $(id).hidden = id !== view;
   clearInterval(state.timer);
-  const tick = { overview: refreshOverview, live: refreshLive, scenarios: refreshScenarios, units: refreshUnits }[view];
-  tick();
-  if (view === "overview" || view === "live") state.timer = setInterval(tick, 5000);
+  const refresh = { overview: refreshOverview, live: refreshLive, scenarios: refreshScenarios, units: refreshUnits }[view];
+  refresh();
+  if (view === "overview" || view === "live") state.timer = setInterval(refresh, 5000);
 }
 
 // --------------------------------------------------------------- overview
@@ -76,11 +87,22 @@ async function refreshOverview() {
   await Promise.all(data.devices.filter((d) => d.registered).map(async (d) => {
     state.commands[d.device] = (await api(`/api/v1/commands?device=${encodeURIComponent(d.device)}`).catch(() => ({ commands: [] }))).commands;
   }));
-  $("server-time").textContent = `서버 시각 ${data.server_utc} · 5초마다 갱신`;
+  $("server-time").textContent = t("overview.server_time", { utc: data.server_utc });
   const cards = $("device-cards"); cards.replaceChildren();
-  if (!data.devices.length) cards.append(el("p", { class: "muted" }, "등록된 장치가 없습니다. 서버에서 add-device 로 등록하세요."));
+  if (!data.devices.length) cards.append(el("p", { class: "muted" }, t("overview.no_devices")));
   for (const d of data.devices) cards.append(deviceCard(d));
   fillDeviceSelects(data.devices.map((d) => d.device));
+}
+
+function zedText(zed) {
+  if (!zed) return "—";
+  const parts = [zed.enabled ? t("zed.on") : t("zed.off")];
+  if (!zed.recorder_running) parts.push(t("zed.no_recorder"));
+  else if (zed.state) parts.push(t(`zed.state.${zed.state}`));
+  if (zed.state === "recording") parts.push(`${zed.run_id || ""} · ${t("zed.frames", { n: zed.frames ?? 0 })}${zed.missed_ticks ? ` (missed ${zed.missed_ticks})` : ""}`);
+  if (zed.error) parts.push(String(zed.error));
+  if (zed.config_error) parts.push(String(zed.config_error));
+  return parts.join(" · ");
 }
 
 function deviceCard(d) {
@@ -90,59 +112,58 @@ function deviceCard(d) {
   const disk = Object.values(s.disks || {}).find(Boolean);
   const collector = s.collector || {};
   const kv = el("dl", { class: "kv" },
-    el("dt", {}, "마지막 신호"), el("dd", {}, `${fmtAge(d.age_s)} (${d.last_seen_utc || "—"})`),
-    el("dt", {}, "접속 주소"), el("dd", {}, `${d.remote_addr || "—"} · 현장 IP ${s.local_ip || "—"}`),
-    el("dt", {}, "수집기"), el("dd", {}, `${collector.status || "알 수 없음"} ${typeof collector.run_dir === "string" ? "· " + collector.run_dir.split("/").pop() : ""}`),
-    el("dt", {}, "수신 완료"), el("dd", {}, `trial ${d.units.dataset.count}개 (${fmtBytes(d.units.dataset.bytes)}) · run ${d.units.runs.count}개 (${fmtBytes(d.units.runs.bytes)})`),
-    el("dt", {}, "전송 대기/오류"), el("dd", {}, `${pending}개` + (s.current_upload ? ` · 전송 중 ${s.current_upload.unit} ${fmtBytes(s.current_upload.sent)}/${fmtBytes(s.current_upload.bytes)}` : "")),
-    el("dt", {}, "마지막 오류"), el("dd", {}, up.last_error ? `${up.last_error.unit}: ${up.last_error.error}` : "없음"),
-    el("dt", {}, "디스크 여유"), el("dd", {}, disk ? `${fmtBytes(disk.free)} / ${fmtBytes(disk.total)}` : "—"),
-    el("dt", {}, "SoC 온도"), el("dd", {}, Object.entries(s.temperatures_c || {}).filter(([, v]) => typeof v === "number").slice(0, 4).map(([k, v]) => `${k} ${v.toFixed(1)}°C`).join(" · ") || "—"),
-    el("dt", {}, "코드"), el("dd", {}, s.git ? `${String(s.git.commit || "").slice(0, 10)}${s.git.dirty ? " (dirty)" : ""}` : "—"));
+    el("dt", {}, t("card.last_signal")), el("dd", {}, `${fmtAge(d.age_s)} (${d.last_seen_utc || "—"})`),
+    el("dt", {}, t("card.address")), el("dd", {}, `${d.remote_addr || "—"} · ${t("card.site_ip")} ${s.local_ip || "—"}`),
+    el("dt", {}, t("card.collector")), el("dd", {}, `${collector.status || t("card.unknown")} ${typeof collector.run_dir === "string" ? "· " + collector.run_dir.split("/").pop() : ""}`),
+    el("dt", {}, t("card.zed")), el("dd", {}, zedText(s.zed)),
+    el("dt", {}, t("card.received")), el("dd", {}, `${t("card.trials", { n: d.units.dataset.count })} (${fmtBytes(d.units.dataset.bytes)}) · ${t("card.runs", { n: d.units.runs.count })} (${fmtBytes(d.units.runs.bytes)})`),
+    el("dt", {}, t("card.pending")), el("dd", {}, t("card.count", { n: pending }) + (s.current_upload ? ` · ${t("card.uploading")} ${s.current_upload.unit} ${fmtBytes(s.current_upload.sent)}/${fmtBytes(s.current_upload.bytes)}` : "")),
+    el("dt", {}, t("card.last_error")), el("dd", {}, up.last_error ? `${up.last_error.unit}: ${up.last_error.error}` : t("card.none")),
+    el("dt", {}, t("card.disk")), el("dd", {}, disk ? `${fmtBytes(disk.free)} / ${fmtBytes(disk.total)}` : "—"),
+    el("dt", {}, t("card.soc_temp")), el("dd", {}, Object.entries(s.temperatures_c || {}).filter(([, v]) => typeof v === "number").slice(0, 4).map(([k, v]) => `${k} ${v.toFixed(1)}°C`).join(" · ") || "—"),
+    el("dt", {}, t("card.code")), el("dd", {}, s.git ? `${String(s.git.commit || "").slice(0, 10)}${s.git.dirty ? " (dirty)" : ""}` : "—"));
   const values = d.latest_values || {};
   const pick = ["ntc.temperature_c", "ct1.current_a_nominal", "sps30.pm2_5_ug_m3", "scd30.co2_ppm", "flir.max_c"];
-  const latest = el("p", { class: "muted" }, pick.filter((k) => k in values).map((k) => `${k} ${fmtNum(values[k])}`).join(" · ") || "실시간 값 없음 (수집기 미실행)");
-  const status = !d.registered ? ["warn", "미등록"] : d.online ? ["ok", "온라인"] : ["bad", "오프라인"];
+  const latest = el("p", { class: "muted" }, pick.filter((k) => k in values).map((k) => `${k} ${fmtNum(values[k])}`).join(" · ") || t("card.no_live"));
+  const status = !d.registered ? ["warn", t("card.unregistered")] : d.online ? ["ok", t("card.online")] : ["bad", t("card.offline")];
   return el("div", { class: "card" },
     el("h3", {}, el("span", { class: `dot ${status[0]}` }), `${d.device} `, el("span", { class: "badge" }, status[1])),
     kv, latest, controlBlock(d),
-    el("button", { onclick: () => { $("live-device").value = d.device; show("live"); } }, "실시간 보기"));
+    el("button", { onclick: () => { $("live-device").value = d.device; show("live"); } }, t("card.live_button")));
 }
 
-const COMMAND_STATE = { pending: "전달 대기", delivered: "장치 실행 중", done: "완료", failed: "실패", expired: "만료(장치 미수신)", no_result: "결과 없음" };
 function controlBlock(d) {
   const s = d.status || {}; const history = state.commands[d.device] || [];
   const open = history.find((c) => c.state === "pending" || c.state === "delivered");
   const box = el("div", { class: "control" });
   const allowed = s.remote_control === true;
-  box.append(el("p", { class: "muted" }, `원격 수집 제어: ${allowed ? "장치에서 허용됨" : "장치에서 비활성 (uplink.json allow_remote_control)"}`));
+  box.append(el("p", { class: "muted" }, t("control.remote", { state: allowed ? t("control.allowed") : t("control.disabled") })));
   if (state.role === "operator" && d.registered) {
     const collecting = (s.collector || {}).status === "running";
+    const zedOn = Boolean((s.zed || {}).enabled);
     const send = async (action) => {
-      const label = { start: "수집을 시작", stop: "수집을 정지", reset_sps30: "SPS30 센서를 리셋" }[action];
-      if (!confirm(`${d.device} 에서 ${label}할까요? (자유 수집 run, 기록이 남습니다)`)) return;
-      try {
-        await api("/api/v1/control", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" },
-          body: JSON.stringify({ device: d.device, action }) });
-      } catch (error) { alert(error.message); }
+      if (!confirm(t(`control.confirm.${action}`, { device: d.device }))) return;
+      try { await post("/api/v1/control", { device: d.device, action }); } catch (error) { alert(error.message); }
       refreshOverview();
     };
-    const startButton = el("button", { onclick: () => send("start") }, "수집 시작");
-    const stopButton = el("button", { onclick: () => send("stop") }, "수집 정지");
-    const resetButton = el("button", { onclick: () => send("reset_sps30"),
-      title: "수집기가 멈춘 상태에서만. SPS30 에 device reset 을 보내고 응답·측정을 확인합니다" }, "SPS30 리셋");
-    startButton.disabled = Boolean(open) || !d.online || !allowed || collecting;
-    stopButton.disabled = Boolean(open) || !d.online || !allowed || !collecting;
-    resetButton.disabled = Boolean(open) || !d.online || !allowed || collecting;
-    box.append(el("div", { class: "toolbar" }, startButton, stopButton, resetButton));
+    const busy = Boolean(open) || !d.online || !allowed;
+    const button = (action, label, disabled, title) => {
+      const node = el("button", { onclick: () => send(action), ...(title ? { title } : {}) }, label);
+      node.disabled = disabled; return node;
+    };
+    box.append(el("div", { class: "toolbar" },
+      button("start", t("control.start"), busy || collecting),
+      button("stop", t("control.stop"), busy || !collecting),
+      button("reset_sps30", t("control.reset"), busy || collecting, t("control.reset_title")),
+      button(zedOn ? "zed_off" : "zed_on", zedOn ? t("control.zed_off") : t("control.zed_on"), busy || !s.zed, t("control.zed_title"))));
   }
   const last = history[0];
   if (last) {
     const r = last.result || {};
     const sps = r.sps30 || null;
-    const detail = sps ? `SPS30 ${sps.ok ? "정상 응답" + (sps.measurement ? ` (PM2.5 ${fmtNum(sps.measurement.pm2_5)})` : "") : "실패: " + String(sps.hint || sps.error || "")}`
-      : String(r.error || (r.collector || {}).status || "");
-    box.append(el("p", { class: "muted" }, `최근 명령: ${last.action} · ${COMMAND_STATE[last.state] || last.state} · ${last.requested_by} · ${(last.requested_utc || "").slice(0, 19)}${detail ? " · " + detail : ""}`));
+    const detail = sps ? (sps.ok ? t("sps.ok") + (sps.measurement ? ` (PM2.5 ${fmtNum(sps.measurement.pm2_5)})` : "") : t("sps.fail", { msg: String(sps.hint || sps.error || "") }))
+      : r.zed ? `ZED ${r.zed.enabled ? t("zed.on") : t("zed.off")}` : String(r.error || (r.collector || {}).status || "");
+    box.append(el("p", { class: "muted" }, `${t("control.last")}: ${last.action} · ${t(`cmd.${last.state}`)} · ${last.requested_by} · ${(last.requested_utc || "").slice(0, 19)}${detail ? " · " + detail : ""}`));
   }
   return box;
 }
@@ -151,16 +172,17 @@ function fillDeviceSelects(devices) {
   for (const [id, keepAll] of [["live-device", false], ["units-device", true]]) {
     const select = $(id); const current = select.value;
     const options = (keepAll ? [""] : []).concat(devices);
-    if ([...select.options].map((o) => o.value).join() === options.join()) continue;
-    select.replaceChildren(...options.map((d) => el("option", { value: d }, d || "전체")));
+    if ([...select.options].map((o) => o.value).join() === options.join() && select.dataset.lang === LANG) continue;
+    select.replaceChildren(...options.map((d) => el("option", { value: d }, d || t("units.all"))));
+    select.dataset.lang = LANG;
     if (options.includes(current)) select.value = current;
   }
 }
 
 // ------------------------------------------------------------------- live
 const PALETTE = [[0,0,4],[59,15,112],[140,41,129],[222,73,104],[254,159,109],[252,253,191]];
-function color(t) {
-  t = Math.min(1, Math.max(0, t)) * (PALETTE.length - 1); const i = Math.min(PALETTE.length - 2, Math.floor(t)); const f = t - i;
+function color(v) {
+  v = Math.min(1, Math.max(0, v)) * (PALETTE.length - 1); const i = Math.min(PALETTE.length - 2, Math.floor(v)); const f = v - i;
   return PALETTE[i].map((c, k) => Math.round(c + (PALETTE[i + 1][k] - c) * f));
 }
 
@@ -178,32 +200,31 @@ function drawThermal(canvas, b64, minId, maxId) {
   $(minId).textContent = `${(lo / 100 - 273.15).toFixed(1)}°C`; $(maxId).textContent = `${(hi / 100 - 273.15).toFixed(1)}°C`;
 }
 
-const EVENT_NAMES = { intervention_start: "개입 시작", intervention_end: "개입 종료", note: "메모" };
 async function refreshEvents(device) {
   const data = await api(`/api/v1/events?device=${encodeURIComponent(device)}&since_s=7200`);
   const open = data.open;
-  $("event-open").textContent = open ? `개입 중 · ${open.scenario || ""} · ${Math.round(Date.now() / 1000 - open.hub_epoch)}초` : "대기";
+  $("event-open").textContent = open ? t("event.open", { scenario: open.scenario || "", s: Math.round(Date.now() / 1000 - open.hub_epoch) }) : t("event.waiting");
   $("event-open").classList.toggle("error", Boolean(open));
   $("event-controls").hidden = state.role !== "operator";
   $("event-start").disabled = Boolean(open); $("event-end").disabled = !open;
-  const t = $("event-table");
-  t.replaceChildren(el("tr", {}, ...["시각", "종류", "시나리오", "메모", "기록자", ""].map((h) => el("th", {}, h))));
+  const table = $("event-table");
+  table.replaceChildren(el("tr", {}, ...["event.th.time", "event.th.kind", "event.th.scenario", "event.th.note", "event.th.user"].map((h) => el("th", {}, t(h))), el("th", {}, "")));
   for (const e of data.events.slice(-30).reverse()) {
     const voidButton = el("button", { onclick: async () => {
-      if (!confirm("이 기록을 무효 처리할까요? (삭제되지 않고 무효로 표시됩니다)")) return;
-      await api("/api/v1/events/void", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" }, body: JSON.stringify({ id: e.id }) });
+      if (!confirm(t("event.confirm_void"))) return;
+      await post("/api/v1/events/void", { id: e.id });
       refreshEvents(device);
-    } }, "무효");
+    } }, t("event.void"));
     voidButton.hidden = e.voided || state.role !== "operator";
-    t.append(el("tr", {}, el("td", {}, new Date(e.hub_epoch * 1000).toLocaleTimeString()), el("td", {}, `${EVENT_NAMES[e.kind] || e.kind}${e.voided ? " (무효)" : ""}`),
+    table.append(el("tr", {}, el("td", {}, new Date(e.hub_epoch * 1000).toLocaleTimeString(LANG)),
+      el("td", {}, `${t(`event.kind.${e.kind}`)}${e.voided ? t("event.voided") : ""}`),
       el("td", {}, e.scenario || "—"), el("td", {}, e.note || ""), el("td", {}, e.user), el("td", {}, voidButton)));
   }
 }
 async function sendEvent(kind) {
   const device = $("live-device").value; if (!device) return;
   try {
-    await api("/api/v1/events", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" },
-      body: JSON.stringify({ device, kind, scenario: $("event-scenario").value, note: $("event-note").value }) });
+    await post("/api/v1/events", { device, kind, scenario: $("event-scenario").value, note: $("event-note").value });
     $("event-note").value = "";
   } catch (error) { alert(error.message); }
   refreshEvents(device);
@@ -211,6 +232,19 @@ async function sendEvent(kind) {
 $("event-start").addEventListener("click", () => sendEvent("intervention_start"));
 $("event-end").addEventListener("click", () => sendEvent("intervention_end"));
 $("event-memo").addEventListener("click", () => sendEvent("note"));
+
+function showLiveZed(live) {
+  const preview = live.zed_preview; const zed = (live.status || {}).zed;
+  const img = $("zed-live");
+  if (preview && preview.jpeg_b64) {
+    img.src = `data:image/jpeg;base64,${preview.jpeg_b64}`; img.hidden = false;
+    $("zed-info").textContent = t("live.zed_info", { tick: preview.tick ?? "—", utc: preview.utc || "" });
+    $("zed-live-note").textContent = preview.stale ? t("live.zed_stale") : `${zedText(zed)} · ${t("live.zed_every")}`;
+  } else {
+    img.hidden = true; $("zed-info").textContent = "";
+    $("zed-live-note").textContent = `${t("live.zed_none")}${zed ? " · " + zedText(zed) : ""}`;
+  }
+}
 
 async function refreshLive() {
   if (!state.overview) await refreshOverview().catch(() => {});
@@ -220,14 +254,15 @@ async function refreshLive() {
     api(`/api/v1/telemetry?device=${encodeURIComponent(device)}&since_s=${$("live-range").value}`)]);
   const s = live.status || {}; const snap = (live.live || {}).snapshot || {};
   const stale = (live.live || {}).stale;
-  $("live-age").textContent = s.received_utc ? `마지막 heartbeat ${s.received_utc} · 스냅샷 ${snap.timestamp_utc || "없음"}` : "heartbeat 없음";
+  $("live-age").textContent = s.received_utc ? t("live.heartbeat", { hb: s.received_utc, snap: snap.timestamp_utc || t("live.no_snapshot") }) : t("live.no_heartbeat");
   $("live-age").classList.toggle("error", Boolean(stale));
-  if (stale) $("live-age").textContent += " · 수집기 미실행: 아래는 마지막으로 받은 값입니다";
+  if (stale) $("live-age").textContent += t("live.stale");
   const thermal = (live.live || {}).thermal;
   if (thermal && thermal.data) { drawThermal($("thermal"), thermal.data, "t-min", "t-max");
-    $("thermal-info").textContent = `seq ${thermal.snapshot_sequence}${live.live.thermal_reused ? " (이전 프레임)" : ""}`; }
-  else $("thermal-info").textContent = "프레임 없음";
-  const table = $("sensor-table"); table.replaceChildren(el("tr", {}, el("th", {}, "센서"), el("th", {}, "상태"), el("th", {}, "값")));
+    $("thermal-info").textContent = `seq ${thermal.snapshot_sequence}${live.live.thermal_reused ? t("live.prev_frame") : ""}`; }
+  else $("thermal-info").textContent = t("live.no_frame");
+  showLiveZed(live);
+  const table = $("sensor-table"); table.replaceChildren(el("tr", {}, el("th", {}, t("th.sensor")), el("th", {}, t("th.status")), el("th", {}, t("th.value"))));
   for (const [name, rec] of Object.entries(snap.sensors || {})) {
     const values = Object.entries(rec.values || {}).filter(([, v]) => typeof v === "number").map(([k, v]) => `${k} ${fmtNum(v)}`).join(" · ");
     table.append(el("tr", {}, el("td", {}, name), el("td", {}, `${rec.status ?? "—"}${rec.fresh === false ? " (stale)" : ""}`), el("td", {}, values || "—")));
@@ -248,13 +283,13 @@ $("trend-keys").addEventListener("change", refreshLive);
 
 const LINE_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d"];
 const LABEL_COLORS = { normal: "#16a34a", combustion: "#dc2626", vapor_release: "#7c3aed", dust: "#a16207", transition: "#eab308", invalid: "#334155" };
-const LABEL_NAMES = { normal: "정상", combustion: "연소 이상", vapor_release: "유해 증기", dust: "분진", transition: "전이(애매)", invalid: "무효" };
+const labelName = (label) => t(`label.${label}`);
 function drawChart(canvas, xs, series, timeAxis, markers = [], extras = {}) {
   const ctx = canvas.getContext("2d"); const W = canvas.width, H = canvas.height, L = 60, R = 10, T = extras.intervals ? 24 : 10, B = 40;
   const css = getComputedStyle(document.body);
   ctx.clearRect(0, 0, W, H); ctx.font = "12px system-ui"; ctx.fillStyle = css.color; ctx.strokeStyle = "#8884";
   const names = Object.keys(series);
-  if (!xs.length || !names.length) { ctx.fillText("데이터 없음 — 항목을 고르세요", L, H / 2); return; }
+  if (!xs.length || !names.length) { ctx.fillText(t("chart.empty"), L, H / 2); return; }
   const x0 = Math.min(...xs), x1 = Math.max(...xs) || x0 + 1;
   const px = (v) => L + (v - x0) / (x1 - x0 || 1) * (W - L - R);
   canvas._geom = { x0, x1, L, R, W };
@@ -269,17 +304,20 @@ function drawChart(canvas, xs, series, timeAxis, markers = [], extras = {}) {
     ctx.fillStyle = c + "14"; ctx.fillRect(a, T, b - a, H - T - B);
   }
   if (extras.pending != null) { ctx.fillStyle = "#2563eb"; ctx.fillRect(px(extras.pending) - 1, T, 2, H - T - B); }
+  if (extras.cursor != null && extras.cursor >= x0 && extras.cursor <= x1) {   // tick shown in the ZED panel
+    ctx.fillStyle = "#0891b2"; ctx.fillRect(px(extras.cursor), T, 1, H - T - B);
+  }
   names.forEach((name, n) => {
     const ys = series[name].filter((v) => v != null); if (!ys.length) return;
     const band = (extras.bands || {})[name];
     // each series gets its own y range (units differ); range shown in the legend
     let lo = Math.min(...ys, ...(band ? [band.low] : [])), hi = Math.max(...ys, ...(band ? [band.high] : [])); if (hi === lo) { hi += 1; lo -= 1; }
-    const color = LINE_COLORS[n % LINE_COLORS.length];
+    const lineColor = LINE_COLORS[n % LINE_COLORS.length];
     if (band) {   // baseline mean ± k·std: a visual reference, not a threshold
       const yb = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
-      ctx.fillStyle = color + "22"; ctx.fillRect(L, yb(band.high), W - L - R, Math.max(1, yb(band.low) - yb(band.high)));
+      ctx.fillStyle = lineColor + "22"; ctx.fillRect(L, yb(band.high), W - L - R, Math.max(1, yb(band.low) - yb(band.high)));
     }
-    ctx.strokeStyle = color; ctx.beginPath(); let pen = false;
+    ctx.strokeStyle = lineColor; ctx.beginPath(); let pen = false;
     series[name].forEach((v, i) => {
       if (v == null) { pen = false; return; }
       const x = L + (xs[i] - x0) / (x1 - x0 || 1) * (W - L - R), y = T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
@@ -302,16 +340,15 @@ function drawChart(canvas, xs, series, timeAxis, markers = [], extras = {}) {
     ctx.fillText(modality, x + 6, H - B + 10);
   }
   ctx.fillStyle = css.color;
-  const label = (x) => timeAxis ? new Date(x).toLocaleTimeString() : String(Math.round(x));
+  const label = (x) => timeAxis ? new Date(x).toLocaleTimeString(LANG) : String(Math.round(x));
   ctx.fillText(label(x0), L, H - 12); const right = label(x1); ctx.fillText(right, W - R - ctx.measureText(right).width, H - 12);
 }
 
 // -------------------------------------------------------------- scenarios
-const SCENARIO_STATUS = { bench: "사무실 bench 시나리오", field: "현장 시나리오 (유도 방법 TBD)", blocked: "현재 관측 불가", baseline: "기준선" };
 async function refreshScenarios() {
   const spec = await api("/api/v1/scenarios");
   state.scenarioSpec = spec.scenarios;
-  $("scenario-note").textContent = `정의 ${spec.definitions_version} · ${spec.note}`;
+  $("scenario-note").textContent = t("sc.definitions", { version: spec.definitions_version, note: tr(spec, "note") });
   const cards = $("scenario-cards"); cards.replaceChildren();
   for (const s of spec.scenarios) cards.append(scenarioCard(s));
 }
@@ -319,29 +356,32 @@ async function refreshScenarios() {
 function scenarioCard(s) {
   const kv = el("dl", { class: "kv" },
     el("dt", {}, "scenario_id"), el("dd", {}, s.id),
-    el("dt", {}, "공장 상황"), el("dd", {}, s.factory_situation || "—"),
-    el("dt", {}, "대상 상태"), el("dd", {}, s.target_state || "—"),
-    el("dt", {}, "주 센서"), el("dd", {}, [...(s.primary_sensors || []), ...((s.secondary_sensors || []).map((x) => `(${x})`))].join(", ") || "—"),
-    el("dt", {}, "bench 개입"), el("dd", {}, s.bench_intervention || s.remark || "—"));
+    el("dt", {}, t("sc.factory")), el("dd", {}, tr(s, "factory_situation") || "—"),
+    el("dt", {}, t("sc.target")), el("dd", {}, tr(s, "target_state") || "—"),
+    el("dt", {}, t("sc.primary")), el("dd", {}, [...(s.primary_sensors || []), ...((s.secondary_sensors || []).map((x) => `(${x})`))].join(", ") || "—"),
+    el("dt", {}, t("sc.bench")), el("dd", {}, tr(s, "bench_intervention") || tr(s, "remark") || "—"));
+  const title = LANG === "en" ? s.name_en : s.name_ko;
   const card = el("div", { class: "card" },
-    el("h3", {}, `${s.name_ko} `, el("span", { class: "badge" }, SCENARIO_STATUS[s.status] || s.status)),
-    el("p", { class: "muted" }, s.name_en), kv);
+    el("h3", {}, `${title} `, el("span", { class: "badge" }, t(`sc.status.${s.status}`))),
+    el("p", { class: "muted" }, LANG === "en" ? s.name_ko : s.name_en), kv);
   if ((s.expected || []).length) {
-    const table = el("table", {}, el("tr", {}, el("th", {}, "센서"), el("th", {}, "예상 반응 (가설)"), el("th", {}, "시점")));
-    for (const e of s.expected) table.append(el("tr", {}, el("td", {}, e.sensor), el("td", {}, e.change), el("td", {}, e.timing)));
-    if ((s.must_not_change || []).length) table.append(el("tr", {}, el("td", {}, "변하지 않아야 함"), el("td", {}, s.must_not_change.join(", ")), el("td", {}, "")));
-    card.append(el("h3", {}, "멀티센서 서명"), table);
+    const table = el("table", {}, el("tr", {}, el("th", {}, t("th.sensor")), el("th", {}, t("sc.expected")), el("th", {}, t("sc.timing"))));
+    for (const e of s.expected) table.append(el("tr", {}, el("td", {}, tr(e, "sensor")), el("td", {}, tr(e, "change")), el("td", {}, tr(e, "timing"))));
+    const mustNot = tr(s, "must_not_change") || [];
+    if (mustNot.length) table.append(el("tr", {}, el("td", {}, t("sc.must_not")), el("td", {}, mustNot.join(", ")), el("td", {}, "")));
+    card.append(el("h3", {}, t("sc.signature")), table);
   }
-  if ((s.safety || []).length) card.append(el("h3", {}, "안전 수칙"), el("ul", {}, ...s.safety.map((x) => el("li", {}, x))));
+  const safety = tr(s, "safety") || [];
+  if (safety.length) card.append(el("h3", {}, t("sc.safety")), el("ul", {}, ...safety.map((x) => el("li", {}, x))));
   const r = s.received || { count: 0, recent: [] };
-  card.append(el("h3", {}, `수신된 trial ${r.count}개${r.bench ? ` (bench ${r.bench})` : ""}`));
+  card.append(el("h3", {}, t("sc.received", { n: r.count }) + (r.bench ? t("sc.bench_count", { n: r.bench }) : "")));
   if (r.recent.length) {
-    const list = el("table", {}, el("tr", {}, ...["unit", "상태", "severity", "시작(UTC)", "메모"].map((h) => el("th", {}, h))));
-    for (const t of r.recent) list.append(el("tr", { class: "clickable", onclick: () => { show("units"); openUnit(t.device, t.unit); } },
-      el("td", {}, t.unit.split("/").pop()), el("td", {}, String(t.status ?? "—")), el("td", {}, String(t.severity_level ?? "—")),
-      el("td", {}, (t.started_utc || "—").slice(0, 19)), el("td", {}, t.operator_note || "")));
+    const list = el("table", {}, el("tr", {}, ...["unit", t("sc.th.status"), "severity", t("sc.th.start"), t("sc.th.note")].map((h) => el("th", {}, h))));
+    for (const trial of r.recent) list.append(el("tr", { class: "clickable", onclick: () => { show("units"); openUnit(trial.device, trial.unit); } },
+      el("td", {}, trial.unit.split("/").pop()), el("td", {}, String(trial.status ?? "—")), el("td", {}, String(trial.severity_level ?? "—")),
+      el("td", {}, (trial.started_utc || "—").slice(0, 19)), el("td", {}, trial.operator_note || "")));
     card.append(el("div", { class: "scroll" }, list));
-  } else card.append(el("p", { class: "muted" }, "아직 없음"));
+  } else card.append(el("p", { class: "muted" }, t("sc.none_yet")));
   return card;
 }
 
@@ -349,43 +389,59 @@ function scenarioCard(s) {
 async function refreshUnits() {
   if (!state.scenarioSpec) state.scenarioSpec = (await api("/api/v1/scenarios").catch(() => ({ scenarios: [] }))).scenarios;
   if (!state.overview) await refreshOverview().catch(() => {});
+  fillDeviceSelects((state.overview || { devices: [] }).devices.map((d) => d.device));
   const device = $("units-device").value;
   const data = await api(`/api/v1/units${device ? "?device=" + encodeURIComponent(device) : ""}`);
-  $("units-count").textContent = `${data.units.length}개 · 클릭하면 상세`;
+  $("units-count").textContent = t("units.count", { n: data.units.length });
   const table = $("units-table");
-  table.replaceChildren(el("tr", {}, ...["장치", "unit", "상태", "시나리오", "시작(UTC)", "파일", "크기", "유효 window", "수신(UTC)"].map((h) => el("th", {}, h))));
+  table.replaceChildren(el("tr", {}, ...t("units.th").map((h) => el("th", {}, h))));
   for (const u of data.units) {
     const s = u.summary || {};
     table.append(el("tr", { class: "clickable", onclick: () => openUnit(u.device, u.unit) },
-      el("td", {}, u.device), el("td", {}, u.unit), el("td", {}, `${s.status === "interrupted" ? "중단됨(재부팅 등)" : (s.status ?? "—")}${s.status_source === "uplink_inferred" ? " *" : ""}${s.test_mode ? " · test" : ""}`),
+      el("td", {}, u.device), el("td", {}, u.unit), el("td", {}, `${s.status === "interrupted" ? t("units.interrupted") : (s.status ?? "—")}${s.status_source === "uplink_inferred" ? " *" : ""}${s.test_mode ? " · test" : ""}`),
       el("td", {}, s.scenario_id ?? "—"), el("td", {}, (s.started_utc || "—").slice(0, 19)), el("td", {}, String(u.files)),
       el("td", {}, fmtBytes(u.bytes)), el("td", {}, s.windows_evaluated != null ? `${s.windows_valid}/${s.windows_evaluated}` : "—"),
-      el("td", {}, u.committed_utc)));
+      el("td", {}, s.zed_frames != null ? String(s.zed_frames) : "—"), el("td", {}, u.committed_utc)));
   }
 }
 $("units-device").addEventListener("change", refreshUnits);
 
-async function openUnit(device, unit) {
-  const d = await api(`/api/v1/unit?device=${encodeURIComponent(device)}&unit=${encodeURIComponent(unit)}`);
-  state.unit = { device, unit };
-  $("unit-detail").hidden = false; $("unit-title").textContent = `${device} · ${unit}`;
-  const meta = $("unit-meta"); meta.replaceChildren();
+function renderUnitMeta() {
+  const d = state.unitDetail; const meta = $("unit-meta"); meta.replaceChildren();
   const r = d.receipt; const kv = el("dl", { class: "kv" });
-  const rows = [["수신", r.committed_utc], ["파일/크기", `${r.files}개 · ${fmtBytes(r.bytes)}`], ["manifest sha256", r.manifest_sha256],
-    ["서버 경로", r.raw_path], ...Object.entries(d.summary).map(([k, v]) => [k, typeof v === "object" ? JSON.stringify(v) : String(v)])];
+  const rows = [[t("unit.received"), r.committed_utc], [t("unit.files"), t("unit.files_value", { n: r.files, size: fmtBytes(r.bytes) })],
+    ["manifest sha256", r.manifest_sha256], [t("unit.path"), r.raw_path]];
+  if (d.zed) rows.push([t("unit.zed_meta"), t("unit.zed_meta_value", { frames: d.zed.frames, missed: d.zed.missed_ticks, sessions: d.zed.sessions.length, status: d.zed.status })
+    + ` · ${(d.zed.camera || {}).model || ""} ${(d.zed.camera || {}).serial_number || ""}`]);
+  rows.push(...Object.entries(d.summary).map(([k, v]) => [k, typeof v === "object" ? JSON.stringify(v) : String(v)]));
   for (const [k, v] of rows) kv.append(el("dt", {}, k), el("dd", {}, v));
   meta.append(kv);
+  const experiment = (d.documents || {})["experiment.json"] || {};
+  state.unitMarkers = (experiment.phase_plan || []).filter((p) => p.start_tick > 0)
+    .map((p) => ({ x: p.start_tick, label: ["anomaly", "recovery"].includes(p.phase) ? t(`unit.phase.${p.phase}`) : p.phase }));
+}
+
+async function openUnit(device, unit) {
+  const d = await api(`/api/v1/unit?device=${encodeURIComponent(device)}&unit=${encodeURIComponent(unit)}`);
+  state.unit = { device, unit }; state.unitDetail = d; state.zedTick = null;
+  $("unit-detail").hidden = false; $("unit-title").textContent = `${device} · ${unit}`;
+  renderUnitMeta();
   const numeric = d.scalar_columns.filter((c) => !["timestamp_utc", "quality_invalid_reasons"].includes(c) && !c.endsWith("_status"));
   const experiment = (d.documents || {})["experiment.json"] || {};
   const scenario = (state.scenarioSpec || []).find((s) => s.id === experiment.scenario_id);
   const preferred = scenario ? scenario.relevant_columns : ["ntc_temperature_c", "flir_max_c"];
-  state.unitMarkers = (experiment.phase_plan || []).filter((p) => p.start_tick > 0)
-    .map((p) => ({ x: p.start_tick, label: { anomaly: "계획상 개입(신호음)", recovery: "계획상 회복" }[p.phase] || p.phase }));
   $("unit-cols").replaceChildren(...numeric.map((c) => { const o = el("option", { value: c }, c); o.selected = preferred.includes(c); return o; }));
   $("unit-chunk").replaceChildren(...d.thermal_chunks.map((c) => el("option", { value: c }, c)));
+  const sessions = (d.zed || {}).sessions || [];
+  const first = Math.min(...sessions.map((s) => s.first_tick ?? Infinity)), last = Math.max(...sessions.map((s) => s.last_tick ?? -Infinity));
+  $("unit-zed-box").hidden = !d.zed;
+  if (d.zed && Number.isFinite(first)) {
+    $("unit-zed-range").min = String(first); $("unit-zed-range").max = String(last); $("unit-zed-range").value = String(first);
+    $("unit-zed-tick").value = String(first); state.zedTick = first;
+  }
   $("unit-detail").scrollIntoView({ behavior: "smooth" });
   await loadAnnotation();
-  plotUnit(); showFrame();
+  plotUnit(); showFrame(); showZed();
 }
 
 async function plotUnit() {
@@ -402,7 +458,8 @@ function redrawUnit() {
   if (!state.plot) return;
   const a = state.anno || {};
   drawChart($("unit-chart"), state.plot.xs, state.plot.series, false, state.unitMarkers || [],
-    { bands: state.plot.bands, spans: a.spans || [], intervals: a.intervals || [], onsets: a.onsets || {}, pending: a.pendingStart });
+    { bands: state.plot.bands, spans: a.spans || [], intervals: a.intervals || [], onsets: a.onsets || {}, pending: a.pendingStart,
+      cursor: state.unitDetail && state.unitDetail.zed ? state.zedTick : null });
 }
 
 // ------------------------------------------------------------ annotation
@@ -424,70 +481,84 @@ async function loadAnnotation() {
   const cur = ann.current || {};
   state.anno = { revision: ann.revision, intervals: (cur.intervals || []).map((x) => ({ ...x })), onsets: { ...(cur.onsets || {}) },
                  note: cur.note || "", pendingStart: null, events: ev.events, spans: eventSpans(ev.events), ticks: ev.ticks, meta: ann };
-  $("anno-label").replaceChildren(...ann.labels.map((l) => el("option", { value: l }, LABEL_NAMES[l] || l)));
-  $("anno-conf").replaceChildren(...ann.confidence.map((c) => el("option", { value: c }, { high: "높음", medium: "보통", low: "낮음" }[c] || c)));
-  $("anno-modality").replaceChildren(...ann.modalities.map((m) => el("option", { value: m }, m)));
   $("anno-note").value = state.anno.note;
-  $("anno-rev").textContent = ann.revision ? `revision ${ann.revision} · ${cur.annotator} · ${(cur.saved_utc || "").slice(0, 19)}` : "아직 라벨 없음";
   const editable = state.role === "operator";
   for (const id of ["anno-controls", "anno-save-row"]) $(id).hidden = !editable;
   renderAnnotation();
 }
 
+function fillSelect(id, values, name) {
+  const select = $(id); const current = select.value;
+  select.replaceChildren(...values.map((v) => el("option", { value: v }, name(v))));
+  if (values.includes(current)) select.value = current;
+}
+
 function renderAnnotation() {
   const a = state.anno; if (!a) return;
-  const t = $("anno-intervals");
-  t.replaceChildren(el("tr", {}, ...["라벨", "시작 tick", "끝 tick", "길이(s)", "확신도", "메모", ""].map((h) => el("th", {}, h))));
+  const ann = a.meta; const cur = ann.current || {};
+  fillSelect("anno-label", ann.labels, labelName);
+  fillSelect("anno-conf", ann.confidence, (c) => t(`conf.${c}`));
+  fillSelect("anno-modality", ann.modalities, (m) => m);
+  $("anno-rev").textContent = ann.revision ? t("anno.revision", { rev: ann.revision, who: cur.annotator, utc: (cur.saved_utc || "").slice(0, 19) }) : t("anno.none");
+  const table = $("anno-intervals");
+  table.replaceChildren(el("tr", {}, ...t("anno.th").map((h) => el("th", {}, h))));
   a.intervals.sort((x, y) => x.start_tick - y.start_tick).forEach((iv, i) => {
-    const del = el("button", { onclick: () => { a.intervals.splice(i, 1); renderAnnotation(); redrawUnit(); } }, "삭제");
+    const del = el("button", { onclick: () => { a.intervals.splice(i, 1); renderAnnotation(); redrawUnit(); } }, t("anno.delete"));
     del.hidden = state.role !== "operator";
-    t.append(el("tr", {}, el("td", {}, el("span", { class: "swatch" }), LABEL_NAMES[iv.label] || iv.label), el("td", {}, String(iv.start_tick)),
-      el("td", {}, String(iv.end_tick)), el("td", {}, String(iv.end_tick - iv.start_tick + 1)), el("td", {}, iv.confidence),
+    table.append(el("tr", {}, el("td", {}, el("span", { class: "swatch" }), labelName(iv.label)), el("td", {}, String(iv.start_tick)),
+      el("td", {}, String(iv.end_tick)), el("td", {}, String(iv.end_tick - iv.start_tick + 1)), el("td", {}, t(`conf.${iv.confidence}`)),
       el("td", {}, iv.note || ""), el("td", {}, del)));
-    t.lastChild.querySelector(".swatch").style.background = LABEL_COLORS[iv.label] || "#888";
+    table.lastChild.querySelector(".swatch").style.background = LABEL_COLORS[iv.label] || "#888";
   });
-  const spans = a.spans.map((s) => `${s.scenario || "?"} ${s.start}–${s.end}${s.unclosed ? "(종료 없음)" : ""}`).join(", ");
-  $("anno-onsets").textContent = `센서 반응 시작점: ${Object.entries(a.onsets).filter(([, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(", ") || "없음"}`
-    + ` · 기록된 개입: ${spans || "없음"}`;
-  $("anno-pending").textContent = a.pendingStart != null ? `시작 ${a.pendingStart} 선택됨 — 끝을 클릭` : "";
+  const spans = a.spans.map((s) => `${s.scenario || "?"} ${s.start}–${s.end}${s.unclosed ? t("anno.unclosed") : ""}`).join(", ");
+  $("anno-onsets").textContent = t("anno.onsets", { onsets: Object.entries(a.onsets).filter(([, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(", ") || t("card.none"),
+    spans: spans || t("card.none") });
+  $("anno-pending").textContent = a.pendingStart != null && a.pendingEnd == null ? t("anno.pending_start", { tick: a.pendingStart })
+    : a.pendingStart != null ? t("anno.pending_range", { a: Math.min(a.pendingStart, a.pendingEnd), b: Math.max(a.pendingStart, a.pendingEnd) }) : "";
+}
+
+function chartTick(event) {
+  const g = $("unit-chart")._geom; if (!g) return null;
+  const rect = event.target.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * (event.target.width / rect.width);
+  return Math.round(g.x0 + (x - g.L) / (g.W - g.L - g.R) * (g.x1 - g.x0));
 }
 
 $("unit-chart").addEventListener("click", (event) => {
-  const a = state.anno, g = $("unit-chart")._geom;
-  if (!a || !g || state.role !== "operator") return;
-  const rect = event.target.getBoundingClientRect();
-  const x = (event.clientX - rect.left) * (event.target.width / rect.width);
-  const tick = Math.max(0, Math.min(a.ticks - 1, Math.round(g.x0 + (x - g.L) / (g.W - g.L - g.R) * (g.x1 - g.x0))));
+  const raw = chartTick(event); if (raw == null) return;
+  if (state.unitDetail && state.unitDetail.zed) { state.zedTick = Math.max(0, raw); $("unit-zed-tick").value = String(state.zedTick); $("unit-zed-range").value = String(state.zedTick); showZed(); }
+  const a = state.anno;
+  if (!a || state.role !== "operator") { redrawUnit(); return; }
+  const tick = Math.max(0, Math.min(a.ticks - 1, raw));
   if ($("anno-mode").value === "onset") { a.onsets[$("anno-modality").value] = tick; renderAnnotation(); redrawUnit(); return; }
-  if (a.pendingStart == null) a.pendingStart = tick;
-  else { a.pendingEnd = tick; $("anno-pending").textContent = `구간 ${Math.min(a.pendingStart, tick)}–${Math.max(a.pendingStart, tick)} — [구간 추가]`; }
-  if (a.pendingEnd == null) renderAnnotation();
-  redrawUnit();
+  if (a.pendingStart == null || a.pendingEnd != null) { a.pendingStart = tick; a.pendingEnd = null; }
+  else a.pendingEnd = tick;
+  renderAnnotation(); redrawUnit();
 });
 
 $("anno-add").addEventListener("click", () => {
-  const a = state.anno; if (!a || a.pendingStart == null || a.pendingEnd == null) { alert("그래프에서 시작과 끝을 먼저 클릭하세요"); return; }
+  const a = state.anno; if (!a || a.pendingStart == null || a.pendingEnd == null) { alert(t("anno.need_range")); return; }
   const start = Math.min(a.pendingStart, a.pendingEnd), end = Math.max(a.pendingStart, a.pendingEnd);
-  if (a.intervals.some((iv) => start <= iv.end_tick && iv.start_tick <= end)) { alert("기존 구간과 겹칩니다. 먼저 삭제하거나 다른 범위를 고르세요"); return; }
+  if (a.intervals.some((iv) => start <= iv.end_tick && iv.start_tick <= end)) { alert(t("anno.overlap")); return; }
   a.intervals.push({ start_tick: start, end_tick: end, label: $("anno-label").value, confidence: $("anno-conf").value, note: "" });
   a.pendingStart = null; a.pendingEnd = null; renderAnnotation(); redrawUnit();
 });
-$("anno-clear").addEventListener("click", () => { if (state.anno) { state.anno.pendingStart = null; state.anno.pendingEnd = null; renderAnnotation(); redrawUnit(); } });
-$("anno-mode").addEventListener("change", () => { if (state.anno) { state.anno.pendingStart = null; state.anno.pendingEnd = null; renderAnnotation(); redrawUnit(); } });
+const clearPending = () => { if (state.anno) { state.anno.pendingStart = null; state.anno.pendingEnd = null; renderAnnotation(); redrawUnit(); } };
+$("anno-clear").addEventListener("click", clearPending);
+$("anno-mode").addEventListener("change", clearPending);
 
 $("anno-save").addEventListener("click", async () => {
   const a = state.anno; const { device, unit } = state.unit;
   try {
-    const r = await api("/api/v1/annotation", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub-Request": "1" },
-      body: JSON.stringify({ device, unit, base_revision: a.revision, intervals: a.intervals, onsets: a.onsets, note: $("anno-note").value }) });
-    $("anno-status").textContent = `저장됨: revision ${r.revision}`;
+    const r = await post("/api/v1/annotation", { device, unit, base_revision: a.revision, intervals: a.intervals, onsets: a.onsets, note: $("anno-note").value });
+    $("anno-status").textContent = t("anno.saved", { rev: r.revision });
     await loadAnnotation(); redrawUnit();
-  } catch (error) { $("anno-status").textContent = `저장 실패: ${error.message}`; }
+  } catch (error) { $("anno-status").textContent = t("anno.save_failed", { msg: error.message }); }
 });
 $("unit-plot").addEventListener("click", plotUnit);
 
 async function showFrame() {
-  if (!state.unit || !$("unit-chunk").value) { $("unit-frame-info").textContent = "열화상 없음"; return; }
+  if (!state.unit || !$("unit-chunk").value) { $("unit-frame-info").textContent = t("unit.no_thermal"); return; }
   const { device, unit } = state.unit;
   try {
     const f = await api(`/api/v1/unit/thermal?device=${encodeURIComponent(device)}&unit=${encodeURIComponent(unit)}&chunk=${encodeURIComponent($("unit-chunk").value)}&index=${$("unit-frame").value}`);
@@ -498,5 +569,24 @@ async function showFrame() {
 }
 $("unit-chunk").addEventListener("change", () => { $("unit-frame").value = "0"; showFrame(); });
 $("unit-frame").addEventListener("input", showFrame);
+
+let zedRequest = 0;
+async function showZed() {
+  const d = state.unitDetail;
+  if (!state.unit || !d || !d.zed || state.zedTick == null) { $("unit-zed").hidden = true; $("unit-zed-info").textContent = d && !d.zed ? "" : t("unit.zed_none"); return; }
+  const { device, unit } = state.unit; const ticket = ++zedRequest;
+  try {
+    const f = await api(`/api/v1/unit/zed?device=${encodeURIComponent(device)}&unit=${encodeURIComponent(unit)}&tick=${state.zedTick}`);
+    if (ticket !== zedRequest) return;          // a newer request is on its way
+    $("unit-zed").src = `data:image/jpeg;base64,${f.jpeg_b64}`; $("unit-zed").hidden = false;
+    $("unit-zed-info").textContent = t("unit.zed_info", { tick: f.tick, frame: f.frame_tick, offset: f.offset_ms ?? "—", session: f.session,
+      first: f.saved_ticks[0], last: f.saved_ticks[1], n: f.frames });
+  } catch (error) { if (ticket === zedRequest) $("unit-zed-info").textContent = error.message; }
+  redrawUnit();
+}
+const zedInput = (value) => { const v = Number(value); if (!Number.isFinite(v)) return; state.zedTick = Math.max(0, Math.round(v));
+  $("unit-zed-tick").value = String(state.zedTick); $("unit-zed-range").value = String(state.zedTick); showZed(); };
+$("unit-zed-tick").addEventListener("change", (e) => zedInput(e.target.value));
+$("unit-zed-range").addEventListener("input", (e) => zedInput(e.target.value));
 
 api("/api/v1/me").then((me) => start(me)).catch(() => showLogin());

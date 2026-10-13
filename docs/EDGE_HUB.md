@@ -227,6 +227,23 @@ systemctl --user restart factory-uplink
   - `/api/v1/unit/events`, `/api/v1/unit/baseline`
   - `/api/v1/annotation`, `/api/v1/annotations/export`
 
+## 3d. ZED 카메라와 한/영 화면 (2026-10-13)
+
+- **ZED 2i 보조 기록기**: 수집 중일 때 run 폴더의 `zed/` 에 tick 당 왼쪽 JPEG + 깊이 맵을 저장한다. 구조·형식·검증은 [`ZED_RECORDER.md`](ZED_RECORDER.md) 에 있다.
+- **명령** `zed_on` / `zed_off`
+  - [장치 현황] 의 ZED 켜기/끄기 버튼이다. 운영자 전용이며 장치의 `allow_remote_control` 이 필요하다.
+  - 장치에서는 `~/.config/factory_safety/zed.json` 의 `enabled` 만 바꾼다. 수집기는 건드리지 않으므로 수집 중에도 쓸 수 있다.
+- **heartbeat**
+  - `zed`: 스위치와 기록기 상태. 일반 status 처럼 정리해서 저장한다.
+  - `zed_preview`: 320×180 JPEG 썸네일. 새 썸네일이 있을 때만 보낸다(기록기가 10초마다 만들고 agent 가 heartbeat 마다 확인). hub 는 JPEG 서명과 96 KB 한도를 검사하고, status 와 따로 `live_view` 에 둔다.
+- **수신 unit**
+  - 상세에 `zed` 요약(프레임·누락 tick·세션·카메라)이 붙고, 목록 summary 에 `zed_frames` 가 붙는다.
+  - `GET /api/v1/unit/zed?device&unit&tick` 은 그 tick 에 가장 가까운 저장 프레임의 JPEG(base64)과 실제 저장 tick·offset 을 준다. 압축 없이 저장된 npz 멤버에서 그 한 장만 읽는다.
+- **한국어 / English**
+  - 화면 오른쪽 위 버튼으로 바꾼다. 선택은 브라우저에 기억된다(localStorage; 막혀 있으면 매번 한국어).
+  - 화면 문구는 `web/i18n.js` 한 곳에 있다. 시나리오 정의는 `scenarios.json` 의 `*_en` 필드를 쓴다.
+  - 서버가 보내는 오류 문구와 장치가 보내는 상태 코드는 원래 영어라 그대로 보인다.
+
 ## 4. 검증 기록 (2026-10-06)
 
 **자동 테스트** `tests/test_edge_hub.py`: 26개(보안 리뷰 회귀 8개 포함), Jetson `run_python.sh` 에서 통과. 실제 TLS(사설 CA)로 localhost 서버를 띄워 확인한 항목:

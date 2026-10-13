@@ -266,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def static(self, path: str) -> None:
         name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
-        if name not in {"index.html", "app.js", "style.css"}:
+        if name not in {"index.html", "app.js", "i18n.js", "style.css"}:
             raise HubError(404, "not found")
         body = (WEB / name).read_bytes()
         self.send_response(200)
@@ -494,6 +494,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, self.hub.store.unit_thermal(query.get("device", ""), query.get("unit", ""),
                                                         query.get("chunk", ""), index))
 
+    def r_unit_zed(self, query):
+        self.viewer()
+        try:
+            tick = int(query.get("tick", "0"))
+        except ValueError:
+            raise HubError(400, "tick must be an integer")
+        self.send_json(200, self.hub.store.unit_zed(query.get("device", ""), query.get("unit", ""), tick))
+
 
 ROUTES = {
     ("GET", "/api/v1/health"): Handler.r_health,
@@ -524,6 +532,7 @@ ROUTES = {
     ("GET", "/api/v1/unit"): Handler.r_unit,
     ("GET", "/api/v1/unit/scalars"): Handler.r_unit_scalars,
     ("GET", "/api/v1/unit/thermal"): Handler.r_unit_thermal,
+    ("GET", "/api/v1/unit/zed"): Handler.r_unit_zed,
 }
 
 

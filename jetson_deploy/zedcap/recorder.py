@@ -6,6 +6,7 @@ Layout (schema ``zed-v1``)::
     <run>/zed/frames.csv                       one row per saved frame (written when its segment is final)
     <run>/zed/seg_SS_NNNNN_left.npz            left_jpeg uint8 (all JPEGs back to back), left_offsets int64 (N+1)
     <run>/zed/seg_SS_NNNNN_depth.npz           depth_mm uint16 (N, H, W): 0 = no data, 65535 = beyond range
+                                               (only when depth_mode is not NONE; the default is left RGB only)
 
 Tick alignment: the collector schedules tick n at ``t0 + n * 1 s`` on CLOCK_MONOTONIC, and t0 is the
 ``target_monotonic_ns`` of its first snapshot. The first frame captured within half a frame period
@@ -83,6 +84,7 @@ class Session:
         fps = max(1, int(config.get("fps", 15)))
         self.tolerance = int(tolerance_ns if tolerance_ns is not None else 0.5e9 / fps + 5e6)
         self.segment_frames = int(config.get("segment_frames", 60))
+        self.with_depth = config.get("depth_mode", "NONE") != "NONE"
         self._lock = threading.Lock()                 # record/meta are shared with the writer
         meta = self._load_meta()
         for earlier in meta.get("sessions", []):
@@ -101,9 +103,10 @@ class Session:
                                      "rule": "first frame within tolerance of a tick target; missing ticks stay missing"},
                          depth_encoding={"dtype": "uint16", "unit": "mm", "no_data": NO_DATA,
                                          "beyond_range": BEYOND_RANGE,
-                                         "size": list(config.get("depth_size", [640, 360]))},
+                                         "size": list(config.get("depth_size", [640, 360]))}
+                         if self.with_depth else None,
                          files={"index": "frames.csv", "left": "seg_SS_NNNNN_left.npz (left_jpeg, left_offsets)",
-                                "depth": "seg_SS_NNNNN_depth.npz (depth_mm)"})
+                                "depth": "seg_SS_NNNNN_depth.npz (depth_mm)" if self.with_depth else None})
         self.meta.setdefault("sessions", []).append(self.record)
         self._write_meta()
         self.segment = 0                               # next segment number handed to the writer
@@ -158,7 +161,8 @@ class Session:
         imu = imu or {}
         frame = {"tick": tick, "frame_monotonic_ns": int(frame_monotonic_ns),
                  "image_timestamp_ns": int(image_timestamp_ns), "offset_ms": round(offset_ms, 3),
-                 "jpeg": self.encode_jpeg(left_rgb), "depth": depth_to_mm(depth_m),
+                 "jpeg": self.encode_jpeg(left_rgb),
+                 "depth": depth_to_mm(depth_m) if self.with_depth else None,
                  **{f: imu.get(f) for f in FRAME_FIELDS if f.startswith("imu_")}}
         with self._lock:
             if self.last_tick is not None:
@@ -199,10 +203,11 @@ class Session:
         offsets = np.zeros(len(jpegs) + 1, dtype=np.int64)
         offsets[1:] = np.cumsum([len(j) for j in jpegs])
         left = np.frombuffer(b"".join(jpegs), dtype=np.uint8)
-        depth = np.stack([f["depth"] for f in frames])
         # JPEG is already compressed: stored (seekable in place by the hub); depth: deflated.
         written = self._write_npz(self.dir / f"{stem}_left.npz", np.savez, left_jpeg=left, left_offsets=offsets)
-        written += self._write_npz(self.dir / f"{stem}_depth.npz", np.savez_compressed, depth_mm=depth)
+        if self.with_depth:
+            depth = np.stack([f["depth"] for f in frames])
+            written += self._write_npz(self.dir / f"{stem}_depth.npz", np.savez_compressed, depth_mm=depth)
         new_index = not self.index_path.exists()
         with open(self.index_path, "a", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=FRAME_FIELDS)

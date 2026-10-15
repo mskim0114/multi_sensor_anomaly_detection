@@ -24,8 +24,8 @@ DEFAULT_CONFIG = {
     "enabled": False,
     "resolution": "HD720",           # camera capture; the saved left image keeps this size
     "fps": 15,                       # grab rate; one frame per collector tick is saved
-    "depth_mode": "PERFORMANCE",
-    "depth_size": [640, 360],        # saved depth map size (width, height)
+    "depth_mode": "NONE",            # NONE = left RGB only, no depth computed or saved (2026-10-15)
+    "depth_size": [640, 360],        # saved depth map size (width, height) when depth_mode is not NONE
     "jpeg_quality": 85,
     "segment_frames": 60,            # frames per segment file pair (one minute at 1 Hz)
     "preview_every_s": 10,           # thumbnail for the hub's live page

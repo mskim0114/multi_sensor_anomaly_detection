@@ -34,13 +34,15 @@
 | `zed.json` | schema `zed-v1`, 카메라(모델·S/N·펌웨어·해상도·좌우 내부 파라미터·baseline), 설정, tick 시계, 세션 목록(시작·종료·종료 이유·프레임 수·누락 tick·오류), `status`(`recording`/`complete`), 기록기 identity |
 | `frames.csv` | 저장된 프레임마다 한 줄: session, segment, index, **tick**, frame_monotonic_ns, image_timestamp_ns, offset_ms, IMU(가속도·자이로·자세 쿼터니언·온도) |
 | `seg_SS_NNNNN_left.npz` | `left_jpeg`(uint8, JPEG 을 이어 붙임) + `left_offsets`(int64, N+1). 압축 없이 저장해 hub 가 한 장만 바로 읽는다 |
-| `seg_SS_NNNNN_depth.npz` | `depth_mm` uint16 (N, 360, 640), deflate 압축. **0 = 측정 없음**(가림·너무 가까움), **65535 = 측정 범위 밖**(너무 멂) |
+| `seg_SS_NNNNN_depth.npz` | **`depth_mode` 가 `NONE` 이 아닐 때만.** `depth_mm` uint16 (N, 360, 640), deflate 압축. **0 = 측정 없음**(가림·너무 가까움), **65535 = 측정 범위 밖**(너무 멂) |
+
+- **2026-10-15 부터 기본값은 `depth_mode: "NONE"`(왼쪽 RGB 만)이다.** 깊이는 계산도 저장도 하지 않고, `zed.json` 의 `depth_encoding` 과 `files.depth` 가 `null` 이다. 깊이가 다시 필요하면 `~/.config/factory_safety/zed.json` 에 `"depth_mode": "PERFORMANCE"` 를 넣는다. 그 이전 run(예: `dataset/normal/trial_001`)에는 깊이 파일이 있다.
 
 - 세그먼트 하나는 60 프레임(1분)이다. 배경 스레드가 tmp + rename 으로 쓰고, 다 쓴 다음에만 `frames.csv` 에 줄을 추가한다. 그래서 index 의 모든 줄은 완전한 파일을 가리킨다.
 - 기록기가 비정상 종료되면 아직 쓰지 못한 세그먼트(최대 몇 분)를 잃는다. `*.partial` 파일이 남을 수 있다. 다음 세션이 이전 세션을 `interrupted` 로 표시한다.
-- 왼쪽 영상은 1280×720 JPEG(품질 85, 약 95 KB)이다. 깊이 맵은 640×360 으로 줄여 저장한다(약 200 KB).
+- 왼쪽 영상은 1280×720 JPEG(품질 85, 약 78 KB)이다. 깊이를 켜면 깊이 맵은 640×360 으로 줄여 저장한다(약 180 KB).
   - 내부 파라미터는 캡처 해상도 기준이므로, 깊이 맵에 쓸 때는 fx·cx 에 가로 비율, fy·cy 에 세로 비율을 곱한다.
-- 용량: 약 **300 KB/s ≈ 1.05 GB/시간**. Jetson 여유 128 GB 기준 약 120시간분이다.
+- 용량: RGB 만이면 약 **80 KB/s ≈ 0.28 GB/시간**이다. 깊이까지 켜면 약 255 KB/s ≈ 0.92 GB/시간이다(2026-10-15 `normal/trial_001` 실측).
 
 ### tick 정렬
 - 수집기는 tick n 을 CLOCK_MONOTONIC 의 `t0 + n·1 s` 에 찍는다. t0 는 `snapshots.jsonl` 첫 줄의 `target_monotonic_ns` 이고, 기록기는 이 파일을 읽기만 한다.

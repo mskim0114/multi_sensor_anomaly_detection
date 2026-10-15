@@ -169,7 +169,7 @@ class SessionTests(Base):
 
     def test_segments_are_complete_files_that_the_index_points_into(self):
         run = self.run_dir()
-        session = self.session(run, segment_frames=4)
+        session = self.session(run, segment_frames=4, depth_mode="PERFORMANCE")
         self.feed(session, 0, 10.0)
         session.close("switched_off")
         files = sorted(p.name for p in (run / "zed").iterdir())
@@ -192,6 +192,20 @@ class SessionTests(Base):
         self.assertEqual((meta["schema"], meta["status"], meta["sessions"][0]["stop_reason"]),
                          ("zed-v1", "complete", "switched_off"))
         self.assertNotIn("roots", meta["config"])
+
+    def test_default_records_left_rgb_only(self):
+        self.assertEqual(control.DEFAULT_CONFIG["depth_mode"], "NONE")
+        run = self.run_dir()
+        session = self.session(run, segment_frames=4)
+        self.feed(session, 0, 10.0)
+        session.close("collection_ended")
+        files = sorted(p.name for p in (run / "zed").iterdir())
+        self.assertEqual(files, ["frames.csv", "seg_01_00000_left.npz", "seg_01_00001_left.npz",
+                                 "seg_01_00002_left.npz", "zed.json"])
+        self.assertEqual(len(read_index(run)), 10)
+        meta = json.loads((run / "zed" / "zed.json").read_text())
+        self.assertIsNone(meta["depth_encoding"])
+        self.assertIsNone(meta["files"]["depth"])
 
     def test_a_second_session_appends_and_marks_a_dead_one_interrupted(self):
         run = self.run_dir()

@@ -6,7 +6,7 @@ Usage (the recorder needs the ZED venv; on/off/status run with any Python):
     python3 jetson_deploy/scripts/14_zed_recorder.py on|off|status
 
 ``run`` is what the factory-zed user service executes. While the switch is on and a sensor
-collection (free run or trial) is running, it stores one left JPEG + depth map per collector tick
+collection (free run or trial) is running, it stores one left JPEG (plus a depth map if depth_mode is not NONE) per collector tick
 under ``<run>/zed/``; otherwise the camera stays closed. See jetson_deploy/zedcap/recorder.py for
 the file layout. The collector itself is not changed and does not depend on this process.
 """

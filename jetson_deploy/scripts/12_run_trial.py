@@ -37,6 +37,7 @@ owned by two objects at once.
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import json
 import os
@@ -83,6 +84,7 @@ SMOKE_DIRNAME = "_smoke"
 PHASE_WARN_S = 5           # stdout warning this many ticks before a boundary
 
 STATUS_CREATED = "created"
+STATUS_WARMING_UP = "warming_up"
 STATUS_PREFLIGHT_FAILED = "preflight_failed"
 STATUS_READY = "ready"
 STATUS_RUNNING = "running"
@@ -226,6 +228,112 @@ def allocate_trial_dir(dataset_root: Path, scenario: str, test_mode: bool) -> tu
             return path, trial_id
         except FileExistsError:
             n += 1
+
+
+# ---------------------------------------------------------------------------
+# warm-up: sensors run before the trial so its first ticks are not a start-up transient
+# ---------------------------------------------------------------------------
+# The BME680 gas heater and the SCD30 only run while a collector is running, so every
+# trial used to start cold: in normal/trial_001 (2026-10-15, idle lab) gas resistance
+# doubled and the SCD30 read +2 C / -4.6 %RH over the first minutes, which is exactly
+# the 90 s baseline an anomaly trial is compared against. A warm-up is recorded like a
+# run under <trial>/warmup/ (thermal frames not saved) and is not part of the trial ticks.
+WARMUP_DIRNAME = "warmup"
+WARMUP_WINDOW_S = 60
+WARMUP_DRIFT_COLUMNS = ("bme680_gas_ohm", "co2_ppm", "scd30_temperature_c", "scd30_humidity_pct",
+                        "bme680_temperature_c", "bme680_humidity_pct", "ntc_temperature_c",
+                        "pm2_5_ug_m3")
+
+
+def summarize_warmup(csv_path: Path, window_s: int = WARMUP_WINDOW_S) -> dict:
+    """Change between the mean of the last minute of warm-up and the minute before.
+
+    Recorded so a reviewer can see how settled each channel was when the trial started.
+    Nothing is judged against a threshold and nothing is corrected.
+    """
+    with open(csv_path, newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+
+    def mean(values):
+        values = [v for v in values if v is not None]
+        return sum(values) / len(values) if values else None
+
+    drift = {}
+    if len(rows) >= 2 * window_s:
+        for column in WARMUP_DRIFT_COLUMNS:
+            values = []
+            for row in rows:
+                try:
+                    values.append(float(row.get(column) or "nan"))
+                except ValueError:
+                    values.append(None)
+            values = [None if v is None or v != v else v for v in values]
+            previous, last = mean(values[-2 * window_s:-window_s]), mean(values[-window_s:])
+            if previous is None or last is None:
+                drift[column] = None
+                continue
+            drift[column] = {"previous_mean": round(previous, 4), "last_mean": round(last, 4),
+                             "change": round(last - previous, 4),
+                             "change_pct": round(100.0 * (last - previous) / previous, 3)
+                             if previous else None}
+    return {
+        "ticks": len(rows),
+        "window_s": window_s,
+        "drift_last_minute": drift or None,
+        "note": ("change = mean of the last window minus mean of the window before it; "
+                 "recorded for review, not compared with any threshold"),
+    }
+
+
+def run_warmup(trial_dir: Path, seconds: int, total_trial_s: int) -> tuple[dict, object]:
+    """Run the sensors for `seconds` under <trial>/warmup/. Raises on a fatal sensor error.
+
+    Also returns the warm BME680 driver object (or None). Handing it to the trial collector
+    avoids a fresh driver init, which measured 2026-10-15 gives one wild first gas reading
+    (3.75 Mohm) and a -10 % step that takes about 15 s to recover.
+    """
+    warm_dir = trial_dir / WARMUP_DIRNAME
+    warm_dir.mkdir()
+    collector = SensorCollector(warm_dir, float(seconds), save_thermal=False, enable_sgp30=False)
+    started = utc_now()
+    try:
+        collector.start()
+
+        def on_snapshot(snap: dict) -> None:
+            seq = snap["sequence"]
+            left = seconds - seq
+            if left == 30:
+                print(f"  warm-up ends in 30 s, then preflight and a 3 s countdown "
+                      f"({total_trial_s} s trial)\a", flush=True)
+            if seq % 60 == 0:
+                sen = snap["sensors"]
+
+                def value(name, key):
+                    v = (sen.get(name) or {}).get("values") or {}
+                    return v.get(key)
+                gas = value("bme680", "gas_ohm")
+                co2 = value("scd30", "co2_ppm")
+                t = value("scd30", "temperature_c")
+                print(f"  [warm-up {seq:>4}/{seconds}] gas "
+                      f"{gas / 1000 if gas is not None else float('nan'):7.0f} kohm  "
+                      f"CO2 {co2 if co2 is not None else float('nan'):6.0f} ppm  "
+                      f"SCD30 {t if t is not None else float('nan'):5.1f} C", flush=True)
+
+        paths = write_run(collector, warm_dir, on_snapshot=on_snapshot)
+    finally:
+        collector.flush_chunks()
+        collector.shutdown()
+    report = collector.timing_report()
+    atomic_write_json(warm_dir / "timing_report.json", report)
+    if collector.first_error is not None:
+        raise RuntimeError(f"warm-up stopped on a sensor error: {collector.first_error}")
+    summary = summarize_warmup(Path(paths["scalars_path"]))
+    warm_bme680 = None if collector.bme680.state.total_errors else collector.bme680._sensor
+    summary.update(planned_s=seconds, started_at_utc=started, ended_at_utc=utc_now(),
+                   directory=WARMUP_DIRNAME, missed_ticks=report["master"]["missed_ticks"],
+                   context_sensor_failures=sorted((report.get("context_sensor_failures") or {})),
+                   bme680_driver_kept=warm_bme680 is not None)
+    return summary, warm_bme680
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +616,25 @@ def self_test() -> int:
         check("atomic write replaced state", json.loads(p.read_text())["status"] == STATUS_RUNNING)
         check("no .tmp left behind", not list(root.glob("*.tmp")))
 
+        # warm-up drift summary
+        warm = root / "warm.csv"
+        with warm.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["sequence", "bme680_gas_ohm", "co2_ppm"])
+            w.writeheader()
+            for i in range(180):
+                w.writerow({"sequence": i, "bme680_gas_ohm": 1000 + 10 * i,
+                            "co2_ppm": "" if i >= 120 else 700})
+        ws = summarize_warmup(warm)
+        gas = ws["drift_last_minute"]["bme680_gas_ohm"]
+        check("warm-up drift: last minute minus minute before", gas["change"] == 600.0)
+        check("warm-up drift: percent of the earlier mean", gas["change_pct"] == round(60000 / 1895, 3))
+        check("warm-up drift: an empty window is null, not zero",
+              ws["drift_last_minute"]["co2_ppm"] is None)
+        check("warm-up drift: missing column is null", ws["drift_last_minute"]["ntc_temperature_c"] is None)
+        short = root / "short.csv"
+        short.write_text("sequence,bme680_gas_ohm\n0,1\n")
+        check("warm-up shorter than two windows: no drift", summarize_warmup(short)["drift_last_minute"] is None)
+
     print("-" * 74)
     print(f"  {'ALL PASS' if not failures else f'{len(failures)} FAILURES'}")
     return 0 if not failures else 1
@@ -540,6 +667,11 @@ def main() -> int:
     ap.add_argument("--recovery-seconds", type=int, default=CANONICAL_RECOVERY_S)
     ap.add_argument("--duration", type=int, default=None,
                     help="normal scenario only: total seconds override")
+    ap.add_argument("--warmup-seconds", type=int, default=0,
+                    help=f"run the sensors this long before the trial, recorded under "
+                         f"<trial>/{WARMUP_DIRNAME}/ and not part of the trial ticks. The BME680 "
+                         "gas heater and SCD30 need minutes to settle after a collector starts; "
+                         "official trials use 900 (docs/JETSON_DATASET_PROTOCOL.md)")
     ap.add_argument("--test-mode", action="store_true",
                     help=f"write under <dataset-root>/{SMOKE_DIRNAME}/ instead of the "
                          "official scenario directories")
@@ -565,6 +697,11 @@ def main() -> int:
         ap.error("--asserted-state is only allowed for --scenario normal; an induced "
                  "anomaly changes state during the run, which is an annotation step's "
                  "decision, not an operator assertion")
+    if args.warmup_seconds < 0:
+        ap.error("--warmup-seconds must be 0 or more")
+    if args.warmup_seconds and args.warmup_seconds < 2 * WARMUP_WINDOW_S:
+        ap.error(f"--warmup-seconds must be 0 or at least {2 * WARMUP_WINDOW_S} "
+                 "(the settling summary compares the last two minutes)")
     if args.duration is not None and args.scenario != "normal":
         ap.error("--duration is only allowed for --scenario normal; use "
                  "--baseline-seconds/--anomaly-seconds/--recovery-seconds")
@@ -594,6 +731,8 @@ def main() -> int:
         "completed_at_utc": None,
         "planned_duration_s": total_ticks,
         "planned_durations_s": plan["durations_s"],
+        "planned_warmup_s": args.warmup_seconds,
+        "warmup": None,
         "protocol_compliant": plan["protocol_compliant"],
         "phase_plan": plan["phase_plan"],
         "intervention_start_tick": plan["intervention_start_tick"],
@@ -623,6 +762,7 @@ def main() -> int:
     print(f"  SENSOR PROFILE   {SENSOR_PROFILE_V1}")
     print(f"  OUTPUT DIRECTORY {trial_dir}")
     print(f"  MODE             {'TEST (not official dataset)' if args.test_mode else 'OFFICIAL'}")
+    print(f"  WARM-UP          {f'{args.warmup_seconds} s under {WARMUP_DIRNAME}/, then preflight' if args.warmup_seconds else 'none (sensors start cold)'}")
     if experiment["operator_annotation"]:
         oa = experiment["operator_annotation"]
         print(f"  OPERATOR CLAIM   state={oa['asserted_state']}  environment={oa['environment']}")
@@ -630,12 +770,60 @@ def main() -> int:
         print("                   recorded as an assertion, not a training label")
     print("  NOTE             this program does not create or control the anomaly")
 
+    # ---- warm-up ---------------------------------------------------------
+    # Confirmation comes first: waiting at a prompt after the warm-up would let it cool again.
+    confirmed = False
+    warm_bme680 = None
+    if args.warmup_seconds:
+        if not args.yes:
+            print(f"Press ENTER to start the {args.warmup_seconds} s warm-up (the trial follows "
+                  "without another prompt)   /   Ctrl+C to abort")
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt) as exc:
+                experiment["status"] = STATUS_ABORTED
+                experiment["abort_reason"] = ("no interactive stdin and --yes not given"
+                                              if isinstance(exc, EOFError) else "KeyboardInterrupt")
+                atomic_write_json(exp_path, experiment)
+                print("aborted before warm-up")
+                return 130
+        confirmed = True
+        experiment["status"] = STATUS_WARMING_UP
+        atomic_write_json(exp_path, experiment)
+        print(f"\nWARM-UP {args.warmup_seconds} s", flush=True)
+        try:
+            experiment["warmup"], warm_bme680 = run_warmup(trial_dir, args.warmup_seconds, total_ticks)
+        except KeyboardInterrupt:
+            experiment["status"] = STATUS_ABORTED
+            experiment["abort_reason"] = "KeyboardInterrupt during warm-up"
+            experiment["completed_at_utc"] = utc_now()
+            atomic_write_json(exp_path, experiment)
+            print("\naborted during warm-up - no trial acquisition was started")
+            return 130
+        except Exception as exc:
+            experiment["status"] = STATUS_FAILED
+            experiment["failure"] = f"warm-up: {type(exc).__name__}: {exc}"
+            experiment["completed_at_utc"] = utc_now()
+            atomic_write_json(exp_path, experiment)
+            print(f"\nWARM-UP FAILED: {type(exc).__name__}: {exc}")
+            print("  no trial acquisition was started")
+            return 1
+        atomic_write_json(exp_path, experiment)
+        drift = experiment["warmup"]["drift_last_minute"] or {}
+        print("  last-minute change at the end of warm-up (recorded, not judged):")
+        for column in ("bme680_gas_ohm", "co2_ppm", "scd30_temperature_c", "scd30_humidity_pct"):
+            d = drift.get(column)
+            if d:
+                print(f"    {column:<22} {d['change']:+.3f}  ({d['change_pct']:+.2f} %)")
+
     collector = SensorCollector(
         trial_dir, float(total_ticks),
         save_ct_raw=args.save_ct_raw,
         save_thermal=not args.no_thermal_save,
         enable_sgp30=False,             # v1 profile
     )
+    if warm_bme680 is not None:
+        collector.bme680._sensor = warm_bme680   # keep the warm heater state, see run_warmup
 
     # ---- preflight -------------------------------------------------------
     try:
@@ -670,7 +858,7 @@ def main() -> int:
         atomic_write_json(exp_path, experiment)
 
         # ---- operator confirmation --------------------------------------
-        if not args.yes:
+        if not args.yes and not confirmed:
             print("Press ENTER to start trial   /   Ctrl+C to abort")
             try:
                 input()
@@ -763,6 +951,10 @@ def main() -> int:
     experiment["acceptance"] = acc
     experiment["snapshots_written"] = paths["snapshots_written"]
     experiment["completed_at_utc"] = utc_now()
+    if experiment["warmup"]:
+        gap = (dt.datetime.fromisoformat(experiment["started_at_utc"])
+               - dt.datetime.fromisoformat(experiment["warmup"]["ended_at_utc"])).total_seconds()
+        experiment["warmup"]["gap_to_trial_start_s"] = round(gap, 1)
     experiment["status"] = STATUS_COMPLETED if acc["accepted"] else STATUS_FAILED
     atomic_write_json(exp_path, experiment)
 

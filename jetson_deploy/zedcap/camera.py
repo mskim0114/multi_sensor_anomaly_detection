@@ -46,8 +46,8 @@ class ZedCamera:
                 "baseline_mm": float(calibration.get_camera_baseline()) * 1000.0,
                 "left": intrinsics(calibration.left_cam), "right": intrinsics(calibration.right_cam),
                 "sdk_version": str(sl.Camera.get_sdk_version()),
-                "calibration_note": "left/right intrinsics are for the capture resolution; depth is resized "
-                                    "to depth_size, so scale fx/cx by width ratio and fy/cy by height ratio"}
+                "calibration_note": "left/right intrinsics are for the capture resolution; depth (when recorded) "
+                                    "is resized to depth_size, so scale fx/cx by width ratio and fy/cy by height ratio"}
 
     def grab(self) -> tuple[int, int] | None:
         """(frame monotonic ns, image timestamp ns) of the next frame, or None on failure."""
@@ -60,9 +60,11 @@ class ZedCamera:
     def retrieve(self):
         sl = self.sl
         self.camera.retrieve_image(self.image, sl.VIEW.LEFT)
-        self.camera.retrieve_measure(self.depth, sl.MEASURE.DEPTH, sl.MEM.CPU, self.depth_resolution)
         left = self.image.get_data()[:, :, 2::-1]          # BGRA -> RGB view
-        depth = np.array(self.depth.get_data(), dtype=np.float32, copy=True)
+        depth = None
+        if self.config["depth_mode"] != "NONE":
+            self.camera.retrieve_measure(self.depth, sl.MEASURE.DEPTH, sl.MEM.CPU, self.depth_resolution)
+            depth = np.array(self.depth.get_data(), dtype=np.float32, copy=True)
         imu = {}
         if self.camera.get_sensors_data(self.sensors, sl.TIME_REFERENCE.IMAGE) == sl.ERROR_CODE.SUCCESS:
             data = self.sensors.get_imu_data()

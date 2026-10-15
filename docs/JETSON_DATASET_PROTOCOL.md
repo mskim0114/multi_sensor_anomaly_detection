@@ -157,6 +157,22 @@ master tick 은 1 Hz 이므로 tick 번호가 곧 경과 초다.
 invalid 되어도 충분한 유효 데이터가 남도록 잡은 길이다 (관측된 FFC 손실률은 30초 window
 6개당 약 1개).
 
+### 4a. 예열 (warm-up) — official trial 은 `--warmup-seconds 900` (2026-10-15)
+
+BME680 가스 히터와 SCD30 은 수집기가 돌 때만 동작한다. 그래서 예열 없이 시작한 trial 은 처음 몇 분이
+센서가 데워지는 과도 구간이고, 이 구간이 baseline 90 s 와 겹친다.
+
+- 실측(`normal/trial_001`, 2026-10-15, 무인·소등 실험실, 개입 없음):
+  - BME680 gas 저항 465 → 956 kΩ, 6분 뒤에도 상승 중
+  - SCD30 온도 22.8 → 24.8 °C, 습도 46.2 → 41.6 %, CO₂ 655 → 718 ppm(약 3분 뒤 안정)
+  - PM·NTC·열화상은 처음부터 안정
+- `--warmup-seconds N` 은 trial 전에 센서를 N 초 돌린다.
+  - 기록 위치는 `<trial>/warmup/`(scalars.csv, snapshots.jsonl, timing_report.json; 열화상 프레임은 저장하지 않음)이다. trial tick 에는 들어가지 않는다.
+  - 순서: (ENTER 확인) → 예열 → preflight → 3 s countdown → trial. 예열 뒤에는 다시 묻지 않는다. 기다리는 동안 센서가 식기 때문이다.
+  - 예열에서 쓰던 BME680 드라이버를 trial 이 그대로 이어 쓴다. 드라이버를 새로 열면 첫 gas 값이 튀고(3.75 MΩ) 약 −10 % 단차가 15 s 남는 것을 확인했다. 이어 쓰면 예열 끝과 trial 시작 사이 약 7 s 공백 때문에 약 −8 % 단차가 10 s 정도 남는다.
+  - `experiment.json` 의 `warmup` 에 마지막 1분과 그 전 1분의 평균 차이(`drift_last_minute`)와 trial 시작까지 공백(`gap_to_trial_start_s`)을 남긴다. 기준값으로 합격/불합격을 판단하지 않는다.
+- official trial 기본값은 900 s(15분)로 한다. 15분이 충분한지는 첫 장시간 예열 기록으로 다시 확인한다.
+
 ---
 
 ## 5. FLIR FFC 정책
@@ -226,7 +242,8 @@ scalars.csv          tick 당 1행 평면 뷰
 snapshots.jsonl      tick 당 1줄 전체 스냅샷
 thermal_*.npz        30프레임 단위 열화상
 timing_report.json   타이밍/품질 통계
-zed/                 (선택) ZED 2i 보조 기록기 출력: zed.json, frames.csv, seg_*_left.npz, seg_*_depth.npz
+zed/                 (선택) ZED 2i 보조 기록기 출력: zed.json, frames.csv, seg_*_left.npz (depth 는 설정 시에만)
+warmup/              (--warmup-seconds 를 준 경우) 예열 기록: scalars.csv, snapshots.jsonl, timing_report.json, (선택) zed/
 ```
 
 `zed/` 는 수집기가 아니라 별도 프로세스(`factory-zed`)가 같은 tick 기준으로 쓴다. 스위치가 꺼져 있었으면 없다.
@@ -420,13 +437,13 @@ information axis** 를 우선 검토한다.
 ### 사용법
 
 ```bash
-# official trial (canonical 90/180/90)
+# official trial (canonical 90/180/90, 15분 예열 후 시작)
 ./jetson_deploy/run_python.sh jetson_deploy/scripts/12_run_trial.py \
-    --scenario dust --severity 2 --operator-note "..." --equipment-condition "..."
+    --scenario dust --severity 2 --warmup-seconds 900 --operator-note "..." --equipment-condition "..."
 
 # normal control trial
 ./jetson_deploy/run_python.sh jetson_deploy/scripts/12_run_trial.py \
-    --scenario normal --severity 0
+    --scenario normal --severity 0 --warmup-seconds 900
 
 # test mode (official dataset 에 섞이지 않음)
 ./jetson_deploy/run_python.sh jetson_deploy/scripts/12_run_trial.py \
@@ -448,6 +465,7 @@ information axis** 를 우선 검토한다.
 | `--environment` | 수집 장소 자유 서술 (`office_desk_bench`, `robot_cell_a`). 기록만 하고 해석하지 않는다 |
 | `--asserted-state` | 운영자가 **run 전체**에 대해 단언하는 상태. 현재 `normal` 만 허용하며 `--scenario normal` 전용. `--assertion-basis` 필수 |
 | `--assertion-basis` | 그 단언의 근거 (사람이 작성) |
+| `--warmup-seconds` | trial 전 예열 초. 0(기본) 또는 120 이상. official 은 900. §4a |
 | `--test-mode` | `dataset/_smoke/` 로 격리 |
 | `--yes` | ENTER 확인 생략 (countdown 은 유지). 비대화형 실행용 |
 | `--self-test` | 하드웨어 없는 결정적 검증 |
@@ -497,6 +515,8 @@ timeline 대로 자동 진행한다.
 ```
 created -> preflight_failed
 created -> ready -> running -> completed | aborted | failed
+created -> warming_up -> (예열 실패) failed | (Ctrl+C) aborted
+created -> warming_up -> ready -> running -> ...      (--warmup-seconds 를 준 경우; 그 뒤는 위와 같다)
 ```
 
 상태 전환마다 **atomic write** 한다 (temp file → `fsync` → `os.replace`). 실험 도중 crash 가

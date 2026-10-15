@@ -26,7 +26,7 @@ FINAL_RUN = {"completed", "stopped", "failed"}
 # A producer that died (reboot, power loss, kill) never writes a final status. Such a unit is
 # shipped as "interrupted" only when its owner is provably gone and nothing has changed for
 # settle_s; files are never touched. Statuses a live producer could still be in:
-UNFINISHED = {None, "created", "ready", "starting", "running", "stopping"}
+UNFINISHED = {None, "created", "warming_up", "ready", "starting", "running", "stopping"}
 INTERRUPTED = "interrupted"
 HARDWARE_LOCK = Path("~/.cache/factory_safety/acquisition/hardware.lock").expanduser()
 

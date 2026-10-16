@@ -39,7 +39,26 @@
   <section id="overview" hidden>
     <p class="muted" id="server-time"></p>
     <p class="muted" id="backup-status"></p>
+    <p class="muted" id="weather-status"></p>
     <div id="device-cards" class="grid"></div>
+    <div id="site-editor" class="card" hidden>
+      <h3 id="site-title"></h3>
+      <p class="muted" data-i18n="site.help">센서가 설치된 장소입니다. 서버가 이 좌표의 실외 온도·습도·기압을 매시간 받아 둡니다(Open-Meteo). 장치를 옮기면(예: 독일) 새 장소를 옮긴 시각부터로 추가합니다. 이전 기록은 지우지 않고 남깁니다.</p>
+      <div class="toolbar">
+        <label><span data-i18n="site.label">장소 이름</span> <input id="site-label" size="24" maxlength="80"></label>
+        <label><span data-i18n="site.lat">위도</span> <input id="site-lat" size="9" inputmode="decimal"></label>
+        <label><span data-i18n="site.lon">경도</span> <input id="site-lon" size="9" inputmode="decimal"></label>
+        <a id="site-map" target="_blank" rel="noopener noreferrer" data-i18n="site.map">지도에서 확인</a>
+      </div>
+      <div class="toolbar">
+        <label><span data-i18n="site.from">적용 시작 (이 브라우저 시각)</span> <input id="site-from" type="datetime-local"></label>
+        <label><span data-i18n="site.note">메모</span> <input id="site-note" size="28" maxlength="300"></label>
+        <button id="site-save" data-i18n="site.save">저장</button>
+        <button id="site-close" data-i18n="site.close">닫기</button>
+        <span id="site-msg" class="muted"></span>
+      </div>
+      <div class="scroll"><table id="site-history"></table></div>
+    </div>
   </section>
 
   <section id="live" hidden>

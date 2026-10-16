@@ -1,0 +1,19 @@
+# Hourly outdoor weather for every device site entered on the web (user unit, no sudo). Install with the timer:
+#   cp src/edge_hub/edge-hub-weather.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now edge-hub-weather.timer
+#   systemctl --user start edge-hub-weather.service      # run once now (also backfills past hours)
+#   journalctl --user -u edge-hub-weather
+# Needs outbound HTTPS to api.open-meteo.com and archive-api.open-meteo.com (docs/EDGE_HUB.md §3f).
+[Unit]
+Description=factory_safety edge hub outdoor weather (Open-Meteo, hourly)
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsMountPoint=/mnt/data-hdd
+
+[Service]
+Type=oneshot
+Environment=DATA_ROOT=/mnt/data-hdd/keti_data/factory_safety/edge_hub
+WorkingDirectory=%h/services/factory_edge_hub/current
+ExecStart=/usr/bin/python3 -E -s -B -m src.edge_hub weather --data-root ${DATA_ROOT}
+Nice=10
+UMask=0027

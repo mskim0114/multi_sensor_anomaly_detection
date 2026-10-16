@@ -93,6 +93,11 @@ async function refreshOverview() {
   $("backup-status").textContent = !b ? t("backup.none") : !b.ok ? t("backup.failed", { utc: (b.finished_utc || "").slice(0, 16), error: b.error || "" })
     : t("backup.ok", { utc: (b.finished_utc || "").slice(0, 16), n: b.units ?? 0, size: fmtBytes(b.bytes) }) + (age > 36 ? t("backup.stale") : "");
   $("backup-status").classList.toggle("error", !b || !b.ok || age > 36);
+  const w = data.weather;
+  const wAge = w && w.finished_utc ? (Date.parse(data.server_utc) - Date.parse(w.finished_utc)) / 3600e3 : null;
+  $("weather-status").textContent = !w ? t("weather.none") : !w.ok ? t("weather.failed", { utc: (w.finished_utc || "").slice(0, 16), error: (w.errors || [])[0] || "" })
+    : t("weather.ok", { utc: (w.finished_utc || "").slice(0, 16), n: w.sites ?? 0 }) + (wAge > 3 ? t("weather.stale") : "");
+  $("weather-status").classList.toggle("error", Boolean(w) && (!w.ok || wAge > 3));
   const cards = $("device-cards"); cards.replaceChildren();
   if (!data.devices.length) cards.append(el("p", { class: "muted" }, t("overview.no_devices")));
   for (const d of data.devices) cards.append(deviceCard(d));
@@ -108,6 +113,16 @@ function zedText(zed) {
   if (zed.error) parts.push(String(zed.error));
   if (zed.config_error) parts.push(String(zed.config_error));
   return parts.join(" · ");
+}
+
+function outdoorText(o) {
+  if (!o) return t("site.no_weather");
+  return `${fmtNum(o.temperature_c)} °C · ${fmtNum(o.humidity_pct)} % · ${fmtNum(o.pressure_hpa)} hPa (${String(o.utc || "").slice(0, 16)} UTC)`;
+}
+
+function siteText(d) {
+  if (!d.site) return t("site.unset");
+  return `${d.site.label} (${d.site.latitude}, ${d.site.longitude}) · ${t("site.outdoor")} ${outdoorText(d.outdoor)}`;
 }
 
 function deviceCard(d) {
@@ -128,7 +143,8 @@ function deviceCard(d) {
     el("dt", {}, t("card.last_error")), el("dd", {}, up.last_error ? `${up.last_error.unit}: ${up.last_error.error}` : t("card.none")),
     el("dt", {}, t("card.disk")), el("dd", {}, disk ? `${fmtBytes(disk.free)} / ${fmtBytes(disk.total)}` : "—"),
     el("dt", {}, t("card.soc_temp")), el("dd", {}, Object.entries(s.temperatures_c || {}).filter(([, v]) => typeof v === "number").slice(0, 4).map(([k, v]) => `${k} ${v.toFixed(1)}°C`).join(" · ") || "—"),
-    el("dt", {}, t("card.code")), el("dd", {}, s.git ? `${String(s.git.commit || "").slice(0, 10)}${s.git.dirty ? " (dirty)" : ""}` : "—"));
+    el("dt", {}, t("card.code")), el("dd", {}, s.git ? `${String(s.git.commit || "").slice(0, 10)}${s.git.dirty ? " (dirty)" : ""}` : "—"),
+    el("dt", {}, t("card.site")), el("dd", { class: d.site ? "" : "error" }, siteText(d)));
   const values = d.latest_values || {};
   const pick = ["ntc.temperature_c", "ct1.current_a_nominal", "sps30.pm2_5_ug_m3", "scd30.co2_ppm", "flir.max_c"];
   const latest = el("p", { class: "muted" }, pick.filter((k) => k in values).map((k) => `${k} ${fmtNum(values[k])}`).join(" · ") || t("card.no_live"));
@@ -136,8 +152,58 @@ function deviceCard(d) {
   return el("div", { class: "card" },
     el("h3", {}, el("span", { class: `dot ${status[0]}` }), `${d.device} `, el("span", { class: "badge" }, status[1])),
     kv, latest, controlBlock(d),
-    el("button", { onclick: () => { $("live-device").value = d.device; show("live"); } }, t("card.live_button")));
+    el("div", { class: "toolbar" },
+      el("button", { onclick: () => { $("live-device").value = d.device; show("live"); } }, t("card.live_button")),
+      el("button", { onclick: () => openSiteEditor(d.device) }, state.role === "operator" ? t("site.edit") : t("site.view"))));
 }
+
+// ------------------------------------------------------------- site editor
+const pad = (n) => String(n).padStart(2, "0");
+const localInput = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+
+function updateMapLink() {
+  const lat = parseFloat($("site-lat").value), lon = parseFloat($("site-lon").value);
+  const ok = Number.isFinite(lat) && Number.isFinite(lon);
+  $("site-map").hidden = !ok;
+  if (ok) $("site-map").href = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=13/${lat}/${lon}`;
+}
+
+async function openSiteEditor(device) {
+  state.siteDevice = device;
+  const data = await api(`/api/v1/site?device=${encodeURIComponent(device)}`);
+  $("site-editor").hidden = false;
+  $("site-title").textContent = t("site.title", { device });
+  const current = data.site || {};
+  $("site-label").value = current.label || ""; $("site-lat").value = current.latitude ?? ""; $("site-lon").value = current.longitude ?? "";
+  $("site-from").value = localInput(new Date()); $("site-note").value = ""; $("site-msg").textContent = "";
+  for (const id of ["site-label", "site-lat", "site-lon", "site-from", "site-note", "site-save"]) $(id).disabled = state.role !== "operator";
+  updateMapLink();
+  const table = $("site-history");
+  table.replaceChildren(el("tr", {}, ...["site.th_from", "site.th_until", "site.label", "site.th_coord", "site.th_by", "site.note"].map((k) => el("th", {}, t(k)))));
+  for (const s of [...data.history].reverse()) {
+    table.append(el("tr", { class: s.superseded ? "muted" : "" },
+      el("td", {}, s.valid_from_utc), el("td", {}, s.superseded ? t("site.superseded") : (s.valid_until_utc || t("site.now"))),
+      el("td", {}, s.label), el("td", {}, `${s.latitude}, ${s.longitude}`), el("td", {}, `${s.set_by} · ${String(s.set_utc || "").slice(0, 16)}`),
+      el("td", {}, s.note || "")));
+  }
+  $("site-editor").scrollIntoView({ behavior: "smooth" });
+}
+
+$("site-lat").addEventListener("input", updateMapLink);
+$("site-lon").addEventListener("input", updateMapLink);
+$("site-close").addEventListener("click", () => { $("site-editor").hidden = true; state.siteDevice = null; });
+$("site-save").addEventListener("click", async () => {
+  const device = state.siteDevice; if (!device) return;
+  const from = $("site-from").value ? new Date($("site-from").value) : new Date();
+  const body = { device, label: $("site-label").value.trim(), latitude: parseFloat($("site-lat").value),
+    longitude: parseFloat($("site-lon").value), valid_from_utc: from.toISOString(), note: $("site-note").value.trim() };
+  if (!confirm(t("site.confirm", { device, label: body.label, lat: body.latitude, lon: body.longitude, from: body.valid_from_utc }))) return;
+  try {
+    await post("/api/v1/site", body);
+    $("site-msg").textContent = t("site.saved");
+    await openSiteEditor(device); refreshOverview();
+  } catch (error) { $("site-msg").textContent = error.message; }
+});
 
 function controlBlock(d) {
   const s = d.status || {}; const history = state.commands[d.device] || [];
@@ -274,6 +340,9 @@ async function refreshLive() {
     const values = Object.entries(rec.values || {}).filter(([, v]) => typeof v === "number").map(([k, v]) => `${k} ${fmtNum(v)}`).join(" · ");
     table.append(el("tr", {}, el("td", {}, name), el("td", {}, `${rec.status ?? "—"}${rec.fresh === false ? " (stale)" : ""}`), el("td", {}, values || "—")));
   }
+  const dev = ((state.overview || {}).devices || []).find((x) => x.device === device);
+  if (dev) table.append(el("tr", {}, el("td", {}, t("site.outdoor_row")), el("td", {}, dev.site ? dev.site.label : t("site.unset")),
+    el("td", {}, dev.site ? outdoorText(dev.outdoor) : "—")));
   const keys = [...new Set(trend.points.flatMap((p) => Object.keys(p).filter((k) => k !== "t")))].sort();
   const select = $("trend-keys");
   if ([...select.options].map((o) => o.value).join() !== keys.join()) {
@@ -420,6 +489,9 @@ function renderUnitMeta() {
     ["manifest sha256", r.manifest_sha256], [t("unit.path"), r.raw_path]];
   if (d.zed) rows.push([t("unit.zed_meta"), t("unit.zed_meta_value", { frames: d.zed.frames, missed: d.zed.missed_ticks, sessions: d.zed.sessions.length, status: d.zed.status })
     + ` · ${(d.zed.camera || {}).model || ""} ${(d.zed.camera || {}).serial_number || ""}`]);
+  const o = d.outdoor;
+  rows.push([t("unit.outdoor"), !o || !o.site ? t("site.unset") : o.temperature_c == null ? `${o.site.label} · ${t("site.no_weather")}`
+    : t("unit.outdoor_value", { temp: fmtNum(o.temperature_c), rh: fmtNum(o.humidity_pct), p: fmtNum(o.pressure_hpa), n: o.hours.length, label: o.site.label })]);
   rows.push(...Object.entries(d.summary).map(([k, v]) => [k, typeof v === "object" ? JSON.stringify(v) : String(v)]));
   for (const [k, v] of rows) kv.append(el("dt", {}, k), el("dd", {}, v));
   meta.append(kv);

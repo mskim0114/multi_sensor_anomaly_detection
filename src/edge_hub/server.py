@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import PROTOCOL
 from .labels import Labels
 from .store import HubError, Store, check_device, utc_now
+from .weather import Weather, _parse_utc
 
 WEB = Path(__file__).with_name("web")
 MAX_JSON = 4 * 1024 * 1024
@@ -107,6 +108,7 @@ class Hub:
     def __init__(self, store: Store, *, secure_cookie: bool, trust_proxy: bool = False):
         self.store, self.sessions = store, Sessions()
         self.labels = Labels(store)
+        self.weather = Weather(store)
         self.secure_cookie, self.trust_proxy = secure_cookie, trust_proxy
 
     def viewers(self) -> dict:
@@ -465,7 +467,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_overview(self, query):
         self.viewer()
-        self.send_json(200, self.hub.store.overview())
+        data = self.hub.store.overview()
+        for device in data["devices"]:
+            device.update(self.hub.weather.summary(device["device"]))
+        data["weather"] = self.hub.weather.status()
+        self.send_json(200, data)
+
+    # ------------------------------------------------- site and outdoor weather
+    def r_site(self, query):
+        self.viewer()
+        device = check_device(query.get("device", ""))
+        self.send_json(200, {"device": device, "history": self.hub.weather.history(device),
+                             **self.hub.weather.summary(device)})
+
+    def r_site_set(self, query):
+        user = self.operator()
+        body = self.read_json(4096)
+        site = self.hub.weather.set_site(body.get("device", ""), body.get("label"), body.get("latitude"),
+                                         body.get("longitude"), body.get("valid_from_utc"), user,
+                                         body.get("note") or "")
+        self.server.log(f"site {body.get('device')} -> {site['label']} ({site['latitude']},{site['longitude']}) "
+                        f"from {site['valid_from_utc']} by {user}")
+        self.send_json(200, site)
+
+    def r_outdoor(self, query):
+        self.viewer()
+        device = check_device(query.get("device", ""))
+        try:
+            since = min(31 * 86400.0, max(3600.0, float(query.get("since_s", 86400))))
+        except ValueError:
+            raise HubError(400, "since_s must be a number")
+        now = time.time()
+        self.send_json(200, {"device": device, "hours": self.hub.weather.outdoor(device, now - since, now)})
 
     def r_live(self, query):
         self.viewer()
@@ -485,7 +518,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_unit(self, query):
         self.viewer()
-        self.send_json(200, self.hub.store.unit_detail(query.get("device", ""), query.get("unit", "")))
+        device = query.get("device", "")
+        detail = self.hub.store.unit_detail(device, query.get("unit", ""))
+        summary = detail.get("summary") or {}
+        try:
+            start = _parse_utc(summary.get("started_utc"))
+            end = _parse_utc(summary.get("completed_utc") or summary.get("started_utc"))
+            detail["outdoor"] = self.hub.weather.for_span(device, start, max(start, end))
+        except HubError:
+            detail["outdoor"] = None
+        self.send_json(200, detail)
 
     def r_unit_scalars(self, query):
         self.viewer()
@@ -541,6 +583,9 @@ ROUTES = {
     ("GET", "/api/v1/unit/scalars"): Handler.r_unit_scalars,
     ("GET", "/api/v1/unit/thermal"): Handler.r_unit_thermal,
     ("GET", "/api/v1/unit/zed"): Handler.r_unit_zed,
+    ("GET", "/api/v1/site"): Handler.r_site,
+    ("POST", "/api/v1/site"): Handler.r_site_set,
+    ("GET", "/api/v1/outdoor"): Handler.r_outdoor,
 }
 
 

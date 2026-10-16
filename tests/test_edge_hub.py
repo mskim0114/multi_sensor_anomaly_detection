@@ -1191,6 +1191,144 @@ class BackupTests(HubFixture):
         (self.data_root / "backup_status.json").unlink()
 
 
+class WeatherTests(HubFixture):
+    """Device site history entered on the web, and hourly outdoor weather fetched for it."""
+
+    NOW = 1792077600.0          # 2026-10-15T15:20:00Z
+
+    def setUp(self):
+        super().setUp()
+        with self.store._db_lock:      # tables are created by the hub's own Weather at startup
+            self.store.db.execute("DELETE FROM device_sites")
+            self.store.db.execute("DELETE FROM weather_hourly")
+            self.store.db.commit()
+
+    def weather(self, replies=None):
+        from src.edge_hub.weather import Weather
+        calls = []
+
+        def fetch(url):
+            from urllib.parse import parse_qs, urlsplit
+            q = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+            calls.append((url.split("?")[0], q))
+            import datetime as dt
+            first = dt.datetime.fromisoformat(q["start_date"] + "T00:00:00+00:00").timestamp()
+            last = dt.datetime.fromisoformat(q["end_date"] + "T23:00:00+00:00").timestamp()
+            hours = list(range(int(first), int(last) + 1, 3600))
+            temp = [20.0 + (h // 3600) % 24 * 0.1 for h in hours]
+            if replies == "archive_lag":
+                temp = [v if h < first + 3 * 3600 else None for h, v in zip(hours, temp)]
+            return {"hourly": {"time": hours, "temperature_2m": temp,
+                               "relative_humidity_2m": [60.0] * len(hours),
+                               "surface_pressure": [1010.0] * len(hours)}}
+        return Weather(self.store, fetch=fetch), calls
+
+    def test_site_history_validation_and_correction(self):
+        from src.edge_hub.store import HubError
+        w, _ = self.weather()
+        with self.assertRaises(HubError):
+            w.set_site("jetson-unknown-9", "lab", 37.4, 127.1, None, "boss", now=self.NOW)
+        for lat, lon in ((91, 0), (0, 181), ("x", 0), (float("nan"), 0)):
+            with self.assertRaises(HubError):
+                w.set_site("jetson-test-02", "lab", lat, lon, None, "boss", now=self.NOW)
+        with self.assertRaises(HubError):
+            w.set_site("jetson-test-02", "", 37.4, 127.1, None, "boss", now=self.NOW)
+        with self.assertRaises(HubError):
+            w.set_site("jetson-test-02", "lab", 37.4, 127.1, "2026-10-15T00:00:00", "boss", now=self.NOW)  # no zone
+        with self.assertRaises(HubError):
+            w.set_site("jetson-test-02", "lab", 37.4, 127.1, "2026-10-20T00:00:00Z", "boss", now=self.NOW)
+        a = w.set_site("jetson-test-02", "KETI lab", 37.38123, 127.11789, "2026-10-15T00:00:00Z", "boss", now=self.NOW)
+        self.assertEqual((a["latitude"], a["longitude"]), (37.38, 127.12), "kept to about 1 km")
+        b = w.set_site("jetson-test-02", "Germany testbed", 50.78, 6.08, "2026-10-15T12:00:00Z", "boss", now=self.NOW)
+        fix = w.set_site("jetson-test-02", "KETI lab B", 37.39, 127.11, "2026-10-15T00:00:00Z", "boss", now=self.NOW)
+        history = w.history("jetson-test-02")
+        self.assertEqual([h["id"] for h in history], [a["id"], fix["id"], b["id"]])
+        self.assertTrue(history[0]["superseded"], "same start: the later entry is a correction, both kept")
+        self.assertEqual(w.site_at("jetson-test-02", self.NOW - 10 * 3600)["label"], "KETI lab B")
+        self.assertEqual(w.site_at("jetson-test-02", self.NOW)["label"], "Germany testbed")
+        self.assertIsNone(w.site_at("jetson-test-02", self.NOW - 2 * 86400), "nothing before the first entry")
+
+    def test_update_fetches_missing_completed_hours_per_site_and_joins_by_time(self):
+        w, calls = self.weather()
+        w.set_site("jetson-test-01", "KETI lab", 37.38, 127.12, "2026-10-15T00:00:00Z", "boss", now=self.NOW)
+        w.set_site("jetson-test-01", "Germany testbed", 50.78, 6.08, "2026-10-15T10:00:00Z", "boss", now=self.NOW)
+        status = w.update(now=self.NOW)
+        self.assertTrue(status["ok"], status)
+        self.assertEqual(status["sites"], 2)
+        self.assertTrue(all(url.endswith("/v1/forecast") for url, _ in calls), "recent days use the forecast API")
+        self.assertEqual({(q["latitude"], q["longitude"]) for _, q in calls}, {("37.38", "127.12"), ("50.78", "6.08")})
+        rows = w.outdoor("jetson-test-01", self.NOW - 86400, self.NOW)
+        self.assertEqual(rows[0]["utc"], "2026-10-15T00:00:00Z")
+        self.assertEqual(rows[-1]["utc"], "2026-10-15T14:00:00Z", "the running hour is not stored")
+        self.assertEqual(len(rows), 15, "one row per hour, no overlap at the site change")
+        sites = {r["utc"][11:13]: r["site_id"] for r in rows}
+        self.assertNotEqual(sites["09"], sites["10"], "the hour of the move belongs to the new site")
+        again = w.update(now=self.NOW)
+        self.assertEqual(again["requests"], 0, "nothing missing, nothing fetched")
+        span = w.for_span("jetson-test-01", self.NOW - 3 * 3600, self.NOW - 3600)
+        self.assertEqual(span["site"]["label"], "Germany testbed")
+        self.assertEqual(span["humidity_pct"], 60.0)
+
+    def test_old_periods_use_the_archive_and_lagging_hours_are_retried(self):
+        w, calls = self.weather("archive_lag")
+        w.set_site("jetson-test-02", "old lab", 10.0, 20.0, "2026-06-01T00:00:00Z", "boss", now=self.NOW)
+        w.set_site("jetson-test-02", "new lab", 11.0, 21.0, "2026-06-02T00:00:00Z", "boss", now=self.NOW)
+        status = w.update(now=self.NOW)
+        old = [q for url, q in calls if q["latitude"] == "10.00"]
+        self.assertEqual(len(old), 1)
+        self.assertTrue(next(url for url, q in calls if q["latitude"] == "10.00").endswith("/v1/archive"))
+        june2 = 1780358400.0      # 2026-06-02T00:00:00Z
+        self.assertEqual(len(w.outdoor("jetson-test-02", 0, june2 - 1)), 3, "only hours with a value")
+        calls.clear()
+        w.update(now=self.NOW)
+        self.assertIn(("10.00", "2026-06-01"), {(q["latitude"], q["start_date"]) for _, q in calls},
+                      "hours the archive did not have yet are asked for again")
+        self.assertTrue(status["ok"])
+
+    def test_fetch_errors_are_reported_not_raised(self):
+        from src.edge_hub.weather import Weather
+        import urllib.error
+
+        def broken(url):
+            raise urllib.error.URLError("no route to host")
+        w = Weather(self.store, fetch=broken)
+        w.set_site("jetson-test-01", "lab", 1.0, 2.0, "2026-10-15T13:00:00Z", "boss", now=self.NOW)
+        status = w.update(now=self.NOW)
+        self.assertFalse(status["ok"])
+        self.assertIn("no route to host", status["errors"][0])
+        self.assertFalse(json.loads((self.data_root / "weather_status.json").read_text())["ok"])
+
+    def test_web_routes_viewer_reads_operator_sets(self):
+        viewer, boss = self.login(), self.login("boss", "operator horse battery")
+        base = {"Content-Type": "application/json", "X-Hub-Request": "1"}
+        body = {"device": "jetson-test-02", "label": "web lab", "latitude": 37.4, "longitude": 127.1,
+                "valid_from_utc": "2026-10-16T00:00:00Z", "note": "from the web"}
+        status, _, reply = self.https("POST", "/api/v1/site", json.dumps(body), dict(base, Cookie=viewer))
+        self.assertEqual(status, 403)
+        status, _, _ = self.https("POST", "/api/v1/site", json.dumps(body), {"Cookie": boss, "Content-Type": "application/json"})
+        self.assertEqual(status, 403, "state change needs the same-origin header")
+        status, _, reply = self.https("POST", "/api/v1/site", json.dumps(body), dict(base, Cookie=boss))
+        self.assertEqual(status, 200, reply)
+        self.assertEqual((reply["set_by"], reply["label"]), ("boss", "web lab"))
+        status, _, reply = self.https("GET", "/api/v1/site?device=jetson-test-02", headers={"Cookie": viewer})
+        self.assertEqual(status, 200)
+        self.assertEqual(reply["history"][-1]["note"], "from the web")
+        _, _, overview = self.https("GET", "/api/v1/overview", headers={"Cookie": viewer})
+        dev = next(d for d in overview["devices"] if d["device"] == "jetson-test-02")
+        self.assertIn("site", dev)
+        status, _, reply = self.https("GET", "/api/v1/outdoor?device=jetson-test-02&since_s=86400", headers={"Cookie": viewer})
+        self.assertEqual((status, type(reply["hours"])), (200, list))
+
+    def test_cli_set_site_and_weather(self):
+        rc = hub_cli.main(["set-site", "--data-root", str(self.data_root), "--device-id", "jetson-test-02",
+                           "--label", "cli lab", "--lat", "37.4", "--lon", "127.1", "--valid-from", "2026-10-16T00:00:00Z"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(hub_cli.main(["set-site", "--data-root", str(self.data_root), "--device-id", "jetson-test-02",
+                                       "--label", "bad", "--lat", "99", "--lon", "0"]), 2)
+        with unittest.mock.patch("src.edge_hub.weather.http_get_json", side_effect=OSError("offline in test")):
+            self.assertEqual(hub_cli.main(["weather", "--data-root", str(self.data_root)]), 1)
+
+
 import unittest.mock  # noqa: E402
 
 if __name__ == "__main__":

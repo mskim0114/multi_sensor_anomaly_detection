@@ -9,6 +9,9 @@
   serve        --data-root DIR [--host 0.0.0.0] [--port 8443] [--tls-cert --tls-key | --plain-http]
   verify       --data-root DIR [--device ID]                     (re-hash committed units)
   reindex      --data-root DIR
+  backup       --data-root DIR --dest DIR                         (verified copy to another disk)
+  weather      --data-root DIR                                    (fetch missing hourly outdoor weather)
+  set-site     --data-root DIR --device-id ID --label TEXT --lat N --lon N [--valid-from ISO] [--note TEXT]
 """
 from __future__ import annotations
 
@@ -140,9 +143,16 @@ def main(argv=None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("init", "add-device", "revoke-device", "add-viewer", "set-role", "gen-cert", "serve", "verify",
-                 "reindex", "backup"):
+                 "reindex", "backup", "weather", "set-site"):
         p = sub.add_parser(name)
         p.add_argument("--data-root", required=True, type=Path)
+        if name == "set-site":
+            p.add_argument("--device-id", required=True)
+            p.add_argument("--label", required=True)
+            p.add_argument("--lat", required=True, type=float)
+            p.add_argument("--lon", required=True, type=float)
+            p.add_argument("--valid-from", default=None, help="ISO time with zone, e.g. 2026-10-15T00:00:00Z")
+            p.add_argument("--note", default="")
         if name == "revoke-device":
             p.add_argument("--device-id", required=True)
         if name == "add-device":
@@ -189,6 +199,22 @@ def main(argv=None) -> int:
     if args.command == "backup":
         from .backup import run_backup
         status = run_backup(args.data_root, args.dest)
+        print(json.dumps(status, indent=1))
+        return 0 if status["ok"] else 1
+    if args.command in ("weather", "set-site"):
+        from .weather import Weather
+        weather = Weather(Store(args.data_root))
+        if args.command == "set-site":
+            from .store import HubError
+            try:
+                site = weather.set_site(args.device_id, args.label, args.lat, args.lon, args.valid_from,
+                                        f"cli:{getpass.getuser()}", args.note)
+            except HubError as error:
+                print(error.message, file=sys.stderr)
+                return 2
+            print(json.dumps(site, indent=1, ensure_ascii=False))
+            return 0
+        status = weather.update()
         print(json.dumps(status, indent=1))
         return 0 if status["ok"] else 1
     if args.command == "reindex":
